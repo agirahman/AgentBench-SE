@@ -32,6 +32,7 @@ class GeminiProvider:
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     temperature=0.2,
+                    http_options=types.HttpOptions(timeout=60000),
                 ),
             )
 
