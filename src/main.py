@@ -1,21 +1,33 @@
 from providers.gemini_provider import GeminiProvider
+from strategies.direct_strategy import DirectStrategy
 from utils.logger import logger
+
+from models.issue import Issue
 
 
 def main():
-    logger.info("Starting AgentBench-SE...")
 
     provider = GeminiProvider()
 
-    if provider.health_check():
-        response = provider.generate(
-            "Perkenalkan dirimu dalam satu kalimat."
-        )
+    if not provider.health_check():
+        logger.error("Health check gagal. Hentikan program.")
+        return
 
-        print("\n===== RESPONSE =====")
-        print(response)
-    else:
-        logger.error("Gemini tidak dapat diakses.")
+    strategy = DirectStrategy(provider)
+
+    issue = Issue(
+        title="Login button is not clickable",
+        description="""
+The login button does not respond after
+the user enters username and password.
+"""
+    )
+
+    patch = strategy.run(issue)
+
+    print("=" * 60)
+    print(patch.content)
+    print("=" * 60)
 
 
 if __name__ == "__main__":
