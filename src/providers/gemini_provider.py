@@ -31,7 +31,7 @@ class GeminiProvider:
                 model=self.model,
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    temperature=0.2,
+                    temperature=Config.TEMPERATURE,
                     http_options=types.HttpOptions(timeout=60000),
                 ),
             )

@@ -31,4 +31,5 @@ class DirectStrategy:
 
         response = self.provider.generate(prompt)
 
-        return Patch(content=response)
+        # return Patch(content=response)
+        return Patch(response=response)
