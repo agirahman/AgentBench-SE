@@ -1,18 +1,22 @@
-from config import Config
+from providers.gemini_provider import GeminiProvider
 from utils.logger import logger
 
 
 def main():
+    logger.info("Starting AgentBench-SE...")
 
-    logger.info("AgentBench-SE started")
+    provider = GeminiProvider()
 
-    logger.info(f"Model : {Config.GEMINI_MODEL}")
+    if provider.health_check():
+        response = provider.generate(
+            "Perkenalkan dirimu dalam satu kalimat."
+        )
 
-    if Config.GEMINI_API_KEY:
-        logger.success("Gemini API Key Loaded")
+        print("\n===== RESPONSE =====")
+        print(response)
     else:
-        logger.error("Gemini API Key Not Found")
+        logger.error("Gemini tidak dapat diakses.")
 
 
 if __name__ == "__main__":
-    main()  
+    main()
