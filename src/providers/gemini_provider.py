@@ -6,11 +6,6 @@ from utils.logger import logger
 
 
 class GeminiProvider:
-    """
-    Wrapper sederhana untuk Google Gemini.
-    Seluruh strategi (Direct, Planner, Reviewer)
-    akan menggunakan provider ini.
-    """
 
     def __init__(self):
         if not Config.GEMINI_API_KEY:
@@ -18,14 +13,11 @@ class GeminiProvider:
 
         self.client = genai.Client(api_key=Config.GEMINI_API_KEY)
         self.model = Config.GEMINI_MODEL
+        self.last_usage = None
 
         logger.info(f"Gemini model : {self.model}")
 
     def generate(self, prompt: str) -> str:
-        """
-        Mengirim prompt ke Gemini dan mengembalikan response text.
-        """
-
         try:
             response = self.client.models.generate_content(
                 model=self.model,
@@ -36,22 +28,25 @@ class GeminiProvider:
                 ),
             )
 
+            meta = response.usage_metadata
+            self.last_usage = {
+                "prompt_tokens": meta.prompt_token_count,
+                "completion_tokens": meta.candidates_token_count,
+                "total_tokens": meta.total_token_count,
+            }
+
             return response.text
 
         except Exception as e:
-            logger.error(f"Generate Error : {e}")
+            logger.error(f"Gemini Generate Error: {e}")
             raise
 
     def health_check(self) -> bool:
-        """
-        Mengecek apakah Gemini API dapat diakses.
-        """
-
         try:
             self.generate("Reply with only: OK")
             logger.success("Gemini Health Check Passed")
             return True
 
         except Exception as e:
-            logger.error(f"Health Check Failed : {e}")
+            logger.error(f"Gemini Health Check Failed: {e}")
             return False

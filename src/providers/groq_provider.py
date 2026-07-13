@@ -14,6 +14,7 @@ class GroqProvider:
             base_url="https://api.groq.com/openai/v1",
         )
         self.model = Config.GROQ_MODEL
+        self.last_usage = None
 
         logger.info(f"Groq model : {self.model}")
 
@@ -28,10 +29,16 @@ class GroqProvider:
                 timeout=60,
             )
 
+            self.last_usage = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens,
+            }
+
             return response.choices[0].message.content
 
         except Exception as e:
-            logger.error(f"Generate Error : {e}")
+            logger.error(f"Groq Generate Error: {e}")
             raise
 
     def health_check(self) -> bool:
@@ -41,5 +48,5 @@ class GroqProvider:
             return True
 
         except Exception as e:
-            logger.error(f"Health Check Failed : {e}")
+            logger.error(f"Groq Health Check Failed: {e}")
             return False

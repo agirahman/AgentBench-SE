@@ -8,7 +8,7 @@ from models.issue import Issue
 
 def main():
 
-    provider = GroqProvider()
+    provider = GeminiProvider()
 
     if not provider.health_check():
         logger.error("Health check gagal. Hentikan program.")
