@@ -1,11 +1,30 @@
-.venv/
-.env
+# Python
 __pycache__/
 *.pyc
-logs/
-results/
-datasets/
-*.log
+*.pyo
+*.egg-info/
+dist/
+build/
 .pytest_cache/
-docs/
-sdd.md
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+
+# Environment variables (contains API keys)
+.env
+
+# Logs
+logs/
+*.log
+
+# Experiment results (reproducible)
+results/
+
+# Dataset cache (HuggingFace)
+datasets/
+
+# OS junk
+.DS_Store
+Thumbs.db
