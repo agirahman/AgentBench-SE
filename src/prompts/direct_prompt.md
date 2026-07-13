@@ -1,15 +1,22 @@
-You are an expert software engineer.
+You are an expert Python software engineer.
 
-Your task is to analyze the following software bug and propose a fix.
+Your task is to fix the following bug.
 
-Return your answer using the following format:
+{{issue}}
 
+Analyze the root cause and provide a fix.
+
+Output format:
 ## Root Cause
-...
+<explanation>
 
 ## Fix Strategy
-...
+<approach>
 
-## Suggested Patch
-```language
+## Patch
+```diff
+--- a/file.py
++++ b/file.py
+@@ ... @@
 ...
+```

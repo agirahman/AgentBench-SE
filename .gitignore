@@ -7,3 +7,5 @@ results/
 datasets/
 *.log
 .pytest_cache/
+docs/
+sdd.md
