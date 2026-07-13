@@ -1,4 +1,5 @@
 google-genai
+openai
 python-dotenv
 PyYAML
 loguru

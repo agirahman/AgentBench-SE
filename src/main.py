@@ -1,3 +1,4 @@
+from providers.groq_provider import GroqProvider
 from providers.gemini_provider import GeminiProvider
 from strategies.direct_strategy import DirectStrategy
 from utils.logger import logger
@@ -7,7 +8,7 @@ from models.issue import Issue
 
 def main():
 
-    provider = GeminiProvider()
+    provider = GroqProvider()
 
     if not provider.health_check():
         logger.error("Health check gagal. Hentikan program.")
@@ -26,7 +27,8 @@ the user enters username and password.
     patch = strategy.run(issue)
 
     print("=" * 60)
-    print(patch.content)
+    # print(patch.content)
+    print(patch.response)
     print("=" * 60)
 
 

@@ -8,7 +8,13 @@ class Config:
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     GEMINI_MODEL = os.getenv(
         "GEMINI_MODEL",
-        "gemini-3-flash-preview",
+        "gemini-2.0-flash-lite",
+    )
+
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+    GROQ_MODEL = os.getenv(
+        "GROQ_MODEL",
+        "llama-3.3-70b-versatile",
     )
     
     TEMPERATURE = float(os.getenv("TEMPERATURE", 0.2))
