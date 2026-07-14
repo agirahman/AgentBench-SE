@@ -1,4 +1,5 @@
 import time
+from datetime import datetime, timezone
 
 from models.issue import Issue
 from models.patch import Patch
@@ -31,4 +32,5 @@ class DirectStrategy:
             total_tokens=usage.get("total_tokens", 0),
             patch_preview=response[:100],
         )
+        result.timestamp = datetime.now(timezone.utc).isoformat()
         return patch, result
