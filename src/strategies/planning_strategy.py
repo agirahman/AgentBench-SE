@@ -1,4 +1,5 @@
 import time
+from datetime import datetime, timezone
 
 from models.issue import Issue
 from models.patch import Patch
@@ -58,4 +59,5 @@ class PlanningStrategy:
             total_tokens=total_tokens,
             patch_preview=response[:100],
         )
+        result.timestamp = datetime.now(timezone.utc).isoformat()
         return patch, result

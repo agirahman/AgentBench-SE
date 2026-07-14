@@ -28,3 +28,9 @@ datasets/
 # OS junk
 .DS_Store
 Thumbs.db
+
+# Graphify
+graphify-out/
+
+# doc
+docs/

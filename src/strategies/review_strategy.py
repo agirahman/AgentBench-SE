@@ -1,4 +1,5 @@
 import time
+from datetime import datetime, timezone
 
 from models.issue import Issue
 from models.patch import Patch
@@ -82,11 +83,12 @@ class ReviewStrategy:
         result = ExperimentResult(
             instance_id=issue.instance_id,
             strategy="review",
-            execution_time=total_time,
+            execution_time=total_time, 
             inference_count=inferences,
             prompt_tokens=total_prompt,
             completion_tokens=total_completion,
             total_tokens=total_tokens,
             patch_preview=final_patch[:100],
         )
+        result.timestamp = datetime.now(timezone.utc).isoformat()
         return patch, result

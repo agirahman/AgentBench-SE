@@ -15,6 +15,7 @@ def run_experiments(
     issues: list[Issue],
     strategies: dict[str, object],
     output_dir: str = "results",
+    provider_name: str = "unknown",
 ) -> pd.DataFrame:
     all_results: list[ExperimentResult] = []
     all_predictions: list[dict] = []
@@ -34,6 +35,7 @@ def run_experiments(
                 patch, result = strategy.run(issue)
                 elapsed = time.time() - t0
                 result.execution_time = elapsed
+                result.model = provider_name
                 all_results.append(result)
 
                 diff = extract_diff(patch.response)
@@ -46,11 +48,13 @@ def run_experiments(
                     patch.response, encoding="utf-8"
                 )
                 logger.success(f"  OK ({elapsed:.1f}s, {result.total_tokens} tokens)")
+                time.sleep(1.5)
             except Exception as e:
                 logger.error(f"  FAILED: {e}")
                 all_results.append(ExperimentResult(
                     instance_id=issue.instance_id,
                     strategy=name,
+                    model=provider_name,
                     execution_time=0,
                     inference_count=0,
                     prompt_tokens=0,
@@ -58,6 +62,7 @@ def run_experiments(
                     total_tokens=0,
                     patch_preview="",
                     error=str(e),
+                    timestamp="",
                 ))
 
     df = pd.DataFrame([asdict(r) for r in all_results])

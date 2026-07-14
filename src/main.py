@@ -60,7 +60,7 @@ def main():
         "review": ReviewStrategy(provider),
     }
 
-    df = run_experiments(issues, strategies, args.output)
+    df = run_experiments(issues, strategies, args.output, provider_name=args.provider)
 
     summary = df.groupby("strategy")[
         ["execution_time", "inference_count", "total_tokens"]
