@@ -2,6 +2,13 @@ import sys
 import argparse
 import pandas as pd
 
+from evaluation.statistics import (
+    compute_summary,
+    compute_success_rate,
+    compute_avg_time_per_inference,
+    compute_cost_per_success,
+)
+
 
 DEFAULT_CSV = "results/csv/experiment_results.csv"
 
@@ -17,12 +24,17 @@ def cmd_list(df: pd.DataFrame):
 
 
 def cmd_summary(df: pd.DataFrame):
-    numeric = [
-        "execution_time", "inference_count", "prompt_tokens",
-        "completion_tokens", "total_tokens",
-    ]
-    summary = df.groupby("strategy")[numeric].agg(["mean", "min", "max"])
+    summary = compute_summary(df)
+    print("=== Summary (Mean/Median/Std) ===")
     print(summary.to_string())
+    
+    sr = compute_success_rate(df)
+    print("\n=== Success Rate ===")
+    print(sr.to_string())
+    
+    ati = compute_avg_time_per_inference(df)
+    print("\n=== Avg Time per Inference ===")
+    print(ati.to_string())
 
 
 def cmd_compare(df: pd.DataFrame):
@@ -56,6 +68,12 @@ def cmd_patch(df: pd.DataFrame, patch_id: str, strategy: str | None):
         print()
 
 
+def cmd_cost_per_success(df: pd.DataFrame):
+    cps = compute_cost_per_success(df)
+    print("=== Cost per Successful Fix ===")
+    print(cps.to_string())
+
+
 def main():
     raw = sys.argv[1:]
     csv_path = DEFAULT_CSV
@@ -81,6 +99,8 @@ def main():
 
     sub.add_parser("errors", help="List experiments with errors")
 
+    sub.add_parser("cost_per_success", help="Show cost per successful fix per strategy")
+
     patch_p = sub.add_parser("patch", help="Show patch preview for an issue")
     patch_p.add_argument("patch_id", help="Instance ID (e.g. django__django-10914)")
     patch_p.add_argument("--strategy", default=None, help="Filter by strategy")
@@ -98,6 +118,13 @@ def main():
         cmd_errors(df)
     elif args.command == "patch":
         cmd_patch(df, args.patch_id, args.strategy)
+    elif args.command == "cost_per_success":
+        cmd_cost_per_success(df)
+
+
+if __name__ == "__main__":
+    main()
+
 
 
 if __name__ == "__main__":

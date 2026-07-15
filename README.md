@@ -108,13 +108,14 @@ Buat file `.env` di root proyek:
 
 ```env
 GEMINI_API_KEY=your_gemini_key
-GEMINI_MODEL=gemini-2.0-flash-lite
+GEMINI_MODEL=gemini-3-flash-preview
 
 GROQ_API_KEY=your_groq_key
 GROQ_MODEL=llama-3.3-70b-versatile
 
 TEMPERATURE=0.2
 MAX_RETRIES=3
+USD_IDR_RATE=16500.0
 ```
 
 > [!NOTE]

@@ -1,37 +1,82 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from .inference import InferenceRun
+from .inference import InferenceRun, InferenceResult
+
+
+@dataclass
+class ExecutionResult:
+    """Eksekusi strategi: delegasi ke ``InferenceRun`` untuk aggregate metrics."""
+
+    run: InferenceRun
+
+    @property
+    def inference_count(self) -> int:
+        return len(self.run.inferences)
+
+    @property
+    def execution_time(self) -> float:
+        return self.run.total_time
+
+    @property
+    def prompt_tokens(self) -> int:
+        return self.run.total_prompt_tokens
+
+    @property
+    def completion_tokens(self) -> int:
+        return self.run.total_completion_tokens
+
+    @property
+    def total_tokens(self) -> int:
+        return self.run.total_tokens
+
+    @property
+    def patch(self) -> str:
+        return self.run.patch
+
+    @property
+    def patch_preview(self) -> str:
+        return self.run.patch[:100] if self.run.patch else ""
+
+    @property
+    def inferences(self) -> list[InferenceResult]:
+        return self.run.inferences
+
+
+@dataclass
+class CostSummary:
+    """Agregasi biaya (USD + IDR) untuk satu eksekusi."""
+
+    input_cost_usd: float
+    output_cost_usd: float
+    total_cost_usd: float
+    total_cost_idr: float
+    pricing_version: str = ""
+
+
+@dataclass
+class EvaluationResult:
+    """Hasil evaluasi satu eksekusi: success/error/etc."""
+
+    success: bool = True
+    error: str = ""
+    timestamp: str = ""
+
+    def __post_init__(self):
+        if not self.timestamp:
+            self.timestamp = datetime.now(timezone.utc).isoformat()
 
 
 @dataclass
 class ExperimentResult:
-    """Hasil eksperimen untuk satu issue × satu strategi.
+    """Top-level result untuk satu issue × strategi.
 
-    Dibangun dari ``InferenceRun`` yang berisi semua langkah inference
-    (planner, executor, reviewer) beserta final patch.
-    Field komputasional (execution_time, inference_count, tokens)
-    otomatis terisi dari ``run`` via ``__post_init__``.
+    Pure nested references — no flat duplicate fields.
+    CSV flattening handled by exporter.
     """
 
     instance_id: str
     strategy: str
     model: str
-    run: InferenceRun
-    execution_time: float = 0.0
-    inference_count: int = 0
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
-    patch_preview: str = ""
-    error: str = ""
-    timestamp: str = ""
-
-    def __post_init__(self):
-        if self.run and not self.timestamp:
-            self.timestamp = datetime.now(timezone.utc).isoformat()
-            self.execution_time = self.run.total_time
-            self.inference_count = len(self.run.inferences)
-            self.prompt_tokens = self.run.total_prompt_tokens
-            self.completion_tokens = self.run.total_completion_tokens
-            self.total_tokens = self.run.total_tokens
-            self.patch_preview = self.run.patch[:100]
+    execution: ExecutionResult
+    cost: CostSummary
+    evaluation: EvaluationResult
