@@ -1,4 +1,6 @@
 import argparse
+from datetime import datetime, timezone
+from pathlib import Path
 
 from providers.gemini_provider import GeminiProvider
 from providers.groq_provider import GroqProvider
@@ -8,6 +10,7 @@ from strategies.review_strategy import ReviewStrategy
 from experiments.runner import run_experiments
 from dataset_loader import select_issues
 from utils.logger import logger
+from config import Config
 
 
 def parse_args():
@@ -32,9 +35,69 @@ def parse_args():
         "--provider",
         default="groq",
         choices=["gemini", "groq"],
-        help="Provider AI (default: gemini)",
+        help="Provider AI (default: groq)",
+    )
+    parser.add_argument(
+        "--rate-limit",
+        type=float,
+        default=1.5,
+        help="Delay antar strategy run dalam detik (default: 1.5)",
     )
     return parser.parse_args()
+
+
+def _save_experiment_config(
+    output_dir: str,
+    args,
+    issue_count: int,
+    strategy_names: list[str],
+) -> None:
+    """Simpan experiment.yaml untuk reproducibility (Kritik #8)."""
+    config = {
+        "experiment": {
+            "name": "AgentBench-SE Experiment",
+            "date": datetime.now(timezone.utc).isoformat(),
+            "researcher": "Agi Rahman Setiadi",
+            "institution": "Universitas Negeri Jakarta",
+        },
+        "provider": {
+            "name": args.provider,
+            "model": Config.GEMINI_MODEL if args.provider == "gemini" else Config.GROQ_MODEL,
+            "temperature": Config.TEMPERATURE,
+            "max_retries": Config.MAX_RETRIES,
+        },
+        "dataset": {
+            "name": "princeton-nlp/SWE-bench_Lite",
+            "filter": args.repo,
+            "n_issues": issue_count,
+        },
+        "strategies": strategy_names,
+        "rate_limiting": {
+            "enabled": args.rate_limit > 0,
+            "interval_seconds": args.rate_limit,
+        },
+    }
+    Path(f"{output_dir}/experiment.yaml").write_text(
+        _to_yaml(config), encoding="utf-8"
+    )
+    logger.info(f"Experiment config saved: {output_dir}/experiment.yaml")
+
+
+def _to_yaml(data, indent: int = 0) -> str:
+    """Serializer YAML sederhana (tanpa dependency)."""
+    lines = []
+    pad = "  " * indent
+    for key, value in data.items():
+        if isinstance(value, dict):
+            lines.append(f"{pad}{key}:")
+            lines.append(_to_yaml(value, indent + 1))
+        elif isinstance(value, list):
+            lines.append(f"{pad}{key}:")
+            for item in value:
+                lines.append(f"{pad}  - {item}")
+        else:
+            lines.append(f"{pad}{key}: {value}")
+    return "\n".join(lines) + "\n"
 
 
 def main():
@@ -59,8 +122,18 @@ def main():
         "planning": PlanningStrategy(provider),
         "review": ReviewStrategy(provider),
     }
+    strategy_names = list(strategies.keys())
 
-    df = run_experiments(issues, strategies, args.output, provider_name=args.provider)
+    Path(args.output).mkdir(parents=True, exist_ok=True)
+    _save_experiment_config(args.output, args, len(issues), strategy_names)
+
+    df = run_experiments(
+        issues,
+        strategies,
+        args.output,
+        provider_name=args.provider,
+        rate_limit_seconds=args.rate_limit,
+    )
 
     summary = df.groupby("strategy")[
         ["execution_time", "inference_count", "total_tokens"]

@@ -6,17 +6,9 @@ Your task is to fix the following bug.
 
 Analyze the root cause and provide a fix.
 
-Output format:
-## Root Cause
-<explanation>
-
-## Fix Strategy
-<approach>
-
-## Patch
-```diff
---- a/file.py
-+++ b/file.py
-@@ ... @@
-...
-```
+Output ONLY valid JSON in this exact format (no markdown, no extra text):
+{
+  "root_cause": "<one paragraph explanation>",
+  "fix_strategy": "<one paragraph approach>",
+  "patch": "diff --git a/file.py b/file.py\n--- a/file.py\n+++ b/file.py\n@@ ... @@\n ..."
+}

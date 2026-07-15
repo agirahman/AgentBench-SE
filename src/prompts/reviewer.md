@@ -9,21 +9,10 @@ Plan:
 Proposed Patch:
 {{patch}}
 
-Review the patch and answer:
-1. Does it correctly fix the described bug?
-2. Does it follow the analysis plan?
-3. Are there any edge cases or regressions?
-
-Output:
-
-## Review Summary
-<evaluation>
-
-## Issues Found
-<list of issues or "None">
-
-## Improvement Suggestions
-<specific suggestions if any>
-
-## Verdict
-<APPROVED or NEEDS_REVISION>
+Review the patch and answer. Output ONLY valid JSON in this exact format:
+{
+  "review_summary": "<evaluation>",
+  "issues_found": ["<issue or 'None'>"],
+  "improvement_suggestions": ["<suggestion or 'None'>"],
+  "verdict": "APPROVED|NEEDS_REVISION"
+}
