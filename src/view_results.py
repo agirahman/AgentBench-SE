@@ -2,6 +2,13 @@ import sys
 import argparse
 import pandas as pd
 
+from evaluation.statistics import (
+    compute_summary,
+    compute_success_rate,
+    compute_avg_time_per_inference,
+    compute_cost_per_success,
+)
+
 
 DEFAULT_CSV = "results/csv/experiment_results.csv"
 
@@ -17,17 +24,17 @@ def cmd_list(df: pd.DataFrame):
 
 
 def cmd_summary(df: pd.DataFrame):
-    numeric = [
-        "execution_time", "inference_count", "prompt_tokens",
-        "completion_tokens", "total_tokens", "cost_usd", "cost_idr",
-    ]
-    summary = df.groupby("strategy")[numeric].agg(["mean", "min", "max"])
+    summary = compute_summary(df)
+    print("=== Summary (Mean/Median/Std) ===")
     print(summary.to_string())
     
-    success = (df.assign(success=df["error"].str.len() == 0)
-                 .groupby("strategy")["success"].mean())
+    sr = compute_success_rate(df)
     print("\n=== Success Rate ===")
-    print(success.to_string())
+    print(sr.to_string())
+    
+    ati = compute_avg_time_per_inference(df)
+    print("\n=== Avg Time per Inference ===")
+    print(ati.to_string())
 
 
 def cmd_compare(df: pd.DataFrame):
@@ -62,20 +69,9 @@ def cmd_patch(df: pd.DataFrame, patch_id: str, strategy: str | None):
 
 
 def cmd_cost_per_success(df: pd.DataFrame):
-    per = df.groupby("strategy").agg(
-        total_cost_usd=("cost_usd", "sum"),
-        total_cost_idr=("cost_idr", "sum"),
-        count=("instance_id", "count"),
-    )
-    success_count = (df.assign(success=df["error"].str.len() == 0)
-                       .groupby("strategy")["success"].sum())
-    per["success_count"] = success_count
-    per["success_rate"] = per["success_count"] / per["count"]
-    safe = per["success_count"].replace(0, pd.NA)
-    per["cost_usd_per_success"] = per["total_cost_usd"] / safe
-    per["cost_idr_per_success"] = per["total_cost_idr"] / safe
+    cps = compute_cost_per_success(df)
     print("=== Cost per Successful Fix ===")
-    print(per.to_string())
+    print(cps.to_string())
 
 
 def main():
@@ -124,6 +120,11 @@ def main():
         cmd_patch(df, args.patch_id, args.strategy)
     elif args.command == "cost_per_success":
         cmd_cost_per_success(df)
+
+
+if __name__ == "__main__":
+    main()
+
 
 
 if __name__ == "__main__":
