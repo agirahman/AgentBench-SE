@@ -51,11 +51,13 @@ def _save_experiment_config(
     args,
     issue_count: int,
     strategy_names: list[str],
+    experiment_id: str = "",
 ) -> None:
     """Simpan experiment.yaml untuk reproducibility (Kritik #8)."""
     config = {
         "experiment": {
             "name": "AgentBench-SE Experiment",
+            "id": experiment_id,
             "date": datetime.now(timezone.utc).isoformat(),
             "researcher": "Agi Rahman Setiadi",
             "institution": "Universitas Negeri Jakarta",
@@ -125,18 +127,23 @@ def main():
     strategy_names = list(strategies.keys())
 
     Path(args.output).mkdir(parents=True, exist_ok=True)
-    _save_experiment_config(args.output, args, len(issues), strategy_names)
 
-    df = run_experiments(
+    df, exp_id = run_experiments(
         issues,
         strategies,
-        args.output,
+        base_dir=args.output,
         provider_name=args.provider,
         rate_limit_seconds=args.rate_limit,
     )
 
+    # Save experiment.yaml to per-experiment folder
+    exp_dir = f"{args.output}/{exp_id}"
+    _save_experiment_config(exp_dir, args, len(issues), strategy_names, exp_id)
+
+    print(f"\n=== Experiment {exp_id} completed ===")
+    print(f"Output directory: {exp_dir}/")
     summary = df.groupby("strategy")[
-        ["execution_time", "inference_count", "total_tokens"]
+        ["execution_time", "inference_count", "total_tokens", "cost_usd"]
     ].mean()
     print("\n=== SUMMARY ===")
     print(summary.to_string())
