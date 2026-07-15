@@ -5,6 +5,7 @@ from openai import OpenAI
 from config import Config
 from utils.logger import logger
 from models.inference import InferenceResult
+from evaluation.retry import with_retry
 
 
 class GroqProvider:
@@ -20,6 +21,7 @@ class GroqProvider:
 
         logger.info(f"Groq model : {self.model}")
 
+    @with_retry()
     def generate(self, prompt: str, role: str = "") -> InferenceResult:
         t0 = time.perf_counter()
         try:
