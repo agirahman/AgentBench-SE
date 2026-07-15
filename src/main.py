@@ -33,9 +33,9 @@ def parse_args():
     )
     parser.add_argument(
         "--provider",
-        default="groq",
+        default="gemini",
         choices=["gemini", "groq"],
-        help="Provider AI (default: groq)",
+        help="Provider AI (default: gemini)",
     )
     parser.add_argument(
         "--rate-limit",

@@ -9,6 +9,7 @@ from models.issue import Issue
 from models.result import ExperimentResult
 from models.inference import InferenceRun
 from experiments.swebench_adapter import extract_diff
+from evaluation.cost import CostCalculator
 from utils.logger import logger
 
 
@@ -60,6 +61,17 @@ def run_experiments(
                 elapsed = time.time() - t0
                 result.execution_time = elapsed
                 result.model = provider_name
+                # Hitung biaya per inference lalu agregasi ke ExperimentResult.
+                # Cost TIDAK disimpan di InferenceResult (raw SDK metadata),
+                # murni hasil perhitungan CostCalculator.
+                calculator = CostCalculator()
+                for inf in result.run.inferences:
+                    cost = calculator.calculate(inf)
+                    result.input_cost_usd += cost.input_cost_usd
+                    result.output_cost_usd += cost.output_cost_usd
+                    result.cost_usd += cost.total_cost_usd
+                    result.cost_idr += cost.total_cost_idr
+
                 all_results.append(result)
 
                 diff = extract_diff(patch.response)

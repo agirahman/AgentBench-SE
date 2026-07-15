@@ -22,6 +22,10 @@ class ExperimentResult:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    input_cost_usd: float = 0.0
+    output_cost_usd: float = 0.0
+    cost_usd: float = 0.0
+    cost_idr: float = 0.0
     patch_preview: str = ""
     error: str = ""
     timestamp: str = ""
@@ -35,3 +39,4 @@ class ExperimentResult:
             self.completion_tokens = self.run.total_completion_tokens
             self.total_tokens = self.run.total_tokens
             self.patch_preview = self.run.patch[:100]
+

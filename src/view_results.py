@@ -19,10 +19,15 @@ def cmd_list(df: pd.DataFrame):
 def cmd_summary(df: pd.DataFrame):
     numeric = [
         "execution_time", "inference_count", "prompt_tokens",
-        "completion_tokens", "total_tokens",
+        "completion_tokens", "total_tokens", "cost_usd", "cost_idr",
     ]
     summary = df.groupby("strategy")[numeric].agg(["mean", "min", "max"])
     print(summary.to_string())
+    
+    success = (df.assign(success=df["error"].str.len() == 0)
+                 .groupby("strategy")["success"].mean())
+    print("\n=== Success Rate ===")
+    print(success.to_string())
 
 
 def cmd_compare(df: pd.DataFrame):
@@ -56,6 +61,23 @@ def cmd_patch(df: pd.DataFrame, patch_id: str, strategy: str | None):
         print()
 
 
+def cmd_cost_per_success(df: pd.DataFrame):
+    per = df.groupby("strategy").agg(
+        total_cost_usd=("cost_usd", "sum"),
+        total_cost_idr=("cost_idr", "sum"),
+        count=("instance_id", "count"),
+    )
+    success_count = (df.assign(success=df["error"].str.len() == 0)
+                       .groupby("strategy")["success"].sum())
+    per["success_count"] = success_count
+    per["success_rate"] = per["success_count"] / per["count"]
+    safe = per["success_count"].replace(0, pd.NA)
+    per["cost_usd_per_success"] = per["total_cost_usd"] / safe
+    per["cost_idr_per_success"] = per["total_cost_idr"] / safe
+    print("=== Cost per Successful Fix ===")
+    print(per.to_string())
+
+
 def main():
     raw = sys.argv[1:]
     csv_path = DEFAULT_CSV
@@ -81,6 +103,8 @@ def main():
 
     sub.add_parser("errors", help="List experiments with errors")
 
+    sub.add_parser("cost_per_success", help="Show cost per successful fix per strategy")
+
     patch_p = sub.add_parser("patch", help="Show patch preview for an issue")
     patch_p.add_argument("patch_id", help="Instance ID (e.g. django__django-10914)")
     patch_p.add_argument("--strategy", default=None, help="Filter by strategy")
@@ -98,6 +122,8 @@ def main():
         cmd_errors(df)
     elif args.command == "patch":
         cmd_patch(df, args.patch_id, args.strategy)
+    elif args.command == "cost_per_success":
+        cmd_cost_per_success(df)
 
 
 if __name__ == "__main__":
