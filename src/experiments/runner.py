@@ -1,29 +1,32 @@
 import json
 import time
-from dataclasses import asdict
 from pathlib import Path
 
 import pandas as pd
 
 from models.issue import Issue
-from models.result import ExperimentResult
+from models.result import (
+    ExperimentResult,
+    ExecutionResult,
+    CostSummary,
+    EvaluationResult,
+)
 from models.inference import InferenceRun
+from experiments.csv_exporter import flatten_for_csv
 from experiments.swebench_adapter import extract_diff
-from evaluation.cost import CostCalculator
 from utils.logger import logger
 
 
 def _save_artifacts(
     output_dir: str,
     instance_id: str,
-    run: InferenceRun,
+    inferences,
     final_patch: str,
 ) -> None:
-    """Simpan artifact per-agent ke results/artifacts/<instance_id>/."""
     art_dir = Path(f"{output_dir}/artifacts/{instance_id}")
     art_dir.mkdir(parents=True, exist_ok=True)
 
-    for inf in run.inferences:
+    for inf in inferences:
         if inf.role == "planner":
             (art_dir / "planner.md").write_text(inf.response, encoding="utf-8")
         elif inf.role == "executor":
@@ -59,19 +62,9 @@ def run_experiments(
                 t0 = time.time()
                 patch, result = strategy.run(issue)
                 elapsed = time.time() - t0
-                result.execution_time = elapsed
-                result.model = provider_name
-                # Hitung biaya per inference lalu agregasi ke ExperimentResult.
-                # Cost TIDAK disimpan di InferenceResult (raw SDK metadata),
-                # murni hasil perhitungan CostCalculator.
-                calculator = CostCalculator()
-                for inf in result.run.inferences:
-                    cost = calculator.calculate(inf)
-                    result.input_cost_usd += cost.input_cost_usd
-                    result.output_cost_usd += cost.output_cost_usd
-                    result.cost_usd += cost.total_cost_usd
-                    result.cost_idr += cost.total_cost_idr
-
+                result.evaluation.timestamp = time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                )
                 all_results.append(result)
 
                 diff = extract_diff(patch.response)
@@ -80,17 +73,17 @@ def run_experiments(
                     "model_patch": diff,
                 })
 
-                # Simpan patch final (format lama — preview 1 file per strategi)
                 Path(f"{output_dir}/patches/{issue.instance_id}_{name}.txt").write_text(
                     patch.response, encoding="utf-8"
                 )
-
-                # Simpan artifact per-agent (Kritik #6, #7)
-                _save_artifacts(output_dir, issue.instance_id, result.run, patch.response)
+                _save_artifacts(
+                    output_dir, issue.instance_id, result.execution.inferences, patch.response
+                )
 
                 logger.success(
-                    f"  OK ({elapsed:.1f}s, {result.total_tokens} tokens, "
-                    f"{result.inference_count} inferences)"
+                    f"  OK ({elapsed:.1f}s, {result.execution.total_tokens} tokens, "
+                    f"{result.execution.inference_count} inferences, "
+                    f"${result.cost.total_cost_usd:.6f})"
                 )
 
                 if rate_limit_seconds > 0:
@@ -99,22 +92,25 @@ def run_experiments(
             except Exception as e:
                 logger.error(f"  FAILED: {e}")
                 empty_run = InferenceRun(patch="", inferences=[])
+                empty_exec = ExecutionResult(run=empty_run)
+                empty_cost = CostSummary(
+                    input_cost_usd=0.0,
+                    output_cost_usd=0.0,
+                    total_cost_usd=0.0,
+                    total_cost_idr=0.0,
+                    pricing_version="",
+                )
+                empty_eval = EvaluationResult(success=False, error=str(e))
                 all_results.append(ExperimentResult(
                     instance_id=issue.instance_id,
                     strategy=name,
                     model=provider_name,
-                    run=empty_run,
-                    execution_time=0.0,
-                    inference_count=0,
-                    prompt_tokens=0,
-                    completion_tokens=0,
-                    total_tokens=0,
-                    patch_preview="",
-                    error=str(e),
+                    execution=empty_exec,
+                    cost=empty_cost,
+                    evaluation=empty_eval,
                 ))
 
-    # Ekspor CSV — exclude nested ``run`` field (artefak disimpan terpisah di artifacts/)
-    rows = [{k: v for k, v in asdict(r).items() if k != "run"} for r in all_results]
+    rows = [flatten_for_csv(r) for r in all_results]
     df = pd.DataFrame(rows)
     csv_path = f"{output_dir}/csv/experiment_results.csv"
     df.to_csv(csv_path, index=False)
