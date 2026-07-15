@@ -1,7 +1,10 @@
+import time
+
 from openai import OpenAI
 
 from config import Config
 from utils.logger import logger
+from models.inference import InferenceResult
 
 
 class GroqProvider:
@@ -14,28 +17,35 @@ class GroqProvider:
             base_url="https://api.groq.com/openai/v1",
         )
         self.model = Config.GROQ_MODEL
-        self.last_usage = None
 
         logger.info(f"Groq model : {self.model}")
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, role: str = "") -> InferenceResult:
+        t0 = time.perf_counter()
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=[
-                    {"role": "user", "content": prompt},
-                ],
+                messages=[{"role": "user", "content": prompt}],
                 temperature=Config.TEMPERATURE,
                 timeout=60,
             )
 
-            self.last_usage = {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
-            }
+            elapsed = time.perf_counter() - t0
+            usage = response.usage
+            finish = response.choices[0].finish_reason or ""
 
-            return response.choices[0].message.content
+            return InferenceResult(
+                role=role,
+                response=response.choices[0].message.content,
+                usage={
+                    "prompt_tokens": usage.prompt_tokens,
+                    "completion_tokens": usage.completion_tokens,
+                    "total_tokens": usage.total_tokens,
+                },
+                execution_time=elapsed,
+                finish_reason=finish,
+                model=self.model,
+            )
 
         except Exception as e:
             logger.error(f"Groq Generate Error: {e}")

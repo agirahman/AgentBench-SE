@@ -1,9 +1,7 @@
-import time
-from datetime import datetime, timezone
-
 from models.issue import Issue
 from models.patch import Patch
 from models.result import ExperimentResult
+from models.inference import InferenceRun
 from utils.prompt_loader import load_prompt
 
 
@@ -13,24 +11,14 @@ class DirectStrategy:
         self.provider = provider
 
     def run(self, issue: Issue) -> tuple[Patch, ExperimentResult]:
-        t0 = time.perf_counter()
-
         prompt = load_prompt("direct_prompt.md").replace("{{issue}}", issue.to_prompt())
-        response = self.provider.generate(prompt)
+        inf = self.provider.generate(prompt, role="executor")
 
-        elapsed = time.perf_counter() - t0
-        usage = self.provider.last_usage or {}
-
-        patch = Patch(response=response)
+        run = InferenceRun(patch=inf.response, inferences=[inf])
         result = ExperimentResult(
             instance_id=issue.instance_id,
             strategy="direct",
-            execution_time=elapsed,
-            inference_count=1,
-            prompt_tokens=usage.get("prompt_tokens", 0),
-            completion_tokens=usage.get("completion_tokens", 0),
-            total_tokens=usage.get("total_tokens", 0),
-            patch_preview=response[:100],
+            model=self.provider.model,
+            run=run,
         )
-        result.timestamp = datetime.now(timezone.utc).isoformat()
-        return patch, result
+        return Patch(response=inf.response), result

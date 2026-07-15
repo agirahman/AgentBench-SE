@@ -1,10 +1,23 @@
-import time
-from datetime import datetime, timezone
+import json
 
 from models.issue import Issue
 from models.patch import Patch
 from models.result import ExperimentResult
+from models.inference import InferenceRun
 from utils.prompt_loader import load_prompt
+
+
+def _extract_verdict(feedback: str) -> str:
+    """Coba ambil verdict dari JSON, fallback ke deteksi teks."""
+    if not feedback:
+        return "NEEDS_REVISION"
+    try:
+        data = json.loads(feedback)
+        verdict = data.get("verdict", "NEEDS_REVISION")
+        return verdict
+    except json.JSONDecodeError:
+        pass
+    return "APPROVED" if "APPROVED" in feedback.upper()[:50] else "NEEDS_REVISION"
 
 
 class ReviewStrategy:
@@ -13,82 +26,51 @@ class ReviewStrategy:
         self.provider = provider
 
     def run(self, issue: Issue) -> tuple[Patch, ExperimentResult]:
-        inferences = 0
-        total_time = 0.0
-        total_prompt = 0
-        total_completion = 0
-        total_tokens = 0
+        inferences = []
 
         # Step 1: Planner
-        t0 = time.perf_counter()
-        plan = self.provider.generate(
-            load_prompt("planner.md").replace("{{issue}}", issue.to_prompt())
-        )
-        elapsed = time.perf_counter() - t0
-        inferences += 1; total_time += elapsed
-        u = self.provider.last_usage or {}
-        total_prompt += u.get("prompt_tokens", 0)
-        total_completion += u.get("completion_tokens", 0)
-        total_tokens += u.get("total_tokens", 0)
+        plan_prompt = load_prompt("planner.md").replace("{{issue}}", issue.to_prompt())
+        plan_inf = self.provider.generate(plan_prompt, role="planner")
+        inferences.append(plan_inf)
 
         # Step 2: Executor (initial patch)
-        t0 = time.perf_counter()
-        initial_patch = self.provider.generate(
+        exec_prompt = (
             load_prompt("executor.md")
             .replace("{{issue}}", issue.to_prompt())
-            .replace("{{plan}}", plan)
+            .replace("{{plan}}", plan_inf.response)
         )
-        elapsed = time.perf_counter() - t0
-        inferences += 1; total_time += elapsed
-        u = self.provider.last_usage or {}
-        total_prompt += u.get("prompt_tokens", 0)
-        total_completion += u.get("completion_tokens", 0)
-        total_tokens += u.get("total_tokens", 0)
+        initial_inf = self.provider.generate(exec_prompt, role="executor")
+        inferences.append(initial_inf)
 
         # Step 3: Reviewer
-        t0 = time.perf_counter()
-        feedback = self.provider.generate(
+        review_prompt = (
             load_prompt("reviewer.md")
             .replace("{{issue}}", issue.to_prompt())
-            .replace("{{plan}}", plan)
-            .replace("{{patch}}", initial_patch)
+            .replace("{{plan}}", plan_inf.response)
+            .replace("{{patch}}", initial_inf.response)
         )
-        elapsed = time.perf_counter() - t0
-        inferences += 1; total_time += elapsed
-        u = self.provider.last_usage or {}
-        total_prompt += u.get("prompt_tokens", 0)
-        total_completion += u.get("completion_tokens", 0)
-        total_tokens += u.get("total_tokens", 0)
+        review_inf = self.provider.generate(review_prompt, role="reviewer")
+        inferences.append(review_inf)
 
-        # Step 4: Revisi jika reviewer tidak approve
-        needs_revision = "APPROVED" not in feedback.upper()[:50]
-        final_patch = initial_patch
+        # Step 4: Revisi jika tidak APPROVED
+        needs_revision = _extract_verdict(review_inf.response) != "APPROVED"
+        final_response = initial_inf.response
         if needs_revision:
-            t0 = time.perf_counter()
             revision_prompt = (
                 load_prompt("executor.md")
                 .replace("{{issue}}", issue.to_prompt())
-                .replace("{{plan}}", plan)
-                .replace("{{feedback}}", feedback)
+                .replace("{{plan}}", plan_inf.response)
+                .replace("{{feedback}}", review_inf.response)
             )
-            final_patch = self.provider.generate(revision_prompt)
-            elapsed = time.perf_counter() - t0
-            inferences += 1; total_time += elapsed
-            u = self.provider.last_usage or {}
-            total_prompt += u.get("prompt_tokens", 0)
-            total_completion += u.get("completion_tokens", 0)
-            total_tokens += u.get("total_tokens", 0)
+            revision_inf = self.provider.generate(revision_prompt, role="executor")
+            inferences.append(revision_inf)
+            final_response = revision_inf.response
 
-        patch = Patch(response=final_patch)
+        run = InferenceRun(patch=final_response, inferences=inferences)
         result = ExperimentResult(
             instance_id=issue.instance_id,
             strategy="review",
-            execution_time=total_time, 
-            inference_count=inferences,
-            prompt_tokens=total_prompt,
-            completion_tokens=total_completion,
-            total_tokens=total_tokens,
-            patch_preview=final_patch[:100],
+            model=self.provider.model,
+            run=run,
         )
-        result.timestamp = datetime.now(timezone.utc).isoformat()
-        return patch, result
+        return Patch(response=final_response), result

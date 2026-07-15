@@ -1104,44 +1104,59 @@ Pertanyaan penelitian akan dijawab dengan mengkuantifikasi:
 | 2 | Config loader (.env) | `src/config.py` |
 | 3 | Logging (loguru) | `src/utils/logger.py` |
 | 4 | Prompt loader | `src/utils/prompt_loader.py` |
-| 5 | Issue model (partial) | `src/models/issue.py` |
+| 5 | Issue model (lengkap) | `src/models/issue.py` |
 | 6 | Patch model | `src/models/patch.py` |
-| 7 | Gemini provider | `src/providers/gemini_provider.py` |
-| 8 | Groq provider | `src/providers/groq_provider.py` |
-| 9 | Direct strategy | `src/strategies/direct_strategy.py` |
-| 10 | Prompt direct | `src/prompts/direct_prompt.md` |
-| 11 | `.env` config | API keys, model, temperature |
-| 12 | `.gitignore` | Env, cache, logs |
-| 13 | `requirements.txt` | Dependencies |
-| 14 | SDD document | `sdd.md` ← Dokumen ini |
+| 7 | Result model + model & timestamp | `src/models/result.py` |
+| 8 | Gemini provider + token tracking | `src/providers/gemini_provider.py` |
+| 9 | Groq provider + token tracking | `src/providers/groq_provider.py` |
+| 10 | Direct strategy + timing | `src/strategies/direct_strategy.py` |
+| 11 | Planning strategy | `src/strategies/planning_strategy.py` |
+| 12 | Review strategy | `src/strategies/review_strategy.py` |
+| 13 | Prompt direct | `src/prompts/direct_prompt.md` |
+| 14 | Planner prompt | `src/prompts/planner.md` |
+| 15 | Executor prompt | `src/prompts/executor.md` |
+| 16 | Reviewer prompt | `src/prompts/reviewer.md` |
+| 17 | SWE-bench loader | `src/dataset_loader.py` |
+| 18 | Diff extractor | `src/experiments/swebench_adapter.py` |
+| 19 | Experiment runner + rate limiting | `src/experiments/runner.py` |
+| 20 | Main CLI | `src/main.py` |
+| 21 | view_results.py | `src/view_results.py` |
+| 22 | `.env` config | API keys, model, temperature |
+| 23 | `.gitignore` | Env, cache, logs |
+| 24 | `requirements.txt` | Dependencies |
+| 25 | SDD document | `sdd.md` ← Dokumen ini |
+| 26 | Dependencies install | swebench, datasets, pandas, loguru |
+| 27 | Delete stub models | `models/plan.py`, `evaluation.py` |
+| 28 | Package init files | `src/models/__init__.py`, dll |
+| 29 | Dry run (1 issue) | ✅ Verified |
+| 30 | Testing run (10 issues, Groq) | ✅ 28/30 success |
 
-## ❌ Belum Selesai
+## 🔄 Refactor Selesai (Feedback Dosen)
 
-| No | Task | File | Prioritas |
-|:---|:-----|:-----|:----------|
-| 1 | Refine Issue model (+instance_id, repo, base_commit) | `models/issue.py` | 🔴 P0 |
-| 2 | Create Result model | `models/result.py` | 🔴 P0 |
-| 3 | Delete stub models | `models/plan.py`, `evaluation.py` | 🔴 P0 |
-| 4 | Token tracking di Gemini | `providers/gemini_provider.py` | 🔴 P0 |
-| 5 | Token tracking di Groq | `providers/groq_provider.py` | 🔴 P0 |
-| 6 | Isi planner prompt | `prompts/planner.md` | 🔴 P0 |
-| 7 | Isi executor prompt | `prompts/executor.md` | 🔴 P0 |
-| 8 | Isi reviewer prompt | `prompts/reviewer.md` | 🔴 P0 |
-| 9 | Refine direct prompt format | `prompts/direct_prompt.md` | 🔴 P0 |
-| 10 | Timing & result di Direct strategy | `strategies/direct_strategy.py` | 🟡 P1 |
-| 11 | Create Planning strategy | `strategies/planning_strategy.py` | 🟡 P1 |
-| 12 | Create Review strategy | `strategies/review_strategy.py` | 🟡 P1 |
-| 13 | Create SWE-bench loader | `datasets/swe_loader.py` | 🟡 P1 |
-| 14 | Create diff extractor | `experiments/swebench_adapter.py` | 🟡 P1 |
-| 15 | Create experiment runner | `experiments/runner.py` | 🟡 P1 |
-| 16 | Update main.py as CLI | `main.py` | 🟢 P2 |
-| 17 | Install SWE-bench & deps | `pip install swebench datasets` | 🟢 P2 |
-| 18 | Run dry test (2 issue) | `python src/main.py --n-issues 2` | 🟢 P2 |
-| 19 | Run full experiment (15 issue) | `python src/main.py --n-issues 15` | 🔵 P3 |
-| 20 | SWE-bench evaluation | `python -m swebench.harness.run_evaluation` | 🔵 P3 |
-| 21 | Analisis CSV untuk skripsi | — | ⚪ P4 |
+| No | Task | Status | Kritik Dosen |
+|:---|:-----|:-------|:-------------|
+| 31 | InferenceResult model + ExperimentResult refactor | ✅ Selesai | #1, #4 |
+| 32 | Provider generate() → return InferenceResult (hapus last_usage) | ✅ Selesai | #1, #2, #3 |
+| 33 | Strategies adapt InferenceResult + InferenceRun | ✅ Selesai | #1, #4 |
+| 34 | Artifact saving (planner/reviewer/executor per issue) | ✅ Selesai | #6, #7 |
+| 35 | Prompt JSON format + extract_diff() parser | ✅ Selesai | #5 |
+| 36 | experiment.yaml reproducibility config | ✅ Selesai | #8 |
+| 37 | Dry run verification after refactor | ✅ Selesai | — |
 
-**Progress: 14/35 tasks (40%) — 21 tasks remaining**
+## 🔄 Dalam Progress
+
+| No | Task | Status | Prioritas |
+|:---|:-----|:-------|:----------|
+| 38 | Final run (15 issues, Gemini) | ⏳ Ready to execute | 🔴 P0 |
+| 39 | Analisis CSV → RQ1, RQ2, RQ3 | ⏳ After final run | 🔴 P0 |
+
+## ⚠️ Skipped
+
+| No | Task | Reason |
+|:---|:-----|:-------|
+| 40 | SWE-bench evaluation (Docker) | Low RAM (8GB), Docker build terlalu berat |
+
+**Progress: 37/40 tasks (92%) — 2 tasks remaining (1 skipped)**
 
 ---
 

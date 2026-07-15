@@ -1,8 +1,11 @@
+import time
+
 from google import genai
 from google.genai import types
 
 from config import Config
 from utils.logger import logger
+from models.inference import InferenceResult
 
 
 class GeminiProvider:
@@ -13,11 +16,11 @@ class GeminiProvider:
 
         self.client = genai.Client(api_key=Config.GEMINI_API_KEY)
         self.model = Config.GEMINI_MODEL
-        self.last_usage = None
 
         logger.info(f"Gemini model : {self.model}")
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, role: str = "") -> InferenceResult:
+        t0 = time.perf_counter()
         try:
             response = self.client.models.generate_content(
                 model=self.model,
@@ -28,14 +31,26 @@ class GeminiProvider:
                 ),
             )
 
+            elapsed = time.perf_counter() - t0
             meta = response.usage_metadata
-            self.last_usage = {
-                "prompt_tokens": meta.prompt_token_count,
-                "completion_tokens": meta.candidates_token_count,
-                "total_tokens": meta.total_token_count,
-            }
+            finish = (
+                response.candidates[0].finish_reason.name
+                if response.candidates
+                else ""
+            )
 
-            return response.text
+            return InferenceResult(
+                role=role,
+                response=response.text,
+                usage={
+                    "prompt_tokens": meta.prompt_token_count,
+                    "completion_tokens": meta.candidates_token_count,
+                    "total_tokens": meta.total_token_count,
+                },
+                execution_time=elapsed,
+                finish_reason=finish,
+                model=self.model,
+            )
 
         except Exception as e:
             logger.error(f"Gemini Generate Error: {e}")

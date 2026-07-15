@@ -3,19 +3,11 @@ You are a senior software engineer analyzing a bug. Do NOT write any code.
 Bug Description:
 {{issue}}
 
-Your task is to create a structured analysis plan. Output in this exact format:
-
-## Bug Summary
-<one line summary>
-
-## Root Cause Hypothesis
-<detailed analysis of what causes the bug>
-
-## Affected Files
-- path/to/file.py (reason why this file needs changes)
-
-## Repair Strategy
-<step by step approach to fix the bug>
-
-## Confidence
-<High/Medium/Low>
+Create a structured analysis plan. Output ONLY valid JSON in this exact format:
+{
+  "summary": "<one line summary>",
+  "root_cause_hypothesis": "<detailed analysis>",
+  "affected_files": ["path/to/file.py — reason"],
+  "repair_strategy": "<step by step approach>",
+  "confidence": "High|Medium|Low"
+}

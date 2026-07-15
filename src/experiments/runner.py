@@ -1,14 +1,36 @@
 import json
 import time
-from pathlib import Path
 from dataclasses import asdict
+from pathlib import Path
 
 import pandas as pd
 
 from models.issue import Issue
 from models.result import ExperimentResult
+from models.inference import InferenceRun
 from experiments.swebench_adapter import extract_diff
 from utils.logger import logger
+
+
+def _save_artifacts(
+    output_dir: str,
+    instance_id: str,
+    run: InferenceRun,
+    final_patch: str,
+) -> None:
+    """Simpan artifact per-agent ke results/artifacts/<instance_id>/."""
+    art_dir = Path(f"{output_dir}/artifacts/{instance_id}")
+    art_dir.mkdir(parents=True, exist_ok=True)
+
+    for inf in run.inferences:
+        if inf.role == "planner":
+            (art_dir / "planner.md").write_text(inf.response, encoding="utf-8")
+        elif inf.role == "executor":
+            (art_dir / "executor.md").write_text(inf.response, encoding="utf-8")
+        elif inf.role == "reviewer":
+            (art_dir / "reviewer.md").write_text(inf.response, encoding="utf-8")
+
+    (art_dir / "patch.txt").write_text(final_patch, encoding="utf-8")
 
 
 def run_experiments(
@@ -16,12 +38,14 @@ def run_experiments(
     strategies: dict[str, object],
     output_dir: str = "results",
     provider_name: str = "unknown",
+    rate_limit_seconds: float = 1.5,
 ) -> pd.DataFrame:
     all_results: list[ExperimentResult] = []
     all_predictions: list[dict] = []
     Path(f"{output_dir}/patches").mkdir(parents=True, exist_ok=True)
     Path(f"{output_dir}/csv").mkdir(parents=True, exist_ok=True)
     Path(f"{output_dir}/predictions").mkdir(parents=True, exist_ok=True)
+    Path(f"{output_dir}/artifacts").mkdir(parents=True, exist_ok=True)
 
     total = len(issues) * len(strategies)
     done = 0
@@ -44,28 +68,42 @@ def run_experiments(
                     "model_patch": diff,
                 })
 
+                # Simpan patch final (format lama — preview 1 file per strategi)
                 Path(f"{output_dir}/patches/{issue.instance_id}_{name}.txt").write_text(
                     patch.response, encoding="utf-8"
                 )
-                logger.success(f"  OK ({elapsed:.1f}s, {result.total_tokens} tokens)")
-                time.sleep(1.5)
+
+                # Simpan artifact per-agent (Kritik #6, #7)
+                _save_artifacts(output_dir, issue.instance_id, result.run, patch.response)
+
+                logger.success(
+                    f"  OK ({elapsed:.1f}s, {result.total_tokens} tokens, "
+                    f"{result.inference_count} inferences)"
+                )
+
+                if rate_limit_seconds > 0:
+                    time.sleep(rate_limit_seconds)
+
             except Exception as e:
                 logger.error(f"  FAILED: {e}")
+                empty_run = InferenceRun(patch="", inferences=[])
                 all_results.append(ExperimentResult(
                     instance_id=issue.instance_id,
                     strategy=name,
                     model=provider_name,
-                    execution_time=0,
+                    run=empty_run,
+                    execution_time=0.0,
                     inference_count=0,
                     prompt_tokens=0,
                     completion_tokens=0,
                     total_tokens=0,
                     patch_preview="",
                     error=str(e),
-                    timestamp="",
                 ))
 
-    df = pd.DataFrame([asdict(r) for r in all_results])
+    # Ekspor CSV — exclude nested ``run`` field (artefak disimpan terpisah di artifacts/)
+    rows = [{k: v for k, v in asdict(r).items() if k != "run"} for r in all_results]
+    df = pd.DataFrame(rows)
     csv_path = f"{output_dir}/csv/experiment_results.csv"
     df.to_csv(csv_path, index=False)
     logger.success(f"CSV exported: {csv_path}")
