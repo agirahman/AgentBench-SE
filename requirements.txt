@@ -7,3 +7,4 @@ pytest
 swebench
 datasets
 pandas
+pyright
