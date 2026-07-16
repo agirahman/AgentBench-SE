@@ -22,7 +22,7 @@ for v in v1 v2 v3; do
     fi
 
     echo "=== Running eval: $RUN_ID ($FILE) ==="
-    python -m swebench.harness.run_evaluation \
+    python3 -m swebench.harness.run_evaluation \
       --dataset_name "$DATASET" \
       --predictions_path "$FILE" \
       --max_workers 1 \
