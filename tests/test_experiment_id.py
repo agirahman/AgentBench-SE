@@ -1,7 +1,4 @@
-import sys
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from experiment_id import generate_experiment_id, create_experiment_dir, INDEX_FILE
 import json
