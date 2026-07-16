@@ -1,8 +1,13 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from models.inference import InferenceResult
 from config import Config
+
+if TYPE_CHECKING:
+    from models.result import CostSummary
 
 
 @dataclass
@@ -61,4 +66,27 @@ class CostCalculator:
             output_cost_usd=output_cost_usd,
             total_cost_usd=total_cost_usd,
             total_cost_idr=total_cost_idr,
+        )
+
+    def aggregate(self, inferences: list[InferenceResult]) -> "CostSummary":
+        """Sum cost across all inferences into a CostSummary."""
+        from models.result import CostSummary
+
+        input_usd = output_usd = total_usd = total_idr = 0.0
+        version = ""
+        for inf in inferences:
+            c = self.calculate(inf)
+            input_usd += c.input_cost_usd
+            output_usd += c.output_cost_usd
+            total_usd += c.total_cost_usd
+            total_idr += c.total_cost_idr
+            pricing = PricingTable.get(inf.model)
+            if pricing:
+                version = pricing.get("pricing_version", "")
+        return CostSummary(
+            input_cost_usd=input_usd,
+            output_cost_usd=output_usd,
+            total_cost_usd=total_usd,
+            total_cost_idr=total_idr,
+            pricing_version=version,
         )

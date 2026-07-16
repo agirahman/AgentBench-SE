@@ -35,19 +35,19 @@ class GeminiProvider:
 
             elapsed = time.perf_counter() - t0
             meta = response.usage_metadata
-            finish = (
-                response.candidates[0].finish_reason.name
-                if response.candidates
-                else ""
-            )
+            finish = ""
+            if response.candidates:
+                fr = response.candidates[0].finish_reason
+                finish = fr.name if fr else ""
+            content = response.text or ""
 
             return InferenceResult(
                 role=role,
-                response=response.text,
+                response=content,
                 usage={
-                    "prompt_tokens": meta.prompt_token_count,
-                    "completion_tokens": meta.candidates_token_count,
-                    "total_tokens": meta.total_token_count,
+                    "prompt_tokens": meta.prompt_token_count if meta else 0,
+                    "completion_tokens": meta.candidates_token_count if meta else 0,
+                    "total_tokens": meta.total_token_count if meta else 0,
                 },
                 execution_time=elapsed,
                 finish_reason=finish,

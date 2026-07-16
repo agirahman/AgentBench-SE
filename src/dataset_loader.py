@@ -3,7 +3,8 @@ from models.issue import Issue
 
 
 def load_swe_bench_lite() -> list[dict]:
-    return load_dataset("princeton-nlp/SWE-bench_Lite", split="test")
+    ds = load_dataset("princeton-nlp/SWE-bench_Lite", split="test")
+    return [dict(row) for row in ds]
 
 
 def select_issues(repo_filter: str = "django", n: int = 15) -> list[Issue]:
