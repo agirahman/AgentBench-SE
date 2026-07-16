@@ -35,14 +35,18 @@ class GroqProvider:
             elapsed = time.perf_counter() - t0
             usage = response.usage
             finish = response.choices[0].finish_reason or ""
+            content = response.choices[0].message.content or ""
+            prompt_t = usage.prompt_tokens if usage else 0
+            comp_t = usage.completion_tokens if usage else 0
+            total_t = usage.total_tokens if usage else 0
 
             return InferenceResult(
                 role=role,
-                response=response.choices[0].message.content,
+                response=content,
                 usage={
-                    "prompt_tokens": usage.prompt_tokens,
-                    "completion_tokens": usage.completion_tokens,
-                    "total_tokens": usage.total_tokens,
+                    "prompt_tokens": prompt_t,
+                    "completion_tokens": comp_t,
+                    "total_tokens": total_t,
                 },
                 execution_time=elapsed,
                 finish_reason=finish,

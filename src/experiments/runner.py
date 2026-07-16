@@ -2,6 +2,7 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Protocol
 
 import pandas as pd
 
@@ -12,12 +13,17 @@ from models.result import (
     CostSummary,
     EvaluationResult,
 )
+from models.patch import Patch
 from models.inference import InferenceRun
 from experiments.csv_exporter import flatten_for_csv
 from experiments.swebench_adapter import extract_diff
 from evaluation.statistics import export_statistics_json, generate_summary_md
 from experiment_id import generate_experiment_id, create_experiment_dir
 from utils.logger import logger
+
+
+class StrategyProtocol(Protocol):
+    def run(self, issue: Issue) -> tuple[Patch, ExperimentResult]: ...
 
 
 def _save_artifacts(
@@ -43,7 +49,7 @@ def _save_artifacts(
 
 def run_experiments(
     issues: list[Issue],
-    strategies: dict[str, object],
+    strategies: dict[str, StrategyProtocol],
     base_dir: str = "results",
     provider_name: str = "unknown",
     rate_limit_seconds: float = 1.5,

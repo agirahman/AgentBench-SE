@@ -5,7 +5,7 @@ from config import Config
 from utils.logger import logger
 
 
-def with_retry(max_retries: int = None, base_delay: float = 2.0):
+def with_retry(max_retries: int = Config.MAX_RETRIES, base_delay: float = 2.0):
     """Decorator: retry a function on exception with exponential backoff.
 
     Backoff schedule (base_delay=2.0):
@@ -22,12 +22,10 @@ def with_retry(max_retries: int = None, base_delay: float = 2.0):
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            last_exc = None
             for attempt in range(1, retries + 1):
                 try:
                     return func(*args, **kwargs)
                 except Exception as e:
-                    last_exc = e
                     if attempt >= retries:
                         logger.error(
                             f"{func.__name__} failed after {retries} attempts: {e}"
@@ -39,7 +37,6 @@ def with_retry(max_retries: int = None, base_delay: float = 2.0):
                         f"— retrying in {delay:.1f}s"
                     )
                     time.sleep(delay)
-            raise last_exc
 
         return wrapper
 
