@@ -95,7 +95,7 @@ AgantBech-SE/
 ### Prasyarat
 
 - Python 3.10+
-- API key (minimal satu): `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, atau `GROQ_API_KEY`
+- API key (minimal satu): `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, atau `GROQ_API_KEY`
 - (Opsional) Docker — hanya untuk SWE-bench harness evaluasi
 
 ### Instalasi
@@ -119,8 +119,8 @@ GEMINI_MODEL=gemini-3-flash-preview
 GROQ_API_KEY=your_groq_key
 GROQ_MODEL=llama-3.3-70b-versatile
 
-DEEPSEEK_API_KEY=your_deepseek_key
-DEEPSEEK_MODEL=deepseek-v4-flash
+OPENROUTER_API_KEY=your_openrouter_key
+OPENROUTER_MODEL=tencent/hy3:free
 
 TEMPERATURE=0.2
 MAX_RETRIES=3
@@ -128,10 +128,10 @@ USD_IDR_RATE=16500.0
 ```
 
 > [!NOTE]
-> Untuk konsistensi riset, eksperimen utama memakai Gemini. DeepSeek dan Groq untuk iterasi cepat saat development atau bila Gemini kena rate limit.
+> Untuk konsistensi riset, eksperimen utama memakai Gemini. OpenRouter dan Groq untuk iterasi cepat saat development atau bila Gemini kena rate limit.
 
 > [!TIP]
-> DeepSeek V4 Flash: input $0.14/1M (cache hit $0.0028), output $0.28/1M. Murah dan cepat untuk eksperimen skala besar.
+> OpenRouter `tencent/hy3:free` — gratis sampai 21 Juli 2026. Gak perlu topup, cocok prototyping.
 
 ## Penggunaan
 
@@ -147,8 +147,8 @@ python src/main.py --n-issues 15 --output results/full_run
 # Pakai Groq
 python src/main.py --provider groq --n-issues 10
 
-# Pakai DeepSeek
-python src/main.py --provider deepseek --n-issues 10
+# Pakai OpenRouter (gratis s/d 21 Juli 2026)
+python src/main.py --provider openrouter --n-issues 10
 ```
 
 ### Opsi CLI
@@ -157,7 +157,7 @@ python src/main.py --provider deepseek --n-issues 10
 |:--------|:--------|:-----------|
 | `--repo` | `django` | Filter repo SWE-bench |
 | `--n-issues` | `15` | Jumlah issue yang diproses |
-| `--provider` | `gemini` | Provider AI: `gemini`, `deepseek`, atau `groq` |
+| `--provider` | `gemini` | Provider AI: `gemini`, `openrouter`, atau `groq` |
 | `--output` | `results` | Direktori output |
 | `--rate-limit` | `1.5` | Delay antar strategi (detik) |
 

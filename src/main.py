@@ -4,7 +4,7 @@ from pathlib import Path
 
 from providers.gemini_provider import GeminiProvider
 from providers.groq_provider import GroqProvider
-from providers.deepseek_provider import DeepSeekProvider
+from providers.openrouter_provider import OpenRouterProvider
 from strategies.direct_strategy import DirectStrategy
 from strategies.planning_strategy import PlanningStrategy
 from strategies.review_strategy import ReviewStrategy
@@ -35,7 +35,7 @@ def parse_args():
     parser.add_argument(
         "--provider",
         default="gemini",
-        choices=["gemini", "groq", "deepseek"],
+        choices=["gemini", "groq", "openrouter"],
         help="Provider AI (default: gemini)",
     )
     parser.add_argument(
@@ -65,7 +65,7 @@ def _save_experiment_config(
         },
         "provider": {
             "name": args.provider,
-            "model": Config.GEMINI_MODEL if args.provider == "gemini" else (Config.DEEPSEEK_MODEL if args.provider == "deepseek" else Config.GROQ_MODEL),
+            "model": Config.GEMINI_MODEL if args.provider == "gemini" else (Config.OPENROUTER_MODEL if args.provider == "openrouter" else Config.GROQ_MODEL),
             "temperature": Config.TEMPERATURE,
             "max_retries": Config.MAX_RETRIES,
         },
@@ -108,8 +108,8 @@ def main():
 
     if args.provider == "gemini":
         Provider = GeminiProvider
-    elif args.provider == "deepseek":
-        Provider = DeepSeekProvider
+    elif args.provider == "openrouter":
+        Provider = OpenRouterProvider
     else:
         Provider = GroqProvider
 

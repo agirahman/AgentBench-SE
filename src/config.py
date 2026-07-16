@@ -17,10 +17,10 @@ class Config:
         "llama-3.3-70b-versatile",
     )
     
-    DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-    DEEPSEEK_MODEL = os.getenv(
-        "DEEPSEEK_MODEL",
-        "deepseek-v4-flash",
+    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+    OPENROUTER_MODEL = os.getenv(
+        "OPENROUTER_MODEL",
+        "tencent/hy3:free",
     )
     
     TEMPERATURE = float(os.getenv("TEMPERATURE", 0.2))

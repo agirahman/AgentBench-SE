@@ -7,24 +7,22 @@ from utils.logger import logger
 from models.inference import InferenceResult
 from evaluation.retry import with_retry
 
-# DeepSeek V4 Flash pricing (per 1M tokens):
-#   Input  (cache miss): $0.14
-#   Input  (cache hit):  $0.0028
-#   Output:              $0.28
+# OpenRouter tencent/hy3:free — free until 2026-07-21
+# base_url: https://openrouter.ai/api/v1
 
 
-class DeepSeekProvider:
+class OpenRouterProvider:
     def __init__(self):
-        if not Config.DEEPSEEK_API_KEY:
-            raise ValueError("DEEPSEEK_API_KEY tidak ditemukan pada file .env")
+        if not Config.OPENROUTER_API_KEY:
+            raise ValueError("OPENROUTER_API_KEY tidak ditemukan pada file .env")
 
         self.client = OpenAI(
-            api_key=Config.DEEPSEEK_API_KEY,
-            base_url="https://api.deepseek.com",
+            api_key=Config.OPENROUTER_API_KEY,
+            base_url="https://openrouter.ai/api/v1",
         )
-        self.model = Config.DEEPSEEK_MODEL
+        self.model = Config.OPENROUTER_MODEL
 
-        logger.info(f"DeepSeek model : {self.model}")
+        logger.info(f"OpenRouter model : {self.model}")
 
     @with_retry()
     def generate(self, prompt: str, role: str = "") -> InferenceResult:
@@ -48,7 +46,7 @@ class DeepSeekProvider:
 
             if finish == "length":
                 logger.warning(
-                    f"DeepSeek response truncated (finish_reason='length'). "
+                    f"OpenRouter response truncated (finish_reason='length'). "
                     f"Tokens: {total_t}. Role: {role}"
                 )
 
@@ -66,15 +64,15 @@ class DeepSeekProvider:
             )
 
         except Exception as e:
-            logger.error(f"DeepSeek Generate Error: {e}")
+            logger.error(f"OpenRouter Generate Error: {e}")
             raise
 
     def health_check(self) -> bool:
         try:
             self.generate("Reply with only: OK")
-            logger.success("DeepSeek Health Check Passed")
+            logger.success("OpenRouter Health Check Passed")
             return True
 
         except Exception as e:
-            logger.error(f"DeepSeek Health Check Failed: {e}")
+            logger.error(f"OpenRouter Health Check Failed: {e}")
             return False
