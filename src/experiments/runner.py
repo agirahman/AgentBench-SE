@@ -92,6 +92,7 @@ def run_experiments(
                 all_predictions.append({
                     "instance_id": issue.instance_id,
                     "model_patch": diff,
+                    "model_name_or_path": result.model,
                 })
 
                 Path(f"{exp_dir}/patches/{issue.instance_id}_{name}.txt").write_text(
