@@ -39,7 +39,9 @@ def _is_valid_patch_syntax(text: str) -> bool:
         i += 1
         while i < len(lines) and not lines[i].startswith("@@"):
             l = lines[i]
-            if l.startswith(" "):
+            if l.startswith("diff --git"):
+                break
+            elif l.startswith(" "):
                 actual_orig += 1
                 actual_new += 1
             elif l.startswith("+"):
@@ -47,11 +49,18 @@ def _is_valid_patch_syntax(text: str) -> bool:
             elif l.startswith("-"):
                 actual_orig += 1
             elif l.startswith("\\") or l.startswith("Binary "):
-                # '\ No newline at end of file' / 'Binary files ... differ'
                 pass
             elif l.strip() == "--":
-                # separator antar hunk/file
                 break
+            elif l == "":
+                if i + 1 < len(lines) and lines[i + 1].startswith("@@"):
+                    break
+                else:
+                    actual_orig += 1
+                    actual_new += 1
+            elif l.strip() and not l.startswith(("@@", "diff ", "--- ", "+++ ")):
+                actual_orig += 1
+                actual_new += 1
             else:
                 logger.warning(f"Unexpected patch line: {l!r}")
                 return False
