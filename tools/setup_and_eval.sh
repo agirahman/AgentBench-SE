@@ -27,13 +27,7 @@ fi
 echo "=== Step 2: Install swebench + deps ==="
 pip install swebench datasets 2>&1 | tail -5
 
-echo "=== Step 3: Build SWE-bench image (first run 30-60 min) ==="
-python3 -c "from swebench.harness.docker_build import build_image; build_image('django__django-10914')" || {
-    echo "Build failed. Check Docker daemon + RAM."
-    exit 1
-}
-
-echo "=== Step 4: Test 1 issue (django__django-10914) ==="
+echo "=== Step 3: Test 1 issue (image built automatically on first run) ==="
 python3 -m swebench.harness.run_evaluation \
     --dataset_name "$DATASET" \
     --predictions_path "$PRED_DIR/gemini_v1_direct.jsonl" \
@@ -41,7 +35,7 @@ python3 -m swebench.harness.run_evaluation \
     --max_workers 1 \
     --run_id test-1issue
 
-echo "=== Step 5: If test OK, run all 3 strategies ==="
+echo "=== Step 4: If test OK, run all 3 strategies ==="
 for strat in direct planning review; do
     python3 -m swebench.harness.run_evaluation \
         --dataset_name "$DATASET" \
@@ -50,7 +44,7 @@ for strat in direct planning review; do
         --run_id "gemini-v1-${strat}"
 done
 
-echo "=== Step 6: Check results ==="
+echo "=== Step 5: Check results ==="
 python3 tools/check_eval.py
 
 echo "DONE"
