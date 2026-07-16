@@ -1,33 +1,44 @@
 # AgentBench-SE
 
-> Analisis trade-off tiga strategi orkestrasi AI Agent (Direct, Planning, Planning+Review) untuk tugas bug fixing otomatis pada dataset SWE-bench Lite.
+> Eksperimen perbandingan tiga strategi orkestrasi AI Agent (Direct, Planning, Planning+Review) untuk *automated bug fixing* pada dataset [SWE-bench Lite](https://huggingface.co/datasets/princeton-nlp/SWE-bench_Lite).
+
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue?style=flat-square)](https://www.python.org/downloads/)
+[![SWE-bench Lite](https://img.shields.io/badge/dataset-SWE--bench--Lite-red?style=flat-square)](https://huggingface.co/datasets/princeton-nlp/SWE-bench_Lite)
+[![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 
 ## Daftar Isi
 
 - [Tentang Proyek](#tentang-proyek)
-- [Arsitektur Singkat](#arsitektur-singkat)
+- [Fitur](#fitur)
+- [Arsitektur](#arsitektur)
 - [Strategi yang Dibandingkan](#strategi-yang-dibandingkan)
 - [Struktur Proyek](#struktur-proyek)
-- [Prasyarat](#prasyarat)
-- [Instalasi](#instalasi)
+- [Prasyarat & Instalasi](#prasyarat--instalasi)
 - [Konfigurasi](#konfigurasi)
 - [Penggunaan](#penggunaan)
-- [Hasil Eksperimen](#hasil-eksperimen)
 - [Dokumentasi Terkait](#dokumentasi-terkait)
 
 ## Tentang Proyek
 
-AgentBench-SE adalah eksperimen perangkat lunak yang membandingkan tiga strategi orkestrasi agent dalam menyelesaikan isu *bug fixing* Python. Setiap strategi memakai model AI yang sama (Gemini atau Groq) sehingga perbedaan hasil murni dipengaruhi oleh struktur orkestrasi.
+AgentBench-SE membandingkan tiga strategi orkestrasi agent dalam menyelesaikan *bug fixing* Python. Setiap strategi memakai model AI yang sama (Gemini atau Groq) sehingga perbedaan hasil murni dipengaruhi oleh struktur orkestrasi.
 
-Tujuan riset:
+**Research Questions:**
 
-- **RQ1** — Efektivitas: Build Success Rate dan Test Pass Rate antar strategi.
-- **RQ2** — Efisiensi: Total execution time dan inference count.
-- **RQ3** — Trade-off: prompt tokens, completion tokens, total tokens.
+| RQ | Fokus | Metrik |
+|:---|:------|:-------|
+| RQ1 | Efektivitas | Build Success Rate, Test Pass Rate |
+| RQ2 | Efisiensi | Execution Time, Inference Count |
+| RQ3 | Trade-off | Prompt Tokens, Completion Tokens, Total Tokens |
 
-Dataset: [princeton-nlp/SWE-bench_Lite](https://huggingface.co/datasets/princeton-nlp/SWE-bench_Lite) (subset repo Django).
+## Fitur
 
-## Arsitektur Singkat
+- **3 Strategi Orkestrasi** — Direct (1 inferensi), Planning (2 inferensi), Planning+Review (3-4 inferensi)
+- **Multi Provider** — Gemini (utama) dan Groq (fallback/dev)
+- **Patch Validation** — Auto-validasi syntax diff sebelum export, filter patch invalid/terpotong
+- **SWE-bench Integration** — Export `predictions.jsonl` siap evaluasi dengan Docker harness
+- **Reproducible Experiments** — Setiap run menghasilkan `experiment.yaml`, CSV, dan artifact per-issue
+
+## Arsitektur
 
 ```mermaid
 flowchart LR
@@ -35,14 +46,14 @@ flowchart LR
     B --> C1[DirectStrategy]
     B --> C2[PlanningStrategy]
     B --> C3[ReviewStrategy]
-    C1 --> P[Provider: Gemini atau Groq]
+    C1 --> P[Gemini / Groq]
     C2 --> P
     C3 --> P
     P --> D[Patch + Metadata]
-    D --> E[results/csv/experiment_results.csv]
-    D --> F[results/predictions/predictions.jsonl]
+    D --> E[results/]
+    D --> F[predictions.jsonl]
     F --> G[SWE-bench Harness]
-    G --> H[Build Success + Test Pass]
+    G --> H[Build + Test Results]
 ```
 
 ## Strategi yang Dibandingkan
@@ -51,9 +62,10 @@ flowchart LR
 |:----:|:---------|:-----------|:---------:|
 | **S1** | Direct Execution | `Issue -> Executor -> Patch` | 1 |
 | **S2** | Planning-based | `Issue -> Planner -> Executor -> Patch` | 2 |
-| **S3** | Planning + Review | `Issue -> Planner -> Executor -> Reviewer -> (Executor Revisi) -> Patch` | 3-4 |
+| **S3** | Planning + Review | `Issue -> Planner -> Executor -> Reviewer -> (Revisi) -> Patch` | 3-4 |
 
-Trade-off inti: semakin banyak agent, semakin tinggi biaya (token + waktu) namun potensi efektivitas lebih besar.
+> [!TIP]
+> Trade-off inti: semakin banyak agent, semakin tinggi biaya (token + waktu) namun potensi efektivitas lebih besar.
 
 ## Struktur Proyek
 
@@ -63,36 +75,30 @@ AgantBech-SE/
 │   ├── main.py                 # CLI entry point
 │   ├── config.py               # Loader .env
 │   ├── dataset_loader.py       # Filter SWE-bench Lite
-│   ├── view_results.py         # Inspeksi hasil
 │   ├── providers/              # GeminiProvider, GroqProvider
 │   ├── strategies/             # Direct, Planning, Review
 │   ├── experiments/            # Runner + SWE-bench adapter
-│   ├── evaluation/             # Evaluator
+│   ├── evaluation/             # Cost calculator + retry
 │   └── prompts/                # Template prompt per role
-├── datasets/                   # Cache HuggingFace
+├── tests/                      # Unit tests
 ├── docs/                       # Setup, technical, feedback
-├── results/
+├── results/                    # Output per run
 │   ├── csv/                    # experiment_results.csv
 │   ├── patches/                # Raw patch per issue
-│   ├── predictions/            # predictions.jsonl
-│   └── logs/
-├── graphify-out/               # Knowledge graph (auto-generated)
-├── logs/
+│   └── predictions/            # predictions.jsonl
 ├── sdd.md                      # Spec-Driven Development
-├── requirements.txt
-└── .env                        # API keys (tidak di-commit)
+└── requirements.txt
 ```
 
-## Prasyarat
+## Prasyarat & Instalasi
+
+### Prasyarat
 
 - Python 3.10+
-- pip
-- (Opsional) Docker Desktop — hanya bila ingin menjalankan SWE-bench harness evaluasi
-- API key untuk salah satu provider:
-  - `GEMINI_API_KEY` (utama)
-  - `GROQ_API_KEY` (fallback development)
+- API key (minimal satu): `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, atau `GROQ_API_KEY`
+- (Opsional) Docker — hanya untuk SWE-bench harness evaluasi
 
-## Instalasi
+### Instalasi
 
 ```powershell
 git clone <url-repo> AgantBech-SE
@@ -113,17 +119,23 @@ GEMINI_MODEL=gemini-3-flash-preview
 GROQ_API_KEY=your_groq_key
 GROQ_MODEL=llama-3.3-70b-versatile
 
+DEEPSEEK_API_KEY=your_deepseek_key
+DEEPSEEK_MODEL=deepseek-v4-flash
+
 TEMPERATURE=0.2
 MAX_RETRIES=3
 USD_IDR_RATE=16500.0
 ```
 
 > [!NOTE]
-> Untuk konsistensi riset, eksperimen utama memakai Gemini. Groq hanya untuk iterasi cepat saat development.
+> Untuk konsistensi riset, eksperimen utama memakai Gemini. DeepSeek dan Groq untuk iterasi cepat saat development atau bila Gemini kena rate limit.
+
+> [!TIP]
+> DeepSeek V4 Flash: input $0.14/1M (cache hit $0.0028), output $0.28/1M. Murah dan cepat untuk eksperimen skala besar.
 
 ## Penggunaan
 
-### 1. Jalankan eksperimen
+### Jalankan eksperimen
 
 ```powershell
 # Dry run (2 issue, ~5 menit)
@@ -132,21 +144,24 @@ python src/main.py --n-issues 2 --output results/dry_run
 # Full run (15 issue, ~45 menit)
 python src/main.py --n-issues 15 --output results/full_run
 
-# Pakai Groq sebagai fallback
+# Pakai Groq
 python src/main.py --provider groq --n-issues 10
+
+# Pakai DeepSeek
+python src/main.py --provider deepseek --n-issues 10
 ```
 
-Opsi CLI:
+### Opsi CLI
 
 | Argumen | Default | Keterangan |
 |:--------|:--------|:-----------|
 | `--repo` | `django` | Filter repo SWE-bench |
 | `--n-issues` | `15` | Jumlah issue yang diproses |
-| `--provider` | `groq` | `gemini` atau `groq` |
+| `--provider` | `gemini` | Provider AI: `gemini`, `deepseek`, atau `groq` |
 | `--output` | `results` | Direktori output |
 | `--rate-limit` | `1.5` | Delay antar strategi (detik) |
 
-### 2. Inspeksi hasil
+### Inspeksi hasil
 
 ```powershell
 python src/view_results.py summary
@@ -154,14 +169,7 @@ python src/view_results.py compare
 python src/view_results.py errors
 ```
 
-Output:
-
-- `results/<run>/csv/experiment_results.csv` — metrik per issue per strategi.
-- `results/<run>/predictions/predictions.jsonl` — patch siap evaluasi SWE-bench.
-- `results/<run>/experiment.yaml` — konfigurasi eksperimen untuk reproduksibilitas.
-- `results/<run>/patches/<instance>_<strategy>.txt` — raw response per strategi.
-
-### 3. Evaluasi SWE-bench (opsional, butuh Docker)
+### Evaluasi SWE-bench (opsional)
 
 ```powershell
 python -m swebench.harness.run_evaluation `
@@ -173,22 +181,18 @@ python -m swebench.harness.run_evaluation `
 > [!WARNING]
 > Build image Docker untuk SWE-bench butuh 30-60 menit dan RAM besar. Lewati langkah ini bila hanya butuh metrik internal (execution time, token, inference count).
 
-## Hasil Eksperimen
+## Output
 
-Metrik yang dikumpulkan per strategi per issue:
-
-- `execution_time` — total waktu (detik)
-- `inference_count` — jumlah panggilan API
-- `prompt_tokens`, `completion_tokens`, `total_tokens`
-- `patch_preview` — 100 karakter pertama patch
-- `error` — error string bila gagal
-
-Ringkasan rata-rata dicetak di akhir run. Untuk analisis RQ1-RQ3, lihat `sdd.md` dan folder `docs/`.
+| File | Keterangan |
+|:-----|:-----------|
+| `results/<run>/csv/experiment_results.csv` | Metrik per issue per strategi |
+| `results/<run>/predictions/predictions.jsonl` | Patch siap evaluasi SWE-bench |
+| `results/<run>/experiment.yaml` | Konfigurasi eksperimen untuk reproduksibilitas |
+| `results/<run>/patches/<instance>_<strategy>.txt` | Raw response LLM per strategi |
 
 ## Dokumentasi Terkait
 
-- [`sdd.md`](./sdd.md) — Spec-Driven Development lengkap (arsitektur, role, trade-off, runbook).
-- [`docs/setup-guide.md`](./docs/setup-guide.md) — Setup environment Windows + WSL2 + Docker.
-- [`docs/TECHNICAL.md`](./docs/TECHNICAL.md) — Catatan teknis komponen.
-- [`docs/FEEDBACK.md`](./docs/FEEDBACK.md) — Tanggapan atas kritik dosen pembimbing.
-- [`graphify-out/`](./graphify-out) — Knowledge graph proyek (auto-generated).
+- [`sdd.md`](./sdd.md) — Spec-Driven Development lengkap (arsitektur, role, trade-off, runbook)
+- [`docs/setup-guide.md`](./docs/setup-guide.md) — Setup environment Windows + WSL2 + Docker
+- [`docs/TECHNICAL.md`](./docs/TECHNICAL.md) — Catatan teknis komponen
+- [`docs/FEEDBACK.md`](./docs/FEEDBACK.md) — Tanggapan atas kritik dosen pembimbing

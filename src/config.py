@@ -17,6 +17,12 @@ class Config:
         "llama-3.3-70b-versatile",
     )
     
+    DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+    DEEPSEEK_MODEL = os.getenv(
+        "DEEPSEEK_MODEL",
+        "deepseek-v4-flash",
+    )
+    
     TEMPERATURE = float(os.getenv("TEMPERATURE", 0.2))
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", 3))
 
