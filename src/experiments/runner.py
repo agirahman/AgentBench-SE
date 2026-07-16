@@ -89,6 +89,11 @@ def run_experiments(
                 all_results.append(result)
 
                 diff = extract_diff(patch.response)
+                if not diff.strip():
+                    logger.warning(
+                        f"Empty/invalid patch for {issue.instance_id} ({name}), skipping"
+                    )
+                    continue
                 all_predictions.append({
                     "instance_id": issue.instance_id,
                     "model_patch": diff,

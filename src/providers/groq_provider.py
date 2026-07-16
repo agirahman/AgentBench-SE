@@ -30,6 +30,7 @@ class GroqProvider:
                 messages=[{"role": "user", "content": prompt}],
                 temperature=Config.TEMPERATURE,
                 timeout=60,
+                max_tokens=4096,
             )
 
             elapsed = time.perf_counter() - t0
@@ -39,6 +40,12 @@ class GroqProvider:
             prompt_t = usage.prompt_tokens if usage else 0
             comp_t = usage.completion_tokens if usage else 0
             total_t = usage.total_tokens if usage else 0
+
+            if finish == "length":
+                logger.warning(
+                    f"Groq response truncated (finish_reason='length'). "
+                    f"Tokens: {total_t}. Role: {role}"
+                )
 
             return InferenceResult(
                 role=role,
