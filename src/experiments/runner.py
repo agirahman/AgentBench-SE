@@ -71,6 +71,11 @@ def run_experiments(
     Path(f"{exp_dir}/patches").mkdir(parents=True, exist_ok=True)
     Path(f"{exp_dir}/predictions").mkdir(parents=True, exist_ok=True)
 
+    # Opsi A — per-experiment log sink
+    exp_log_file = f"{exp_dir}/logs/experiment.log"
+    _sink_id = logger.add(exp_log_file, level="INFO", rotation="10 MB")
+    logger.info(f"Per-experiment log: {exp_log_file}")
+
     all_results: list[ExperimentResult] = []
     all_predictions: list[dict] = []
 
@@ -154,4 +159,5 @@ def run_experiments(
         f"Predictions exported: {jsonl_path} ({len(all_predictions)} entries)"
     )
 
+    logger.remove(_sink_id)
     return df, exp_id
