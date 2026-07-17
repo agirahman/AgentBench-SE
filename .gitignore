@@ -33,4 +33,5 @@ Thumbs.db
 graphify-out/
 
 # doc
-docs/
+docs/*
+!docs/MEMORY.md
