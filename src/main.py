@@ -4,7 +4,7 @@ from pathlib import Path
 
 from providers.gemini_provider import GeminiProvider
 from providers.groq_provider import GroqProvider
-from providers.deepseek_provider import DeepSeekProvider
+from providers.opencode_provider import OpenCodeProvider
 from strategies.direct_strategy import DirectStrategy
 from strategies.planning_strategy import PlanningStrategy
 from strategies.review_strategy import ReviewStrategy
@@ -24,7 +24,7 @@ def parse_args():
     parser.add_argument(
         "--provider",
         default="gemini",
-        choices=["gemini", "groq", "deepseek"],
+        choices=["gemini", "groq", "opencode"],
         help="Provider AI (default: gemini)",
     )
     parser.add_argument(
@@ -62,7 +62,7 @@ def _save_experiment_config(
             "model": (
             Config.GEMINI_MODEL if args.provider == "gemini"
             else Config.GROQ_MODEL if args.provider == "groq"
-            else Config.DEEPSEEK_MODEL
+            else Config.OPENCODE_MODEL
         ),
             "temperature": Config.TEMPERATURE,
             "max_retries": Config.MAX_RETRIES,
@@ -113,7 +113,7 @@ def main():
     elif args.provider == "groq":
         Provider = GroqProvider
     else:
-        Provider = DeepSeekProvider
+        Provider = OpenCodeProvider
 
     provider = Provider()
     if not provider.health_check():

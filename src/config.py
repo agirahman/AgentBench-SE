@@ -16,12 +16,6 @@ class Config:
         "GROQ_MODEL",
         "llama-3.3-70b-versatile",
     )
-
-    DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-    DEEPSEEK_MODEL = os.getenv(
-        "DEEPSEEK_MODEL",
-        "deepseek-v4-flash",
-    )
     
     OPENCODE_API_KEY = os.getenv("OPENCODE_API_KEY")
     OPENCODE_MODEL = os.getenv(

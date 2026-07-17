@@ -8,18 +8,18 @@ from models.inference import InferenceResult
 from evaluation.retry import with_retry
 
 
-class DeepSeekProvider:
+class OpenCodeProvider:
     def __init__(self):
-        if not Config.DEEPSEEK_API_KEY:
-            raise ValueError("DEEPSEEK_API_KEY tidak ditemukan pada file .env")
+        if not Config.OPENCODE_API_KEY:
+            raise ValueError("OPENCODE_API_KEY tidak ditemukan pada file .env")
 
         self.client = OpenAI(
-            api_key=Config.DEEPSEEK_API_KEY,
-            base_url="https://api.deepseek.com/v1",
+            api_key=Config.OPENCODE_API_KEY,
+            base_url="https://opencode.ai/zen/v1",
         )
-        self.model = Config.DEEPSEEK_MODEL
+        self.model = Config.OPENCODE_MODEL
 
-        logger.info(f"DeepSeek model : {self.model}")
+        logger.info(f"OpenCode model : {self.model}")
 
     @with_retry()
     def generate(self, prompt: str, role: str = "") -> InferenceResult:
@@ -44,7 +44,7 @@ class DeepSeekProvider:
 
             if finish == "length":
                 logger.warning(
-                    f"DeepSeek response truncated (finish_reason='length'). "
+                    f"OpenCode response truncated (finish_reason='length'). "
                     f"Tokens: {total_t}. Role: {role}"
                 )
 
@@ -62,15 +62,15 @@ class DeepSeekProvider:
             )
 
         except Exception as e:
-            logger.error(f"DeepSeek Generate Error: {e}")
+            logger.error(f"OpenCode Generate Error: {e}")
             raise
 
     def health_check(self) -> bool:
         try:
             self.generate("Reply with only: {\"status\": \"ok\"}")
-            logger.success("DeepSeek Health Check Passed")
+            logger.success("OpenCode Health Check Passed")
             return True
 
         except Exception as e:
-            logger.error(f"DeepSeek Health Check Failed: {e}")
+            logger.error(f"OpenCode Health Check Failed: {e}")
             return False
