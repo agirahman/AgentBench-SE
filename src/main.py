@@ -135,16 +135,7 @@ def main():
     logger.info(f"Loading SWE-bench Lite — multi-repo: {DEFAULT_REPO_SPECS}")
     issues = select_issues()
     logger.info(f"Loaded {len(issues)} issues")
-    
-    # Log difficulty breakdown
-    difficulty_counts = {"easy": 0, "medium": 0, "hard": 0}
-    for issue in issues:
-        difficulty_counts[issue.difficulty] += 1
-    logger.info(
-        f"Difficulty breakdown: easy={difficulty_counts['easy']}, "
-        f"medium={difficulty_counts['medium']}, hard={difficulty_counts['hard']}"
-    )
-    
+
     if args.issues:
         issues = issues[:args.issues]
         logger.info(f"Limit: testing with {len(issues)} issues")
@@ -171,13 +162,39 @@ def main():
     exp_dir = f"{args.output}/{exp_id}"
     _save_experiment_config(exp_dir, args, len(issues), strategy_names, exp_id)
 
+    # --- RANGKUMAN HASIL EKSPERIMEN ---
+    logger.info(f"Experiment completed: {exp_id}")
+    logger.info(f"Output directory: {exp_dir}/")
+
+    # Difficulty breakdown ACTUAL
+    difficulty_counts = {"easy": 0, "medium": 0, "hard": 0}
+    for issue in issues:
+        difficulty_counts[issue.difficulty] += 1
+    logger.info(
+        f"Actual issues run: {len(issues)} "
+        f"(hard={difficulty_counts['hard']}, "
+        f"medium={difficulty_counts['medium']}, "
+        f"easy={difficulty_counts['easy']})"
+    )
+
+    # Total metrics keseluruhan
+    total_tokens = df['total_tokens'].sum()
+    total_cost = df['cost_usd'].sum()
+    avg_time = df['execution_time'].mean()
+    logger.info(
+        f"Total tokens: {total_tokens:,.0f} | "
+        f"Total cost: ${total_cost:.6f} | "
+        f"Avg time: {avg_time:.1f}s"
+    )
+
     print(f"\n=== Experiment {exp_id} completed ===")
     print(f"Output directory: {exp_dir}/")
-    summary = df.groupby("strategy")[
+
+    strategy_summary = df.groupby("strategy")[
         ["execution_time", "inference_count", "total_tokens", "cost_usd"]
     ].mean()
     print("\n=== STRATEGY SUMMARY ===")
-    print(summary.to_string())
+    print(strategy_summary.to_string())
     
     if "difficulty" in df.columns:
         diff_summary = df.groupby("difficulty")[
@@ -185,6 +202,11 @@ def main():
         ].mean()
         print("\n=== DIFFICULTY SUMMARY ===")
         print(diff_summary.to_string())
+
+        # Cost by strategy × difficulty
+        cross = df.groupby(["strategy", "difficulty"])["cost_usd"].sum().unstack(fill_value=0)
+        print("\n=== COST BY STRATEGY × DIFFICULTY ===")
+        print(cross.to_string())
 
 
 if __name__ == "__main__":
