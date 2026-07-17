@@ -29,16 +29,18 @@ class PricingTable:
             "output_per_million": 1.50,
             "currency": "USD",
             "pricing_version": "2026-07",
-        }
+        },
+        "deepseek-v4-flash": {
+            "input_per_million": 0.14,
+            "output_per_million": 0.28,
+            "currency": "USD",
+            "pricing_version": "2026-07",
+        },
     }
 
     @staticmethod
     def get(model: str) -> Optional[dict]:
-        if model in PricingTable.PRICING:
-            return PricingTable.PRICING[model]
-        if Config.GEMINI_MODEL in PricingTable.PRICING:
-            return PricingTable.PRICING[Config.GEMINI_MODEL]
-        return None
+        return PricingTable.PRICING.get(model)
 
     @staticmethod
     def get_rates(model: str) -> tuple[float, float]:
