@@ -38,6 +38,12 @@ def parse_args():
         action="store_true",
         help="Lanjutkan eksperimen sebelumnya — skip issue yang sudah selesai",
     )
+    parser.add_argument(
+        "--issues",
+        type=int,
+        default=None,
+        help="Batas jumlah issue untuk testing (default: semua 50)",
+    )
     return parser.parse_args()
 
 
@@ -124,7 +130,10 @@ def main():
     logger.info(f"Loading SWE-bench Lite — multi-repo: {DEFAULT_REPO_SPECS}")
     issues = select_issues()
     logger.info(f"Loaded {len(issues)} issues")
-    logger.info(f"Loaded {len(issues)} issues")
+    
+    if args.issues:
+        issues = issues[:args.issues]
+        logger.info(f"Limit: testing with {len(issues)} issues")
 
     strategies = {
         "direct": DirectStrategy(provider),
