@@ -6,17 +6,20 @@ Usage:
     python tools/eval_modal.py results/EXP-20260717-009/predictions/direct.jsonl
 """
 
+import io
 import json
 import sys
 from pathlib import Path
 
-# resource module is Unix-only; mock it for Windows
+# Fix Windows console encoding for Unicode (Modal rich output)
 if sys.platform == "win32":
     import types
     resource = types.ModuleType("resource")
     resource.getrlimit = lambda x: (0, 0)
     resource.RLIMIT_NOFILE = 0
     sys.modules["resource"] = resource
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 from swebench.harness.modal_eval import run_instances_modal, validate_modal_credentials
 from swebench.harness.utils import get_predictions_from_file, load_swebench_dataset
