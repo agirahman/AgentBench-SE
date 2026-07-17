@@ -10,6 +10,14 @@ import json
 import sys
 from pathlib import Path
 
+# resource module is Unix-only; mock it for Windows
+if sys.platform == "win32":
+    import types
+    resource = types.ModuleType("resource")
+    resource.getrlimit = lambda x: (0, 0)
+    resource.RLIMIT_NOFILE = 0
+    sys.modules["resource"] = resource
+
 from swebench.harness.modal_eval import run_instances_modal, validate_modal_credentials
 from swebench.harness.utils import get_predictions_from_file, load_swebench_dataset
 from swebench.harness.constants import KEY_INSTANCE_ID
