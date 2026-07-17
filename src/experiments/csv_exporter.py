@@ -7,6 +7,7 @@ def flatten_for_csv(result: ExperimentResult) -> dict:
         "instance_id": result.instance_id,
         "strategy": result.strategy,
         "model": result.model,
+        "difficulty": result.difficulty,
         "inference_count": result.execution.inference_count,
         "execution_time": result.execution.execution_time,
         "prompt_tokens": result.execution.prompt_tokens,

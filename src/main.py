@@ -76,9 +76,12 @@ def _save_experiment_config(
         "dataset": {
             "name": "princeton-nlp/SWE-bench_Lite",
             "repos": {
-                "psf/requests": 20,
-                "mwaskom/seaborn": 15,
-                "django/django": 15,
+                "django/django": 10,
+                "sympy/sympy": 10,
+                "scikit-learn/scikit-learn": 10,
+                "matplotlib/matplotlib": 10,
+                "psf/requests": 6,
+                "mwaskom/seaborn": 4,
             },
             "n_issues": issue_count,
         },
@@ -131,6 +134,15 @@ def main():
     issues = select_issues()
     logger.info(f"Loaded {len(issues)} issues")
     
+    # Log difficulty breakdown
+    difficulty_counts = {"easy": 0, "medium": 0, "hard": 0}
+    for issue in issues:
+        difficulty_counts[issue.difficulty] += 1
+    logger.info(
+        f"Difficulty breakdown: easy={difficulty_counts['easy']}, "
+        f"medium={difficulty_counts['medium']}, hard={difficulty_counts['hard']}"
+    )
+    
     if args.issues:
         issues = issues[:args.issues]
         logger.info(f"Limit: testing with {len(issues)} issues")
@@ -162,8 +174,15 @@ def main():
     summary = df.groupby("strategy")[
         ["execution_time", "inference_count", "total_tokens", "cost_usd"]
     ].mean()
-    print("\n=== SUMMARY ===")
+    print("\n=== STRATEGY SUMMARY ===")
     print(summary.to_string())
+    
+    if "difficulty" in df.columns:
+        diff_summary = df.groupby("difficulty")[
+            ["execution_time", "total_tokens", "cost_usd"]
+        ].mean()
+        print("\n=== DIFFICULTY SUMMARY ===")
+        print(diff_summary.to_string())
 
 
 if __name__ == "__main__":

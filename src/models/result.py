@@ -77,6 +77,7 @@ class ExperimentResult:
     instance_id: str
     strategy: str
     model: str
+    difficulty: str
     execution: ExecutionResult
     cost: CostSummary
     evaluation: EvaluationResult

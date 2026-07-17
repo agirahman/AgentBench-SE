@@ -3,9 +3,12 @@ from models.issue import Issue
 
 
 DEFAULT_REPO_SPECS: list[tuple[str, int]] = [
-    ("psf/requests", 20),
-    ("mwaskom/seaborn", 15),
-    ("django/django", 15),
+    ("django/django", 10),
+    ("sympy/sympy", 10),
+    ("scikit-learn/scikit-learn", 10),
+    ("matplotlib/matplotlib", 10),
+    ("psf/requests", 6),
+    ("mwaskom/seaborn", 4),
 ]
 
 

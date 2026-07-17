@@ -85,14 +85,59 @@ def _normalize_newlines(text: str) -> str:
     return text
 
 
+def _auto_fix_hunk_headers(patch: str) -> str:
+    """Hitung ulang actual baris per hunk, rewrite @@ header agar sesuai."""
+    lines = patch.split("\n")
+    result = []
+    i = 0
+    HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+    while i < len(lines):
+        line = lines[i]
+        m = HUNK.match(line)
+        if not m:
+            result.append(line)
+            i += 1
+            continue
+
+        body = []
+        i += 1
+        while i < len(lines) and not lines[i].startswith("@@"):
+            if lines[i].startswith("diff --git"):
+                break
+            body.append(lines[i])
+            i += 1
+
+        actual_orig = sum(
+            1 for l in body
+            if l.startswith((" ", "-")) or (l.strip() and not l.startswith(("+", "\\", "Binary")))
+        )
+        actual_new = sum(
+            1 for l in body
+            if l.startswith((" ", "+")) or (l.strip() and not l.startswith(("-", "\\", "Binary")))
+        )
+
+        orig_start = int(m.group(1))
+        new_start = int(m.group(3))
+
+        result.append(f"@@ -{orig_start},{actual_orig} +{new_start},{actual_new} @@")
+        result.extend(body)
+
+    return "\n".join(result)
+
+
 def _clean_patch(text: str) -> str:
-    """Strip, normalize newline, lalu validasi; kembalikan '' kalau gak valid."""
+    """Strip, normalize newline, lalu validasi; auto-fix hunk headers kalau mismatch."""
     if not text:
         return ""
     patch = _normalize_newlines(text).strip()
     if _is_valid_patch_syntax(patch):
         return patch
-    logger.warning("Patch failed syntax validation")
+    fixed = _auto_fix_hunk_headers(patch)
+    if _is_valid_patch_syntax(fixed):
+        logger.info("Hunk headers auto-fixed successfully")
+        return fixed
+    logger.warning("Patch failed syntax validation even after auto-fix")
     return ""
 
 

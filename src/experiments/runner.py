@@ -136,10 +136,16 @@ def run_experiments(
                 logger.info(f"[{done}/{total}] SKIP (resume) {name} on {issue.instance_id}")
                 continue
 
-            logger.info(f"[{done}/{total}] Running {name} on {issue.instance_id}...")
+            logger.info(
+                f"[{done}/{total}] Running {name} on {issue.instance_id} ({issue.difficulty})..."
+            )
+            logger.info(f"  → Issue loaded: {len(issue.problem_statement)} chars")
             try:
                 t0 = time.time()
+                logger.info(f"  → Strategy initialized: {name}")
+                logger.info(f"  → API call to OpenCode...")
                 patch, result = strategy.run(issue)
+                result.difficulty = issue.difficulty
                 elapsed = time.time() - t0
                 result.evaluation.timestamp = datetime.utcnow().isoformat()
                 all_results.append(result)
@@ -167,8 +173,8 @@ def run_experiments(
 
                 if not diff.strip():
                     logger.warning(
-                        f"Empty/invalid patch for {issue.instance_id} ({name}) — "
-                        f"recorded as empty (truncated or invalid)"
+                        f"  ⚠ Patch empty/invalid for {issue.instance_id} ({name}) — "
+                        f"recorded as empty (truncated or invalid JSON)"
                     )
                 else:
                     Path(f"{exp_dir}/patches/{issue.instance_id}_{name}.txt").write_text(
@@ -177,11 +183,13 @@ def run_experiments(
                     _save_artifacts(
                         str(exp_dir), issue.instance_id, result.execution.inferences, patch.response
                     )
+                    logger.info(f"  → Patch saved: {issue.instance_id}_{name}.txt")
 
                 logger.success(
-                    f"  OK ({elapsed:.1f}s, {result.execution.total_tokens} tokens, "
-                    f"{result.execution.inference_count} inferences, "
-                    f"${result.cost.total_cost_usd:.6f})"
+                    f"  ✅ {elapsed:.1f}s | {result.execution.total_tokens} tokens "
+                    f"({result.execution.prompt_tokens} in + {result.execution.completion_tokens} out) | "
+                    f"{result.execution.inference_count} inferences | "
+                    f"${result.cost.total_cost_usd:.6f} | model={result.model}"
                 )
 
                 if rate_limit_seconds > 0:
@@ -190,7 +198,9 @@ def run_experiments(
                     time.sleep(delay)
 
             except Exception as e:
-                logger.error(f"  FAILED: {e}")
+                logger.error(
+                    f"  ❌ FAILED: {issue.instance_id} ({name}, {issue.difficulty}) — {type(e).__name__}: {str(e)[:200]}"
+                )
 
                 # --- Truncated JSON → patch = "" ---
                 error_entry = {
@@ -214,6 +224,7 @@ def run_experiments(
                     instance_id=issue.instance_id,
                     strategy=name,
                     model=provider_name,
+                    difficulty=issue.difficulty,
                     execution=empty_exec,
                     cost=empty_cost,
                     evaluation=empty_eval,
