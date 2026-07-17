@@ -127,15 +127,23 @@ def _auto_fix_hunk_headers(patch: str) -> str:
 
 
 def _clean_patch(text: str) -> str:
-    """Strip, normalize newline, lalu validasi; auto-fix hunk headers kalau mismatch."""
+    """Strip, normalize newline, lalu validasi; auto-fix hunk headers kalau mismatch.
+
+    Tambah trailing newline di akhir supaya git apply tidak gagal dengan
+    'malformed patch at line N' (patch harus berakhir dengan \\n).
+    """
     if not text:
         return ""
     patch = _normalize_newlines(text).strip()
     if _is_valid_patch_syntax(patch):
+        if not patch.endswith("\n"):
+            patch += "\n"
         return patch
     fixed = _auto_fix_hunk_headers(patch)
     if _is_valid_patch_syntax(fixed):
         logger.info("Hunk headers auto-fixed successfully")
+        if not fixed.endswith("\n"):
+            fixed += "\n"
         return fixed
     logger.warning("Patch failed syntax validation even after auto-fix")
     return ""
