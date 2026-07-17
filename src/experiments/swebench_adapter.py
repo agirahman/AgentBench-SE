@@ -77,15 +77,11 @@ def _is_valid_patch_syntax(text: str) -> bool:
 
 
 def _normalize_newlines(text: str) -> str:
-    """Model sering double-escape newline di JSON ('\\\\n' vs '\\n').
-
-    Kalau patch gak punya newline sungguhan tapi punya literal '\\n',
-    konversi jadi newline bener.
-    """
-    if "\n" in text:
-        return text
+    """Konversi double-escape newline hasil kompresi JSON secara menyeluruh."""
     if "\\n" in text:
-        return text.replace("\\n", "\n").replace("\\t", "\t")
+        text = text.replace("\\n", "\n")
+    if "\\t" in text:
+        text = text.replace("\\t", "\t")
     return text
 
 
