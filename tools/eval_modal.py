@@ -15,8 +15,9 @@ from pathlib import Path
 if sys.platform == "win32":
     import types
     resource = types.ModuleType("resource")
-    resource.getrlimit = lambda x: (0, 0)
-    resource.RLIMIT_NOFILE = 0
+    setattr(resource, "getrlimit", lambda *_: (0, 0))
+    setattr(resource, "setrlimit", lambda *_: None)   # jaga-jaga kalau dipanggil juga
+    setattr(resource, "RLIMIT_NOFILE", 0)
     sys.modules["resource"] = resource
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
@@ -87,31 +88,52 @@ def main():
         timeout=1800,  # 30 min per instance
     )
 
-    # Parse results from Modal output directory
-    from swebench.harness.constants import RUN_EVALUATION_LOG_DIR
-    log_dir = Path(RUN_EVALUATION_LOG_DIR) / run_id / predictions_list[0].get("model_name_or_path", "None").replace("/", "__")
-    results = []
-    resolved_count = 0
-    for pred in predictions_list:
-        inst_id = pred[KEY_INSTANCE_ID]
-        report_path = log_dir / inst_id / "report.json"
-        if report_path.exists():
-            report = json.loads(report_path.read_text())
-            resolved = report.get(inst_id, {}).get("resolved", False)
-            results.append({
-                "instance_id": inst_id,
-                "resolved": resolved,
-            })
-            if resolved:
-                resolved_count += 1
-        else:
-            results.append({
-                "instance_id": inst_id,
-                "resolved": False,
-                "error": "report not found",
-            })
+    # Parse results from Modal summary report file
+    # Modal writes "deepseek-v4-flash.modal-direct.json" locally
+    summary_files = list(Path(".").glob("deepseek-v4-flash.modal-*.json"))
+    if not summary_files:
+        summary_files = list(Path(".").glob("*.modal-*.json"))
 
-    total_count = len(results)
+    resolved_count = 0
+    results = []
+    if summary_files:
+        summary_file = summary_files[-1]
+        print(f"Reading summary from {summary_file}")
+        summary = json.loads(summary_file.read_text(encoding="utf-8"))
+        resolved_ids = set(summary.get("resolved_ids", []))
+        error_ids = set(summary.get("error_ids", []))
+        unresolved_ids = set(summary.get("unresolved_ids", []))
+        total_count = summary.get("submitted_instances", 0)
+
+        for pred in predictions_list:
+            inst_id = pred[KEY_INSTANCE_ID]
+            if inst_id in resolved_ids:
+                results.append({"instance_id": inst_id, "resolved": True})
+                resolved_count += 1
+            elif inst_id in error_ids:
+                results.append({"instance_id": inst_id, "resolved": False, "error": "eval error"})
+            else:
+                results.append({"instance_id": inst_id, "resolved": False})
+    else:
+        # Fallback: look for report.json in local logs (if Modal synced them)
+        from swebench.harness.constants import RUN_EVALUATION_LOG_DIR
+        model_name = predictions_list[0].get("model_name_or_path", "None").replace("/", "__")
+        log_dir = Path(RUN_EVALUATION_LOG_DIR) / run_id / model_name
+
+        total_count = 0
+        for pred in predictions_list:
+            inst_id = pred[KEY_INSTANCE_ID]
+            total_count += 1
+            report_path = log_dir / inst_id / "report.json"
+            if report_path.exists():
+                report = json.loads(report_path.read_text())
+                resolved = report.get(inst_id, {}).get("resolved", False)
+                results.append({"instance_id": inst_id, "resolved": resolved})
+                if resolved:
+                    resolved_count += 1
+            else:
+                results.append({"instance_id": inst_id, "resolved": False, "error": "report not found"})
+
     success_rate = (resolved_count / total_count * 100) if total_count > 0 else 0
 
     # Print summary
