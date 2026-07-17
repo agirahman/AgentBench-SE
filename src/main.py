@@ -87,8 +87,10 @@ def _save_experiment_config(
         },
         "strategies": strategy_names,
         "rate_limiting": {
-            "enabled": args.rate_limit > 0,
-            "interval_seconds": args.rate_limit,
+            "enabled": True,
+            "mode": "random_uniform",
+            "min_seconds": 5,
+            "max_seconds": 10,
         },
     }
     Path(f"{output_dir}/experiment.yaml").write_text(
