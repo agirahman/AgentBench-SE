@@ -78,7 +78,8 @@ def main():
 
     # Run evaluation
     print(f"Running Modal evaluation ({len(instances)} instances)...")
-    results = run_instances_modal(
+    print(f"View at: https://modal.com/apps/agirahman/main")
+    run_instances_modal(
         predictions=predictions_dict,
         instances=instances,
         full_dataset=full_dataset,
@@ -86,8 +87,30 @@ def main():
         timeout=1800,  # 30 min per instance
     )
 
-    # Parse results
-    resolved_count = sum(1 for r in results if r.get("resolved", False))
+    # Parse results from Modal output directory
+    from swebench.harness.constants import RUN_EVALUATION_LOG_DIR
+    log_dir = Path(RUN_EVALUATION_LOG_DIR) / run_id / predictions_list[0].get("model_name_or_path", "None").replace("/", "__")
+    results = []
+    resolved_count = 0
+    for pred in predictions_list:
+        inst_id = pred[KEY_INSTANCE_ID]
+        report_path = log_dir / inst_id / "report.json"
+        if report_path.exists():
+            report = json.loads(report_path.read_text())
+            resolved = report.get(inst_id, {}).get("resolved", False)
+            results.append({
+                "instance_id": inst_id,
+                "resolved": resolved,
+            })
+            if resolved:
+                resolved_count += 1
+        else:
+            results.append({
+                "instance_id": inst_id,
+                "resolved": False,
+                "error": "report not found",
+            })
+
     total_count = len(results)
     success_rate = (resolved_count / total_count * 100) if total_count > 0 else 0
 
