@@ -4,6 +4,7 @@ from pathlib import Path
 
 from providers.gemini_provider import GeminiProvider
 from providers.groq_provider import GroqProvider
+from providers.deepseek_provider import DeepSeekProvider
 from strategies.direct_strategy import DirectStrategy
 from strategies.planning_strategy import PlanningStrategy
 from strategies.review_strategy import ReviewStrategy
@@ -16,17 +17,6 @@ from config import Config
 def parse_args():
     parser = argparse.ArgumentParser(description="AgentBench-SE Experiment Runner")
     parser.add_argument(
-        "--repo",
-        default="django",
-        help="Filter repo dari SWE-bench (default: django)",
-    )
-    parser.add_argument(
-        "--n-issues",
-        type=int,
-        default=15,
-        help="Jumlah issue yang diproses (default: 15)",
-    )
-    parser.add_argument(
         "--output",
         default="results",
         help="Direktori output (default: results)",
@@ -34,7 +24,7 @@ def parse_args():
     parser.add_argument(
         "--provider",
         default="gemini",
-        choices=["gemini", "groq"],
+        choices=["gemini", "groq", "deepseek"],
         help="Provider AI (default: gemini)",
     )
     parser.add_argument(
@@ -42,6 +32,11 @@ def parse_args():
         type=float,
         default=1.5,
         help="Delay antar strategy run dalam detik (default: 1.5)",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Lanjutkan eksperimen sebelumnya — skip issue yang sudah selesai",
     )
     return parser.parse_args()
 
@@ -64,13 +59,21 @@ def _save_experiment_config(
         },
         "provider": {
             "name": args.provider,
-            "model": Config.GEMINI_MODEL if args.provider == "gemini" else Config.GROQ_MODEL,
+            "model": (
+            Config.GEMINI_MODEL if args.provider == "gemini"
+            else Config.GROQ_MODEL if args.provider == "groq"
+            else Config.DEEPSEEK_MODEL
+        ),
             "temperature": Config.TEMPERATURE,
             "max_retries": Config.MAX_RETRIES,
         },
         "dataset": {
             "name": "princeton-nlp/SWE-bench_Lite",
-            "filter": args.repo,
+            "repos": {
+                "psf/requests": 20,
+                "mwaskom/seaborn": 15,
+                "django/django": 15,
+            },
             "n_issues": issue_count,
         },
         "strategies": strategy_names,
@@ -107,16 +110,20 @@ def main():
 
     if args.provider == "gemini":
         Provider = GeminiProvider
-    else:
+    elif args.provider == "groq":
         Provider = GroqProvider
+    else:
+        Provider = DeepSeekProvider
 
     provider = Provider()
     if not provider.health_check():
         logger.error("Health check failed — aborting")
         return
 
-    logger.info(f"Loading SWE-bench Lite — repo={args.repo}, n={args.n_issues}")
-    issues = select_issues(repo_filter=args.repo, n=args.n_issues)
+    from dataset_loader import DEFAULT_REPO_SPECS
+    logger.info(f"Loading SWE-bench Lite — multi-repo: {DEFAULT_REPO_SPECS}")
+    issues = select_issues()
+    logger.info(f"Loaded {len(issues)} issues")
     logger.info(f"Loaded {len(issues)} issues")
 
     strategies = {
@@ -134,6 +141,7 @@ def main():
         base_dir=args.output,
         provider_name=args.provider,
         rate_limit_seconds=args.rate_limit,
+        resume=args.resume,
     )
 
     # Save experiment.yaml to per-experiment folder
