@@ -1,0 +1,109 @@
+#!/usr/bin/env python
+"""
+Modal Cloud evaluation wrapper untuk SWE-bench predictions.
+
+Usage:
+    python tools/eval_modal.py results/EXP-20260717-009/predictions/direct.jsonl
+"""
+
+import json
+import sys
+from pathlib import Path
+
+from swebench.harness.modal_eval import run_instances_modal, validate_modal_credentials
+from swebench.harness.utils import get_predictions_from_file, load_swebench_dataset
+from swebench.harness.constants import KEY_INSTANCE_ID
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python tools/eval_modal.py <predictions_jsonl_path>")
+        sys.exit(1)
+
+    predictions_path = Path(sys.argv[1])
+    if not predictions_path.exists():
+        print(f"Error: {predictions_path} not found")
+        sys.exit(1)
+
+    # Validate Modal credentials
+    try:
+        validate_modal_credentials()
+    except Exception as e:
+        print(f"Error: Modal credentials not valid: {e}")
+        print("Run: modal token new")
+        sys.exit(1)
+
+    # Load predictions (list of dicts)
+    print(f"Loading predictions from {predictions_path}...")
+    predictions_list = get_predictions_from_file(
+        str(predictions_path),
+        dataset_name="princeton-nlp/SWE-bench_Lite",
+        split="test",
+    )
+    print(f"Loaded {len(predictions_list)} predictions")
+
+    # Convert list to dict for run_instances_modal
+    predictions_dict = {
+        pred[KEY_INSTANCE_ID]: pred
+        for pred in predictions_list
+    }
+
+    # Load full dataset
+    print("Loading SWE-bench Lite dataset...")
+    full_dataset = load_swebench_dataset(
+        name="princeton-nlp/SWE-bench_Lite",
+        split="test",
+    )
+
+    # Get instance IDs from predictions
+    instance_ids = list(predictions_dict.keys())
+
+    # Filter dataset for our instances
+    instances = [inst for inst in full_dataset if inst[KEY_INSTANCE_ID] in instance_ids]
+    print(f"Matched {len(instances)} instances from dataset")
+
+    # Generate run ID
+    run_id = f"modal-{predictions_path.stem}"
+
+    # Run evaluation
+    print(f"Running Modal evaluation ({len(instances)} instances)...")
+    results = run_instances_modal(
+        predictions=predictions_dict,
+        instances=instances,
+        full_dataset=full_dataset,
+        run_id=run_id,
+        timeout=1800,  # 30 min per instance
+    )
+
+    # Parse results
+    resolved_count = sum(1 for r in results if r.get("resolved", False))
+    total_count = len(results)
+    success_rate = (resolved_count / total_count * 100) if total_count > 0 else 0
+
+    # Print summary
+    print("\n" + "=" * 60)
+    print(f"Evaluation Complete: {predictions_path.name}")
+    print("=" * 60)
+    print(f"Total instances: {total_count}")
+    print(f"Resolved: {resolved_count}")
+    print(f"Unresolved: {total_count - resolved_count}")
+    print(f"Success rate: {success_rate:.1f}%")
+    print("=" * 60)
+
+    # Save results
+    output_file = predictions_path.parent / f"{predictions_path.stem}_results.json"
+    with open(output_file, "w") as f:
+        json.dump({
+            "predictions_file": str(predictions_path),
+            "run_id": run_id,
+            "total": total_count,
+            "resolved": resolved_count,
+            "unresolved": total_count - resolved_count,
+            "success_rate": success_rate,
+            "results": results,
+        }, f, indent=2, default=str)
+    print(f"Results saved to {output_file}")
+
+
+if __name__ == "__main__":
+    main()
