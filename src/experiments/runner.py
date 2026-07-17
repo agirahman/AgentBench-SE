@@ -1,5 +1,6 @@
 import json
 import os
+import random
 import time
 from datetime import datetime
 from pathlib import Path
@@ -184,7 +185,9 @@ def run_experiments(
                 )
 
                 if rate_limit_seconds > 0:
-                    time.sleep(rate_limit_seconds)
+                    delay = random.uniform(5, 10)
+                    logger.info(f"Rate limit delay: {delay:.1f}s")
+                    time.sleep(delay)
 
             except Exception as e:
                 logger.error(f"  FAILED: {e}")
