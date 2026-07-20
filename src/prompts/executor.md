@@ -17,3 +17,5 @@ IMPORTANT:
 - Every hunk header like @@ -N,M +P,Q @@ must exactly match the number of context, added, and removed lines that follow.
 - Do NOT truncate the diff. Include ALL context lines for each hunk.
 - COUNT PRECISELY: Write each hunk body first, count every line (context " ", added "+", removed "-", including blank lines), THEN set the @@ header numbers to match that count. The header count is the TOTAL lines in the hunk, not just changed lines. A mismatch between header and body invalidates the entire patch, so recount and verify before outputting.
+
+CRITICAL: Double-check the line counts in your Hunk Header (@@ -N,M +P,Q @@). You must ensure that the values of M and Q match exactly with the actual number of code lines you output below it. Do not miscount, as any discrepancy will break the automated evaluation system!

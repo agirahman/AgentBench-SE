@@ -8,19 +8,18 @@ from models.inference import InferenceResult
 from evaluation.retry import with_retry
 
 
-class OpenCodeProvider:
+class OpenRouterProvider:
     def __init__(self):
-        if not Config.OPENCODE_API_KEY:
-            raise ValueError("OPENCODE_API_KEY tidak ditemukan pada file .env")
+        if not Config.OPENROUTER_API_KEY:
+            raise ValueError("OPENROUTER_API_KEY tidak ditemukan pada file .env")
 
         self.client = OpenAI(
-            api_key=Config.OPENCODE_API_KEY,
-            # base_url="https://opencode.ai/zen/v1",
-            base_url="http://localhost:20128/v1",
+            api_key=Config.OPENROUTER_API_KEY,
+            base_url="https://openrouter.ai/api/v1",
         )
-        self.model = Config.OPENCODE_MODEL
+        self.model = Config.OPENROUTER_MODEL
 
-        logger.info(f"OpenCode model : {self.model}")
+        logger.info(f"OpenRouter model : {self.model}")
 
     @with_retry()
     def generate(self, prompt: str, role: str = "") -> InferenceResult:
@@ -31,8 +30,7 @@ class OpenCodeProvider:
                 messages=[{"role": "user", "content": prompt}],
                 temperature=Config.TEMPERATURE,
                 timeout=60,
-                max_tokens=8192,
-                response_format={"type": "json_object"},
+                max_tokens=4096,
             )
 
             elapsed = time.perf_counter() - t0
@@ -45,7 +43,7 @@ class OpenCodeProvider:
 
             if finish == "length":
                 logger.warning(
-                    f"OpenCode response truncated (finish_reason='length'). "
+                    f"OpenRouter response truncated (finish_reason='length'). "
                     f"Tokens: {total_t}. Role: {role}"
                 )
 
@@ -63,15 +61,15 @@ class OpenCodeProvider:
             )
 
         except Exception as e:
-            logger.error(f"OpenCode Generate Error: {e}")
+            logger.error(f"OpenRouter Generate Error: {e}")
             raise
 
     def health_check(self) -> bool:
         try:
-            self.generate("Reply with only: {\"status\": \"ok\"}")
-            logger.success("OpenCode Health Check Passed")
+            self.generate("Reply with only: OK")
+            logger.success("OpenRouter Health Check Passed")
             return True
 
         except Exception as e:
-            logger.error(f"OpenCode Health Check Failed: {e}")
+            logger.error(f"OpenRouter Health Check Failed: {e}")
             return False

@@ -5,6 +5,7 @@ from pathlib import Path
 from providers.gemini_provider import GeminiProvider
 from providers.groq_provider import GroqProvider
 from providers.opencode_provider import OpenCodeProvider
+from providers.openrouter_provider import OpenRouterProvider
 from strategies.direct_strategy import DirectStrategy
 from strategies.planning_strategy import PlanningStrategy
 from strategies.review_strategy import ReviewStrategy
@@ -12,6 +13,7 @@ from experiments.runner import run_experiments
 from dataset_loader import select_issues
 from utils.logger import logger
 from config import Config
+from evaluation.cost import PricingTable
 
 
 def parse_args():
@@ -24,7 +26,7 @@ def parse_args():
     parser.add_argument(
         "--provider",
         default="gemini",
-        choices=["gemini", "groq", "opencode"],
+        choices=["gemini", "groq", "opencode", "openrouter"],
         help="Provider AI (default: gemini)",
     )
     parser.add_argument(
@@ -55,6 +57,13 @@ def _save_experiment_config(
     experiment_id: str = "",
 ) -> None:
     """Simpan experiment.yaml untuk reproducibility (Kritik #8)."""
+    model_name = (
+        Config.GEMINI_MODEL if args.provider == "gemini"
+        else Config.GROQ_MODEL if args.provider == "groq"
+        else Config.OPENROUTER_MODEL if args.provider == "openrouter"
+        else Config.OPENCODE_MODEL
+    )
+    pricing = PricingTable.get(model_name) or {}
     config = {
         "experiment": {
             "name": "AgentBench-SE Experiment",
@@ -65,11 +74,7 @@ def _save_experiment_config(
         },
         "provider": {
             "name": args.provider,
-            "model": (
-            Config.GEMINI_MODEL if args.provider == "gemini"
-            else Config.GROQ_MODEL if args.provider == "groq"
-            else Config.OPENCODE_MODEL
-        ),
+            "model": model_name,
             "temperature": Config.TEMPERATURE,
             "max_retries": Config.MAX_RETRIES,
         },
@@ -86,6 +91,20 @@ def _save_experiment_config(
             "n_issues": issue_count,
         },
         "strategies": strategy_names,
+        "pricing": {
+            "provider": args.provider,
+            "model": model_name,
+            "pricing_source": pricing.get("pricing_version", "?"),
+            "input_cost_per_1m_tokens": pricing.get("input_per_million", 0),
+            "output_cost_per_1m_tokens": pricing.get("output_per_million", 0),
+            "currency": "USD",
+            "exchange_rate": {
+                "from": "USD",
+                "to": "IDR",
+                "rate": Config.USD_IDR_RATE,
+                "source": "ENV",
+            },
+        },
         "rate_limiting": {
             "enabled": True,
             "mode": "random_uniform",
@@ -123,6 +142,8 @@ def main():
         Provider = GeminiProvider
     elif args.provider == "groq":
         Provider = GroqProvider
+    elif args.provider == "openrouter":
+        Provider = OpenRouterProvider
     else:
         Provider = OpenCodeProvider
 

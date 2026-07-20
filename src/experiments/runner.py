@@ -2,6 +2,7 @@ import json
 import os
 import random
 import time
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
@@ -20,6 +21,8 @@ from models.inference import InferenceRun
 from experiments.csv_exporter import flatten_for_csv
 from experiments.swebench_adapter import extract_diff
 from evaluation.statistics import export_statistics_json, generate_summary_md
+from evaluation.cost import PricingTable
+from config import Config
 from experiment_id import generate_experiment_id, create_experiment_dir
 from utils.logger import logger
 
@@ -130,7 +133,7 @@ def run_experiments(
         for name, strategy in strategies.items():
             done += 1
 
-            # Resume skip
+            # Resume skip1
             if issue.instance_id in done_ids[name]:
                 skipped += 1
                 logger.info(f"[{done}/{total}] SKIP (resume) {name} on {issue.instance_id}")
@@ -143,18 +146,27 @@ def run_experiments(
             try:
                 t0 = time.time()
                 logger.info(f"  → Strategy initialized: {name}")
-                logger.info(f"  → API call to OpenCode...")
+                logger.info(f"  → API call to {provider_name}...")
                 patch, result = strategy.run(issue)
                 result.difficulty = issue.difficulty
                 elapsed = time.time() - t0
                 result.evaluation.timestamp = datetime.utcnow().isoformat()
-                all_results.append(result)
 
                 # --- Truncated JSON protection ---
                 try:
-                    diff = extract_diff(patch.response)
+                    last_finish = (
+                        result.execution.inferences[-1].finish_reason
+                        if result.execution.inferences else ""
+                    )
+                    patch_result = extract_diff(patch.response, finish_reason=last_finish)
+                    diff = patch_result.patch
+                    patch_status = patch_result.status
                 except Exception:
                     diff = ""
+                    patch_status = "PARSE_ERROR"
+
+                result.patch_status = patch_status
+                all_results.append(result)
 
                 # --- Savepoint append: per-strategy .jsonl ---
                 pred_entry = {
@@ -162,6 +174,7 @@ def run_experiments(
                     "model_patch": diff if diff.strip() else "",
                     "model_name_or_path": result.model,
                     "strategy": name,
+                    "patch_status": patch_status,
                 }
                 strategy_jsonl = str(pred_dir / f"{name}.jsonl")
                 _append_jsonl(strategy_jsonl, pred_entry)
@@ -174,7 +187,7 @@ def run_experiments(
                 if not diff.strip():
                     logger.warning(
                         f"  ⚠ Patch empty/invalid for {issue.instance_id} ({name}) — "
-                        f"recorded as empty (truncated or invalid JSON)"
+                        f"recorded as empty ({patch_status})"
                     )
                 else:
                     Path(f"{exp_dir}/patches/{issue.instance_id}_{name}.txt").write_text(
@@ -208,6 +221,7 @@ def run_experiments(
                     "model_patch": "",
                     "model_name_or_path": provider_name,
                     "strategy": name,
+                    "patch_status": "TIMEOUT",
                 }
                 strategy_jsonl = str(pred_dir / f"{name}.jsonl")
                 _append_jsonl(strategy_jsonl, error_entry)
@@ -228,6 +242,7 @@ def run_experiments(
                     execution=empty_exec,
                     cost=empty_cost,
                     evaluation=empty_eval,
+                    patch_status="TIMEOUT",
                 ))
 
     # --- Final exports ---
@@ -238,11 +253,13 @@ def run_experiments(
     logger.success(f"CSV exported: {csv_path}")
 
     stats_path = f"{exp_dir}/statistics.json"
-    export_statistics_json(df, stats_path)
+    model_name = df["model"].iloc[0] if len(df) else provider_name
+    pricing = PricingTable.get(model_name) if model_name else None
+    export_statistics_json(df, stats_path, pricing=pricing, usd_idr_rate=Config.USD_IDR_RATE)
     logger.success(f"Statistics exported: {stats_path}")
 
     summary_path = f"{exp_dir}/summary.md"
-    generate_summary_md(df, summary_path)
+    generate_summary_md(df, summary_path, pricing=pricing, usd_idr_rate=Config.USD_IDR_RATE)
     logger.success(f"Summary markdown exported: {summary_path}")
 
     # Log per-strategy counts
@@ -253,6 +270,32 @@ def run_experiments(
 
     if skipped:
         logger.info(f"Resume: skipped {skipped} already-completed entries")
+
+    # --- Failure summary ---
+    valid = sum(1 for p in all_predictions if p.get("patch_status") == "VALID")
+    total_preds = len(all_predictions)
+    failed = total_preds - valid
+    from collections import Counter
+    status_counts = Counter(p.get("patch_status", "UNKNOWN") for p in all_predictions)
+
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info(f"  Run Summary: {exp_id}")
+    logger.info(f"  Total runs : {total_preds}")
+    logger.info(f"  Valid      : {valid} ({valid/total_preds*100:.1f}%)" if total_preds else "  Valid: 0")
+    logger.info(f"  Failed     : {failed} ({failed/total_preds*100:.1f}%)" if total_preds else "  Failed: 0")
+    if failed:
+        logger.info("  Breakdown:")
+        for status_name in ("MALFORMED_HEADER", "PLACEHOLDER_ONLY", "OFFSET_TOO_LARGE",
+                            "BAD_BODY", "HUNK_MISMATCH", "TRUNCATED", "PARSE_ERROR",
+                            "NO_DIFF", "EMPTY", "TIMEOUT"):
+            cnt = status_counts.get(status_name, 0)
+            if cnt:
+                logger.info(f"    {status_name}: {cnt}")
+    norm = status_counts.get("NORMALIZE", 0)
+    if norm:
+        logger.info(f"  Normalized: {norm} (hunk header corrected, still valid)")
+    logger.info("=" * 60)
 
     logger.remove(_sink_id)
     return df, exp_id

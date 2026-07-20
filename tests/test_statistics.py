@@ -6,6 +6,9 @@ from evaluation.statistics import (
     compute_success_rate,
     compute_avg_time_per_inference,
     compute_cost_per_success,
+    compute_patch_validity_rate,
+    compute_patch_quality,
+    summarize_run_failure,
 )
 
 
@@ -23,6 +26,7 @@ def sample_df():
                 "cost_usd": 0.001,
                 "cost_idr": 16.5,
                 "error": "",
+                "patch_status": "VALID",
             },
             {
                 "instance_id": "django-2",
@@ -33,6 +37,7 @@ def sample_df():
                 "cost_usd": 0.002,
                 "cost_idr": 33.0,
                 "error": "timeout",
+                "patch_status": "MALFORMED_HEADER",
             },
             {
                 "instance_id": "django-3",
@@ -43,6 +48,7 @@ def sample_df():
                 "cost_usd": 0.004,
                 "cost_idr": 66.0,
                 "error": "",
+                "patch_status": "VALID",
             },
             {
                 "instance_id": "django-4",
@@ -53,6 +59,7 @@ def sample_df():
                 "cost_usd": 0.005,
                 "cost_idr": 82.5,
                 "error": "",
+                "patch_status": "NORMALIZE",
             },
         ]
     )
@@ -95,3 +102,43 @@ class TestSummary:
         assert "planning" in s.index
         assert "mean_execution_time" in s.columns
         assert "mean_inference_count" in s.columns
+
+
+class TestPatchValidityRate:
+    def test_direct_half_valid(self, sample_df):
+        pvr = compute_patch_validity_rate(sample_df)
+        # direct: 1 VALID / 2 = 0.5
+        assert pvr["direct"] == pytest.approx(0.5)
+        # planning: 2 VALID / 2 = 1.0
+        assert pvr["planning"] == pytest.approx(1.0)
+
+
+class TestFailureBreakdown:
+    def test_counts_per_status(self, sample_df):
+        fb = summarize_run_failure(sample_df)
+        assert fb.loc["direct", "VALID"] == 1
+        assert fb.loc["direct", "MALFORMED_HEADER"] == 1
+        assert fb.loc["planning", "VALID"] == 1
+        assert fb.loc["planning", "NORMALIZE"] == 1
+
+
+class TestPatchQuality:
+    def test_quality_counts(self, sample_df):
+        pq = compute_patch_quality(sample_df)
+        # direct: 1 VALID + 0 NORMALIZE + 1 INVALID
+        assert pq.loc["direct", "valid"] == 1
+        assert pq.loc["direct", "normalize"] == 0
+        assert pq.loc["direct", "invalid"] == 1
+        # planning: 1 VALID + 1 NORMALIZE + 0 INVALID
+        assert pq.loc["planning", "valid"] == 1
+        assert pq.loc["planning", "normalize"] == 1
+        assert pq.loc["planning", "invalid"] == 0
+
+    def test_quality_percentages(self, sample_df):
+        pq = compute_patch_quality(sample_df)
+        assert pq.loc["direct", "valid_pct"] == 50.0
+        assert pq.loc["direct", "normalize_pct"] == 0.0
+        assert pq.loc["direct", "invalid_pct"] == 50.0
+        assert pq.loc["planning", "valid_pct"] == 50.0
+        assert pq.loc["planning", "normalize_pct"] == 50.0
+        assert pq.loc["planning", "invalid_pct"] == 0.0

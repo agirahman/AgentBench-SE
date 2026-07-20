@@ -11,3 +11,5 @@ Create a structured analysis plan. Output ONLY valid JSON in this exact format:
   "repair_strategy": "<step by step approach>",
   "confidence": "High|Medium|Low"
 }
+
+IMPORTANT: Focus your plan on pinpointing the exact file paths and specific line scopes that need alteration. Keep the logical steps concise so the execution phase can implement the patch with minimal syntax distortion.

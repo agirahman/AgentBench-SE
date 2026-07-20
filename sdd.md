@@ -81,7 +81,7 @@ Penelitian ini mengevaluasi **tiga strategi orkestrasi AI Agent** dalam menyeles
 | Komponen | Spesifikasi |
 |:---------|:------------|
 | **Dataset** | SWE-bench Lite — 15–20 issue dari repo Django |
-| **Model AI** | Gemini 2.0 Flash Lite (utama), Groq/Llama (fallback development) |
+| **Model AI** | Tencent Hunyuan 3 (`tencent/hy3`) via OpenRouter (utama), Groq/Llama (fallback development) |
 | **Evaluasi** | SWE-bench Harness (Docker) |
 | **Temperature** | 0.2 |
 | **Max Retries** | 3 |
@@ -95,14 +95,14 @@ Penelitian ini mengevaluasi **tiga strategi orkestrasi AI Agent** dalam menyeles
 
 ```mermaid
 flowchart LR
-    A[SWE-bench Lite<br/>15–20 issue] --> B[main.py<br/>Experiment Runner]
+    A[SWE-bench Lite<br/>50 issues] --> B[main.py<br/>Experiment Runner]
     B --> C1[DirectStrategy<br/>S1]
     B --> C2[PlanningStrategy<br/>S2]
     B --> C3[ReviewStrategy<br/>S3]
-    C1 --> D[GeminiProvider]
+    C1 --> D[OpenRouterProvider\n(tencent/hy3)]
     C2 --> D
     C3 --> D
-    D --> E[Patch + Metadata]
+    D --> E[InferenceResult + CostSummary]
     E --> F[results/csv/experiment_results.csv]
     E --> G[results/predictions/predictions.jsonl]
     G --> H[SWE-bench Harness<br/>Docker]
@@ -1147,7 +1147,7 @@ Pertanyaan penelitian akan dijawab dengan mengkuantifikasi:
 
 | No | Task | Status | Prioritas |
 |:---|:-----|:-------|:----------|
-| 38 | Final run (15 issues, Gemini) | ⏳ Ready to execute | 🔴 P0 |
+| 38 | Final run (50 issues, tencent/hy3 via OpenRouter) | ⏳ Ready to execute | 🔴 P0 |
 | 39 | Analisis CSV → RQ1, RQ2, RQ3 | ⏳ After final run | 🔴 P0 |
 
 ## ⚠️ Skipped
@@ -1167,15 +1167,14 @@ Pertanyaan penelitian akan dijawab dengan mengkuantifikasi:
 # 0. Setup Environment
 # ──────────────────────────────────
 pip install -r requirements.txt
-pip install swebench datasets pandas
 
 # ──────────────────────────────────
 # 1. Cek Health Provider
 # ──────────────────────────────────
 python -c "
-from providers.gemini_provider import GeminiProvider
-p = GeminiProvider()
-print('Gemini:', p.health_check())
+from providers.openrouter_provider import OpenRouterProvider
+p = OpenRouterProvider()
+print('OpenRouter:', p.health_check())
 "
 
 # ──────────────────────────────────
@@ -1209,8 +1208,8 @@ ls results/full_run/predictions/
 
 # 9. Catatan Penting
 
-## Token Usage di Gemini API
-Gemini `generate_content()` mengembalikan `response.usage_metadata`:
+## Token Usage di OpenRouter / Provider API
+Semua provider mengembalikan usage metadata yang dibawa oleh `InferenceResult`:
 - `prompt_token_count` — token input
 - `candidates_token_count` — token output
 - `total_token_count` — total
@@ -1236,7 +1235,7 @@ python -m swebench.harness.run_evaluation \
 ```
 
 ## Fallback Provider
-Groq digunakan hanya jika Gemini sedang rate-limited atau quota habis. Untuk konsistensi penelitian, **semua eksperimen utama harus pakai Gemini**. Groq hanya untuk testing saat development.
+Groq dan Gemini digunakan hanya jika OpenRouter sedang rate-limited atau quota habis. Untuk konsistensi penelitian, **semua eksperimen utama harus pakai tencent/hy3 via OpenRouter**. Groq/Gemini hanya untuk testing saat development.
 
 ## Desain Minimal
 Proyek ini sengaja dibuat **tanpa abstract class, tanpa complex controller, tanpa Docker untuk strategi**. Setiap strategi adalah kelas mandiri yang memanggil provider secara sequential. Ini cukup untuk menjawab RQ1, RQ2, RQ3 tanpa overengineering.

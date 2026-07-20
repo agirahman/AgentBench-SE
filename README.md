@@ -17,7 +17,7 @@
 
 ## Tentang Proyek
 
-AgentBench-SE adalah eksperimen perangkat lunak yang membandingkan tiga strategi orkestrasi agent dalam menyelesaikan isu *bug fixing* Python. Setiap strategi memakai model AI yang sama (Gemini atau Groq) sehingga perbedaan hasil murni dipengaruhi oleh struktur orkestrasi.
+AgentBench-SE adalah eksperimen perangkat lunak yang membandingkan tiga strategi orkestrasi agent dalam menyelesaikan isu *bug fixing* Python. Setiap strategi memakai model AI yang sama (tencent/hy3) sehingga perbedaan hasil murni dipengaruhi oleh struktur orkestrasi.
 
 Tujuan riset:
 
@@ -35,7 +35,7 @@ flowchart LR
     B --> C1[DirectStrategy]
     B --> C2[PlanningStrategy]
     B --> C3[ReviewStrategy]
-    C1 --> P[Provider: Gemini atau Groq]
+    C1 --> P[Provider: tencent/hy3 via OpenRouter]
     C2 --> P
     C3 --> P
     P --> D[Patch + Metadata]
@@ -64,7 +64,7 @@ AgantBech-SE/
 │   ├── config.py               # Loader .env
 │   ├── dataset_loader.py       # Filter SWE-bench Lite
 │   ├── view_results.py         # Inspeksi hasil
-│   ├── providers/              # GeminiProvider, GroqProvider
+│   ├── providers/              # OpenRouter, Gemini, Groq, OpenCode
 │   ├── strategies/             # Direct, Planning, Review
 │   ├── experiments/            # Runner + SWE-bench adapter
 │   ├── evaluation/             # Evaluator
@@ -88,9 +88,8 @@ AgantBech-SE/
 - Python 3.10+
 - pip
 - (Opsional) Docker Desktop — hanya bila ingin menjalankan SWE-bench harness evaluasi
-- API key untuk salah satu provider:
-  - `GEMINI_API_KEY` (utama)
-  - `GROQ_API_KEY` (fallback development)
+- API key untuk OpenRouter:
+  - `OPENROUTER_API_KEY` (utama — model: `tencent/hy3`)
 
 ## Instalasi
 
@@ -107,11 +106,8 @@ pip install -r requirements.txt
 Buat file `.env` di root proyek:
 
 ```env
-GEMINI_API_KEY=your_gemini_key
-GEMINI_MODEL=gemini-3-flash-preview
-
-GROQ_API_KEY=your_groq_key
-GROQ_MODEL=llama-3.3-70b-versatile
+OPENROUTER_API_KEY=your_openrouter_key
+OPENROUTER_MODEL=tencent/hy3:free
 
 TEMPERATURE=0.2
 MAX_RETRIES=3
@@ -119,7 +115,7 @@ USD_IDR_RATE=16500.0
 ```
 
 > [!NOTE]
-> Untuk konsistensi riset, eksperimen utama memakai Gemini. Groq hanya untuk iterasi cepat saat development.
+> Untuk konsistensi riset, eksperimen utama memakai OpenRouter (`tencent/hy3`).
 
 ## Penggunaan
 
@@ -127,23 +123,26 @@ USD_IDR_RATE=16500.0
 
 ```powershell
 # Dry run (2 issue, ~5 menit)
-python src/main.py --n-issues 2 --output results/dry_run
+python src/main.py --issues 2 --output results/dry_run
 
-# Full run (15 issue, ~45 menit)
-python src/main.py --n-issues 15 --output results/full_run
+# Full run (50 issue, ~2 jam)
+python src/main.py --output results/full_run
+
+# Resume dari run sebelumnya
+python src/main.py --resume --output results/full_run
 
 # Pakai Groq sebagai fallback
-python src/main.py --provider groq --n-issues 10
+python src/main.py --provider groq --issues 10
 ```
 
 Opsi CLI:
 
 | Argumen | Default | Keterangan |
 |:--------|:--------|:-----------|
-| `--repo` | `django` | Filter repo SWE-bench |
-| `--n-issues` | `15` | Jumlah issue yang diproses |
-| `--provider` | `groq` | `gemini` atau `groq` |
 | `--output` | `results` | Direktori output |
+| `--provider` | `gemini` | `gemini`, `groq`, `opencode`, `openrouter` |
+| `--issues` | (semua 50) | Batas jumlah issue untuk testing |
+| `--resume` | `False` | Lanjutkan dari run sebelumnya |
 | `--rate-limit` | `1.5` | Delay antar strategi (detik) |
 
 ### 2. Inspeksi hasil
@@ -156,10 +155,10 @@ python src/view_results.py errors
 
 Output:
 
-- `results/<run>/csv/experiment_results.csv` — metrik per issue per strategi.
-- `results/<run>/predictions/predictions.jsonl` — patch siap evaluasi SWE-bench.
-- `results/<run>/experiment.yaml` — konfigurasi eksperimen untuk reproduksibilitas.
-- `results/<run>/patches/<instance>_<strategy>.txt` — raw response per strategi.
+- `results/<EXP-ID>/results.csv` — metrik per issue per strategi.
+- `results/<EXP-ID>/predictions/predictions.jsonl` — patch siap evaluasi SWE-bench.
+- `results/<EXP-ID>/experiment.yaml` — konfigurasi eksperimen untuk reproduksibilitas.
+- `results/<EXP-ID>/artifacts/` — output per-agent (planner/executor/reviewer) per issue.
 
 ### 3. Evaluasi SWE-bench (opsional, butuh Docker)
 
@@ -187,8 +186,12 @@ Ringkasan rata-rata dicetak di akhir run. Untuk analisis RQ1-RQ3, lihat `sdd.md`
 
 ## Dokumentasi Terkait
 
-- [`sdd.md`](./sdd.md) — Spec-Driven Development lengkap (arsitektur, role, trade-off, runbook).
-- [`docs/setup-guide.md`](./docs/setup-guide.md) — Setup environment Windows + WSL2 + Docker.
-- [`docs/TECHNICAL.md`](./docs/TECHNICAL.md) — Catatan teknis komponen.
+- [`sdd.md`](./sdd.md) — Spec-Driven Development (arsitektur, role, trade-off, runbook).
+- [`docs/SRS.md`](./docs/SRS.md) — Software Requirements Specification (SA/DD).
+- [`docs/DSR_MAPPING.md`](./docs/DSR_MAPPING.md) — Design Science Research Mapping (SA/DD).
+- [`docs/USE_CASE_SPEC.md`](./docs/USE_CASE_SPEC.md) — Use Case Specification (SA/DD).
+- [`docs/RTM.md`](./docs/RTM.md) — Requirement Traceability Matrix (SA/DD).
+- [`docs/SYSTEM_VALIDATION.md`](./docs/SYSTEM_VALIDATION.md) — System Validation Report (SA/DD).
 - [`docs/FEEDBACK.md`](./docs/FEEDBACK.md) — Tanggapan atas kritik dosen pembimbing.
+- [`docs/TECHNICAL.md`](./docs/TECHNICAL.md) — Catatan teknis komponen.
 - [`graphify-out/`](./graphify-out) — Knowledge graph proyek (auto-generated).

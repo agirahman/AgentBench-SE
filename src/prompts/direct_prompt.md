@@ -23,3 +23,5 @@ CRITICAL RULES FOR THE PATCH FIELD:
 7. COUNT PRECISELY: The @@ line tells you exactly how many lines must follow. Write the body first, count every line (context " ", added "+", removed "-"), THEN write the header numbers to match. Blank lines in the body are still one line each.
 8. If you ADD one line with "+", Q increases by 1 but the surrounding context stays; if you REMOVE one line with "-", M increases by 1. The header count is the TOTAL lines in that hunk, not just the changed ones.
 9. MISMATCHED COUNTS MAKE THE WHOLE PATCH INVALID. Before outputting, recount each hunk body and verify the @@ header numbers equal your count. Never emit a header you have not verified.
+
+CRITICAL: Double-check the line counts in your Hunk Header (@@ -N,M +P,Q @@). You must ensure that the values of M and Q match exactly with the actual number of code lines you output below it. Do not miscount, as any discrepancy will break the automated evaluation system!

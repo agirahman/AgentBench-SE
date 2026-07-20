@@ -24,7 +24,7 @@ if sys.platform == "win32":
 
 from swebench.harness.modal_eval import run_instances_modal, validate_modal_credentials
 from swebench.harness.utils import get_predictions_from_file, load_swebench_dataset
-from swebench.harness.constants import KEY_INSTANCE_ID
+from swebench.harness.constants import KEY_INSTANCE_ID, KEY_MODEL
 
 
 def main():
@@ -89,8 +89,12 @@ def main():
     )
 
     # Parse results from Modal summary report file
-    # Modal writes "deepseek-v4-flash.modal-direct.json" locally
-    summary_files = list(Path(".").glob("deepseek-v4-flash.modal-*.json"))
+    # Modal writes "{model_name}.{run_id}.json" in CWD
+    model_name = predictions_list[0].get(KEY_MODEL, "model").replace("/", "__").replace(":", "_")
+    run_id_for_glob = f"modal-{predictions_path.stem}"
+    summary_files = list(Path(".").glob(f"{model_name}.{run_id_for_glob}.json"))
+    if not summary_files:
+        summary_files = list(Path(".").glob(f"{model_name}.modal-*.json"))
     if not summary_files:
         summary_files = list(Path(".").glob("*.modal-*.json"))
 

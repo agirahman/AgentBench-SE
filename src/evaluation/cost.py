@@ -25,14 +25,38 @@ class CostResult:
 class PricingTable:
     PRICING = {
         "gemini-3-flash-preview": {
-            "input_per_million": 0.25,
-            "output_per_million": 1.50,
+            "input_per_million": 0.50,
+            "output_per_million": 3.00,
             "currency": "USD",
             "pricing_version": "2026-07",
         },
         "deepseek-v4-flash": {
             "input_per_million": 0.14,
             "output_per_million": 0.28,
+            "currency": "USD",
+            "pricing_version": "2026-07",
+        },
+        "tencent/hy3:free": {
+            "input_per_million": 0.14,
+            "output_per_million": 0.58,
+            "currency": "USD",
+            "pricing_version": "2026-07",
+        },
+        "tencent/hy3": {
+            "input_per_million": 0.14,
+            "output_per_million": 0.58,
+            "currency": "USD",
+            "pricing_version": "2026-07",
+        },
+        "llama-3.3-70b-versatile": {
+            "input_per_million": 0.59,
+            "output_per_million": 0.79,
+            "currency": "USD",
+            "pricing_version": "2026-07",
+        },
+        "openai/gpt-oss-120b": {
+            "input_per_million": 0.15,
+            "output_per_million": 0.60,
             "currency": "USD",
             "pricing_version": "2026-07",
         },

@@ -21,5 +21,6 @@ def flatten_for_csv(result: ExperimentResult) -> dict:
         "pricing_version": result.cost.pricing_version,
         "success": result.evaluation.success,
         "error": result.evaluation.error,
+        "patch_status": result.patch_status,
         "timestamp": result.evaluation.timestamp,
     }

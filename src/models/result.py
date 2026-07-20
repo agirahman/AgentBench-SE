@@ -81,3 +81,4 @@ class ExperimentResult:
     cost: CostSummary
     evaluation: EvaluationResult
     difficulty: str = ""
+    patch_status: str = "VALID"

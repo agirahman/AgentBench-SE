@@ -1,23 +1,67 @@
 import json
 import re
+from dataclasses import dataclass
 
 from utils.logger import logger
 
 
-def _is_valid_patch_syntax(text: str) -> bool:
-    """Validasi struktur diff tanpa perlu repo target.
+@dataclass
+class PatchResult:
+    """Result dari extract_diff: patch string + status."""
+    patch: str
+    status: str  # VALID | INVALID_HUNK | PARSE_ERROR | NO_DIFF | EMPTY | PLACEHOLDER_ONLY
+
+
+def _count_hunk_body(body):
+    """Hitung baris orig/new per hunk body.
+
+    Include empty line sebagai context. Trailing empty lines sebelum '@@'
+    di-strip dulu supaya sama dengan validator. Dipakai bersama validator
+    dan auto-fix supaya hitungan tidak pernah drift.
+    """
+    body = list(body)
+    while body and body[-1] == "":
+        body.pop()
+    actual_orig = actual_new = 0
+    for l in body:
+        if l.startswith(" "):
+            actual_orig += 1
+            actual_new += 1
+        elif l.startswith("+"):
+            actual_new += 1
+        elif l.startswith("-"):
+            actual_orig += 1
+        elif l.startswith(("\\", "Binary ")):
+            continue
+        elif l.strip() == "--":
+            break
+        elif l == "":
+            actual_orig += 1
+            actual_new += 1
+        elif l.strip() and not l.startswith(("@@", "diff ", "--- ", "+++ ")):
+            actual_orig += 1
+            actual_new += 1
+        else:
+            return None
+    return actual_orig, actual_new
+
+
+def _check_patch_syntax(text: str) -> str | None:
+    """Validasi struktur diff, return None jika valid atau string status penyebab gagal.
 
     Cek: prefix 'diff --git', tiap hunk header rapi (@@ -N,M +P,Q @@),
     dan jumlah baris context/added/removed per hunk cocok dengan count header.
     """
     if not text:
-        return False
+        return "EMPTY"
 
     lines = text.strip().split("\n")
     if not lines[0].startswith("diff --git"):
-        return False
+        return "NO_DIFF"
 
     HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+    MAX_OFFSET = 200
 
     i = 0
     while i < len(lines):
@@ -28,26 +72,45 @@ def _is_valid_patch_syntax(text: str) -> bool:
 
         m = HUNK.match(line)
         if not m:
-            logger.warning(f"Malformed hunk header: {line!r}")
-            return False
+            return "MALFORMED_HEADER"
 
+        orig_start = int(m.group(1))
         orig_count = int(m.group(2) or 1)
+        new_start = int(m.group(3))
         new_count = int(m.group(4) or 1)
+
+        has_real_context = False
+        has_placeholder_only = True
+        has_placeholder_added = False
+        real_code_lines = 0
 
         actual_orig = 0
         actual_new = 0
         i += 1
+        hunk_lines = []
         while i < len(lines) and not lines[i].startswith("@@"):
             l = lines[i]
             if l.startswith("diff --git"):
                 break
-            elif l.startswith(" "):
-                actual_orig += 1
-                actual_new += 1
+            hunk_lines.append(l)
+            if l.startswith(" "):
+                real_code_lines += 1
+                if l.strip() and not l.strip() in ("# ...", "# ...", "# ..."):
+                    has_real_context = True
+                    has_placeholder_only = False
             elif l.startswith("+"):
-                actual_new += 1
+                added_text = l[1:].strip()
+                if added_text:
+                    if added_text in ("# ...", "# ...", "# ...", "# ...", "# ..."):
+                        has_placeholder_added = True
+                    else:
+                        has_real_context = True
+                        has_placeholder_only = False
             elif l.startswith("-"):
-                actual_orig += 1
+                removed_text = l[1:].strip()
+                if removed_text and removed_text not in ("# ...", "# ...", "# ..."):
+                    has_real_context = True
+                    has_placeholder_only = False
             elif l.startswith("\\") or l.startswith("Binary "):
                 pass
             elif l.strip() == "--":
@@ -55,25 +118,35 @@ def _is_valid_patch_syntax(text: str) -> bool:
             elif l == "":
                 if i + 1 < len(lines) and lines[i + 1].startswith("@@"):
                     break
-                else:
-                    actual_orig += 1
-                    actual_new += 1
             elif l.strip() and not l.startswith(("@@", "diff ", "--- ", "+++ ")):
-                actual_orig += 1
-                actual_new += 1
+                pass
             else:
-                logger.warning(f"Unexpected patch line: {l!r}")
-                return False
+                return "BAD_BODY"
             i += 1
 
-        if actual_orig != orig_count or actual_new != new_count:
-            logger.warning(
-                "Hunk count mismatch: header claims "
-                f"-{orig_count}/+{new_count}, got -{actual_orig}/+{actual_new}"
-            )
-            return False
+        counts = _count_hunk_body(hunk_lines)
+        if counts is None:
+            return "BAD_BODY"
+        actual_orig, actual_new = counts
 
-    return True
+        if has_placeholder_only and not has_real_context:
+            return "PLACEHOLDER_ONLY"
+
+        if has_placeholder_added and not has_real_context:
+            return "PLACEHOLDER_ONLY"
+
+        if abs(new_start - orig_start) > MAX_OFFSET:
+            return "OFFSET_TOO_LARGE"
+
+        if actual_orig != orig_count or actual_new != new_count:
+            return "HUNK_MISMATCH"
+
+    return None  # valid
+
+
+def _is_valid_patch_syntax(text: str) -> bool:
+    """Boolean shim di atas _check_patch_syntax (None == valid)."""
+    return _check_patch_syntax(text) is None
 
 
 def _normalize_newlines(text: str) -> str:
@@ -85,7 +158,7 @@ def _normalize_newlines(text: str) -> str:
     return text
 
 
-def _auto_fix_hunk_headers(patch: str) -> str:
+def normalize_patch_headers(patch: str) -> str:
     """Hitung ulang actual baris per hunk, rewrite @@ header agar sesuai."""
     lines = patch.split("\n")
     result = []
@@ -108,14 +181,12 @@ def _auto_fix_hunk_headers(patch: str) -> str:
             body.append(lines[i])
             i += 1
 
-        actual_orig = sum(
-            1 for l in body
-            if l.startswith((" ", "-")) or (l.strip() and not l.startswith(("+", "\\", "Binary")))
-        )
-        actual_new = sum(
-            1 for l in body
-            if l.startswith((" ", "+")) or (l.strip() and not l.startswith(("-", "\\", "Binary")))
-        )
+        counts = _count_hunk_body(body)
+        if counts is None:
+            result.append(f"@@ -{m.group(1)},{m.group(2) or 1} +{m.group(3)},{m.group(4) or 1} @@")
+            result.extend(body)
+            continue
+        actual_orig, actual_new = counts
 
         orig_start = int(m.group(1))
         new_start = int(m.group(3))
@@ -126,41 +197,48 @@ def _auto_fix_hunk_headers(patch: str) -> str:
     return "\n".join(result)
 
 
-def _clean_patch(text: str) -> str:
-    """Strip, normalize newline, lalu validasi; auto-fix hunk headers kalau mismatch.
+def _clean_patch(text: str) -> PatchResult:
+    """Strip, normalize newline, lalu validasi; normalize hunk headers kalau mismatch.
 
     Tambah trailing newline di akhir supaya git apply tidak gagal dengan
     'malformed patch at line N' (patch harus berakhir dengan \\n).
     """
     if not text:
-        return ""
+        return PatchResult(patch="", status="EMPTY")
     patch = _normalize_newlines(text).strip()
-    if _is_valid_patch_syntax(patch):
+    if not patch:
+        return PatchResult(patch="", status="NO_DIFF")
+    failure = _check_patch_syntax(patch)
+    if failure is None:
         if not patch.endswith("\n"):
             patch += "\n"
-        return patch
-    fixed = _auto_fix_hunk_headers(patch)
-    if _is_valid_patch_syntax(fixed):
-        logger.info("Hunk headers auto-fixed successfully")
+        return PatchResult(patch=patch, status="VALID")
+    fixed = normalize_patch_headers(patch)
+    failure_fixed = _check_patch_syntax(fixed)
+    if failure_fixed is None:
+        logger.info("Hunk headers normalized successfully")
         if not fixed.endswith("\n"):
             fixed += "\n"
-        return fixed
-    logger.warning("Patch failed syntax validation even after auto-fix")
-    return ""
+        return PatchResult(patch=fixed, status="NORMALIZE")
+    logger.warning(f"Patch failed syntax validation even after normalization: {failure_fixed}")
+    return PatchResult(patch="", status=failure_fixed)
 
 
-def extract_diff(response: str) -> str:
+def extract_diff(response: str, finish_reason: str = "") -> PatchResult:
     """Ambil diff/patch dari response LLM.
 
     Alur:
-      1. Cari markdown code block (toleran ```json / ```diff / ```patch / ```).
-      2. Kalau isi berupa JSON, ambil field "patch".
-      3. Fallback: seluruh response sebagai JSON.
-      4. Last resort: raw text.
-    Tiap hasil divalidasi strukturnya; kalau invalid kembalikan '' (empty).
+      1. Kalau finish_reason='length' (response ke-trim) → langsung TRUNCATED.
+      2. Cari markdown code block (toleran ```json / ```diff / ```patch / ```).
+      3. Kalau isi berupa JSON, ambil field "patch".
+      4. Fallback: seluruh response sebagai JSON.
+      5. Last resort: raw text.
+    Tiap hasil divalidasi strukturnya; kalau invalid return PatchResult dengan status penyebab.
     """
     if not response:
-        return ""
+        return PatchResult(patch="", status="EMPTY")
+    if finish_reason == "length":
+        return PatchResult(patch="", status="TRUNCATED")
 
     # 1. Markdown code block (toleran json/diff/patch)
     m = re.search(r"```(?:json|diff|patch)?\n(.*?)```", response, re.DOTALL)
@@ -173,6 +251,7 @@ def extract_diff(response: str) -> str:
                     return _clean_patch(str(data["patch"]))
             except json.JSONDecodeError:
                 logger.warning("Markdown block looks like JSON but failed to parse")
+                return PatchResult(patch="", status="PARSE_ERROR")
         return _clean_patch(content)
 
     # 2. JSON di seluruh response (tanpa markdown)

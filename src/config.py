@@ -14,13 +14,19 @@ class Config:
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
     GROQ_MODEL = os.getenv(
         "GROQ_MODEL",
-        "llama-3.3-70b-versatile",
+        "openai/gpt-oss-120b",
     )
     
     OPENCODE_API_KEY = os.getenv("OPENCODE_API_KEY")
     OPENCODE_MODEL = os.getenv(
         "OPENCODE_MODEL",
         "deepseek-v4-flash",
+    )
+    
+    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+    OPENROUTER_MODEL = os.getenv(
+        "OPENROUTER_MODEL",
+        "tencent/hy3:free",
     )
     
     TEMPERATURE = float(os.getenv("TEMPERATURE", 0.2))

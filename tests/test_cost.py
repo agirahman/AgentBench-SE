@@ -5,7 +5,7 @@ from models.inference import InferenceResult
 from evaluation.cost import CostCalculator, CostResult, PricingTable
 
 
-def _inference(model="gemini-3-flash-preview", prompt=1000, completion=500):
+def _inference(model="tencent/hy3", prompt=1000, completion=500):
     return InferenceResult(
         role="executor",
         response="patch",
@@ -19,25 +19,22 @@ def _inference(model="gemini-3-flash-preview", prompt=1000, completion=500):
 
 
 def test_pricing_table_hit():
-    pricing = PricingTable.get("gemini-3-flash-preview")
+    pricing = PricingTable.get("tencent/hy3")
     assert pricing is not None
-    assert pricing["input_per_million"] == 0.25
-    assert pricing["output_per_million"] == 1.50
+    assert pricing["input_per_million"] == 0.14
+    assert pricing["output_per_million"] == 0.58
     assert pricing["pricing_version"] == "2026-07"
 
 
-def test_pricing_table_miss_falls_back_to_config_model():
+def test_pricing_table_miss_returns_none():
     pricing = PricingTable.get("unknown-model-xyz")
-    if Config.GEMINI_MODEL in PricingTable.PRICING:
-        assert pricing == PricingTable.PRICING[Config.GEMINI_MODEL]
-    else:
-        assert pricing is None
+    assert pricing is None
 
 
 def test_calculator_accuracy():
     result = CostCalculator().calculate(_inference(prompt=1000, completion=500))
-    assert result.input_cost_usd == pytest.approx(1000 / 1_000_000 * 0.25)
-    assert result.output_cost_usd == pytest.approx(500 / 1_000_000 * 1.50)
+    assert result.input_cost_usd == pytest.approx(1000 / 1_000_000 * 0.14)
+    assert result.output_cost_usd == pytest.approx(500 / 1_000_000 * 0.58)
     assert result.total_cost_usd == pytest.approx(
         result.input_cost_usd + result.output_cost_usd
     )
