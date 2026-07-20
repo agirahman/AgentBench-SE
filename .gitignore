@@ -32,6 +32,12 @@ Thumbs.db
 # Graphify
 graphify-out/
 
+# Scratch / output
+gen_err.txt
+gen_out.txt
+tencent__hy3
+deepseek-v4-flash.modal-direct.json
+
 # doc
 docs/*
 !docs/MEMORY.md
