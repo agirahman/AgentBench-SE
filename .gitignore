@@ -35,3 +35,12 @@ graphify-out/
 # doc
 docs/*
 !docs/MEMORY.md
+!docs/SRS.md
+!docs/DSR_MAPPING.md
+!docs/USE_CASE_SPEC.md
+!docs/RTM.md
+!docs/SYSTEM_VALIDATION.md
+!docs/FEEDBACK.md
+!docs/TECHNICAL.md
+!docs/UPDATE_PLAN.md
+!docs/setup-docker.md
