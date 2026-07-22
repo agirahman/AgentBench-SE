@@ -183,6 +183,10 @@ def main():
     exp_dir = f"{args.output}/{exp_id}"
     _save_experiment_config(exp_dir, args, len(issues), strategy_names, exp_id)
 
+    manifest_path = Path(exp_dir) / "manifest.json"
+    if manifest_path.exists():
+        logger.info(f"Manifest available: {manifest_path}")
+
     # --- RANGKUMAN HASIL EKSPERIMEN ---
     logger.info(f"Experiment completed: {exp_id}")
     logger.info(f"Output directory: {exp_dir}/")

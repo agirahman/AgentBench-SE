@@ -24,6 +24,7 @@ from evaluation.statistics import export_statistics_json, generate_summary_md
 from evaluation.cost import PricingTable
 from config import Config
 from experiment_id import generate_experiment_id, create_experiment_dir
+from experiments.observability import build_experiment_manifest, write_issue_run_summary
 from utils.logger import logger
 
 
@@ -205,6 +206,17 @@ def run_experiments(
                     f"${result.cost.total_cost_usd:.6f} | model={result.model}"
                 )
 
+                write_issue_run_summary(
+                    output_dir=str(exp_dir),
+                    issue=issue,
+                    strategy_name=name,
+                    patch_status=patch_status,
+                    elapsed_seconds=elapsed,
+                    total_tokens=result.execution.total_tokens,
+                    success=bool(diff.strip()),
+                    error="",
+                )
+
                 if rate_limit_seconds > 0:
                     delay = random.uniform(5, 10)
                     logger.info(f"Rate limit delay: {delay:.1f}s")
@@ -263,6 +275,17 @@ def run_experiments(
     summary_path = f"{exp_dir}/summary.md"
     generate_summary_md(df, summary_path, pricing=pricing, usd_idr_rate=Config.USD_IDR_RATE)
     logger.success(f"Summary markdown exported: {summary_path}")
+
+    manifest = build_experiment_manifest(
+        issues=issues,
+        strategies=list(strategies.keys()),
+        provider_name=provider_name,
+        experiment_id=exp_id,
+        output_dir=str(exp_dir),
+    )
+    manifest_path = f"{exp_dir}/manifest.json"
+    Path(manifest_path).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    logger.success(f"Experiment manifest exported: {manifest_path}")
 
     # Log per-strategy counts
     for strat_name in strategies:
