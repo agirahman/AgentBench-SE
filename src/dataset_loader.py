@@ -1,3 +1,5 @@
+from collections.abc import Iterable
+
 from datasets import load_dataset
 from models.issue import Issue
 
@@ -12,14 +14,22 @@ DEFAULT_REPO_SPECS: list[tuple[str, int]] = [
 ]
 
 
+def normalize_repo_specs(repo_specs: Iterable[tuple[str, int]] | dict[str, int] | None) -> list[tuple[str, int]]:
+    """Normalize repo specs into a list of (repo, count) tuples."""
+    if repo_specs is None:
+        return list(DEFAULT_REPO_SPECS)
+    if isinstance(repo_specs, dict):
+        return [(repo, count) for repo, count in repo_specs.items()]
+    return list(repo_specs)
+
+
 def load_swe_bench_lite() -> list[dict]:
     ds = load_dataset("princeton-nlp/SWE-bench_Lite", split="test")
     return [dict(row) for row in ds]
 
 
-def select_issues(repo_specs: list[tuple[str, int]] | None = None) -> list[Issue]:
-    if repo_specs is None:
-        repo_specs = DEFAULT_REPO_SPECS
+def select_issues(repo_specs: Iterable[tuple[str, int]] | dict[str, int] | None = None) -> list[Issue]:
+    repo_specs = normalize_repo_specs(repo_specs)
 
     all_data = load_swe_bench_lite()
     seen = set()
