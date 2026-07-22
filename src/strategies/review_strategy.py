@@ -4,7 +4,7 @@ from models.issue import Issue
 from models.patch import Patch
 from models.result import ExperimentResult, ExecutionResult, EvaluationResult
 from models.inference import InferenceRun
-from utils.prompt_loader import load_prompt
+from utils.prompt_loader import load_prompt_or_default
 from evaluation.cost import CostCalculator
 
 
@@ -28,12 +28,12 @@ class ReviewStrategy:
     def run(self, issue: Issue) -> tuple[Patch, ExperimentResult]:
         inferences = []
 
-        plan_prompt = load_prompt("planner.md").replace("{{issue}}", issue.to_prompt())
+        plan_prompt = load_prompt_or_default("planner.md", "{{issue}}\n").replace("{{issue}}", issue.to_prompt())
         plan_inf = self.provider.generate(plan_prompt, role="planner")
         inferences.append(plan_inf)
 
         exec_prompt = (
-            load_prompt("executor.md")
+            load_prompt_or_default("executor.md", "{{issue}}\n\nPlan:\n{{plan}}")
             .replace("{{issue}}", issue.to_prompt())
             .replace("{{plan}}", plan_inf.response)
         )
@@ -41,7 +41,7 @@ class ReviewStrategy:
         inferences.append(initial_inf)
 
         review_prompt = (
-            load_prompt("reviewer.md")
+            load_prompt_or_default("reviewer.md", "{{issue}}\n\nPlan:\n{{plan}}\n\nPatch:\n{{patch}}")
             .replace("{{issue}}", issue.to_prompt())
             .replace("{{plan}}", plan_inf.response)
             .replace("{{patch}}", initial_inf.response)
@@ -53,7 +53,7 @@ class ReviewStrategy:
         final_response = initial_inf.response
         if needs_revision:
             revision_prompt = (
-                load_prompt("executor.md")
+                load_prompt_or_default("executor.md", "{{issue}}\n\nPlan:\n{{plan}}\n\nFeedback:\n{{feedback}}")
                 .replace("{{issue}}", issue.to_prompt())
                 .replace("{{plan}}", plan_inf.response)
                 .replace("{{feedback}}", review_inf.response)
