@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+from models.issue import Issue
 from strategies.review_strategy import ReviewStrategy, _extract_verdict
 
 
@@ -42,7 +43,12 @@ def test_review_strategy_uses_fallback_prompt_when_template_missing(monkeypatch)
         lambda filename, default="": str(default),
     )
 
-    issue = SimpleNamespace(instance_id="ISSUE-1", problem_statement="Bug", to_prompt=lambda: "Issue")
+    issue = Issue(
+        instance_id="ISSUE-1",
+        repo="django/django",
+        base_commit="abc123",
+        problem_statement="Bug",
+    )
     patch, result = strategy.run(issue)
 
     assert patch.response == "patch"
