@@ -133,6 +133,9 @@ python src/main.py --resume --output results/full_run
 
 # Pakai Groq sebagai fallback
 python src/main.py --provider groq --issues 10
+
+# Override sampling repo secara spesifik
+python src/main.py --repo-spec django/django=10 --repo-spec psf/requests=5 --issues 6
 ```
 
 Opsi CLI:
@@ -144,6 +147,7 @@ Opsi CLI:
 | `--issues` | (semua 50) | Batas jumlah issue untuk testing |
 | `--resume` | `False` | Lanjutkan dari run sebelumnya |
 | `--rate-limit` | `1.5` | Delay antar strategi (detik) |
+| `--repo-spec` | (default repo mix) | Override sampling repo, format `repo=count` |
 
 ### 2. Inspeksi hasil
 
@@ -158,7 +162,9 @@ Output:
 - `results/<EXP-ID>/results.csv` — metrik per issue per strategi.
 - `results/<EXP-ID>/predictions/predictions.jsonl` — patch siap evaluasi SWE-bench.
 - `results/<EXP-ID>/experiment.yaml` — konfigurasi eksperimen untuk reproduksibilitas.
+- `results/<EXP-ID>/manifest.json` — ringkasan dataset, provider, dan strategi yang digunakan.
 - `results/<EXP-ID>/artifacts/` — output per-agent (planner/executor/reviewer) per issue.
+- `results/<EXP-ID>/artifacts/<instance_id>/<strategy>_summary.json` — ringkasan run per issue per strategi.
 
 ### 3. Evaluasi SWE-bench (opsional, butuh Docker)
 
