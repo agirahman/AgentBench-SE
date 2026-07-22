@@ -1,12 +1,13 @@
-import sys
 import argparse
+import sys
+
 import pandas as pd
 
 from evaluation.statistics import (
-    compute_summary,
-    compute_success_rate,
     compute_avg_time_per_inference,
     compute_cost_per_success,
+    compute_success_rate,
+    compute_summary,
 )
 
 
@@ -17,6 +18,24 @@ def load_data(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
     df["error"] = df["error"].fillna("")
     return df
+
+
+def build_strategy_difficulty_summary(df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate execution metrics by strategy and difficulty."""
+    if df.empty:
+        return pd.DataFrame(columns=["execution_time", "total_tokens", "cost_usd", "success_rate"])
+
+    grouped = (
+        df.groupby(["strategy", "difficulty"])
+        .agg(
+            execution_time=("execution_time", "mean"),
+            total_tokens=("total_tokens", "sum"),
+            cost_usd=("cost_usd", "sum"),
+            success_rate=("success", "mean"),
+        )
+        .reset_index()
+    )
+    return grouped.set_index(["strategy", "difficulty"])
 
 
 def cmd_list(df: pd.DataFrame):
@@ -74,6 +93,12 @@ def cmd_cost_per_success(df: pd.DataFrame):
     print(cps.to_string())
 
 
+def cmd_strategy_difficulty(df: pd.DataFrame):
+    summary = build_strategy_difficulty_summary(df)
+    print("=== Strategy × Difficulty Summary ===")
+    print(summary.to_string())
+
+
 def main():
     raw = sys.argv[1:]
     csv_path = DEFAULT_CSV
@@ -101,6 +126,11 @@ def main():
 
     sub.add_parser("cost_per_success", help="Show cost per successful fix per strategy")
 
+    sub.add_parser(
+        "strategy_difficulty",
+        help="Show aggregated metrics by strategy and difficulty",
+    )
+
     patch_p = sub.add_parser("patch", help="Show patch preview for an issue")
     patch_p.add_argument("patch_id", help="Instance ID (e.g. django__django-10914)")
     patch_p.add_argument("--strategy", default=None, help="Filter by strategy")
@@ -120,6 +150,8 @@ def main():
         cmd_patch(df, args.patch_id, args.strategy)
     elif args.command == "cost_per_success":
         cmd_cost_per_success(df)
+    elif args.command == "strategy_difficulty":
+        cmd_strategy_difficulty(df)
 
 
 if __name__ == "__main__":
