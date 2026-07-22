@@ -240,8 +240,8 @@ def extract_diff(response: str, finish_reason: str = "") -> PatchResult:
     if finish_reason == "length":
         return PatchResult(patch="", status="TRUNCATED")
 
-    # 1. Markdown code block (toleran json/diff/patch)
-    m = re.search(r"```(?:json|diff|patch)?\n(.*?)```", response, re.DOTALL)
+    # 1. Markdown code block (toleran label apa pun, mis. python/diff/patch/json)
+    m = re.search(r"```(?:[A-Za-z0-9_-]+)?\s*\n(.*?)```", response, re.DOTALL)
     if m:
         content = m.group(1).strip()
         if content.startswith("{"):
