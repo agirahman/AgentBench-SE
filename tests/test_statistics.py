@@ -9,6 +9,8 @@ from evaluation.statistics import (
     compute_patch_validity_rate,
     compute_patch_quality,
     summarize_run_failure,
+    export_statistics_json,
+    generate_summary_md,
 )
 
 
@@ -142,3 +144,15 @@ class TestPatchQuality:
         assert pq.loc["planning", "valid_pct"] == 50.0
         assert pq.loc["planning", "normalize_pct"] == 50.0
         assert pq.loc["planning", "invalid_pct"] == 0.0
+
+
+def test_empty_dataframe_exports_summary_files(tmp_path):
+    empty_df = pd.DataFrame({"strategy": []})
+
+    out_json = tmp_path / "statistics.json"
+    export_statistics_json(empty_df, str(out_json))
+    assert out_json.exists()
+
+    out_md = tmp_path / "summary.md"
+    generate_summary_md(empty_df, str(out_md))
+    assert out_md.exists()

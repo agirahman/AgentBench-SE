@@ -30,6 +30,12 @@ class PricingTable:
             "currency": "USD",
             "pricing_version": "2026-07",
         },
+        "oc/deepseek-v4-flash-free": {
+            "input_per_million": 0.14,
+            "output_per_million": 0.28,
+            "currency": "USD",
+            "pricing_version": "2026-07",
+        },
         "deepseek-v4-flash": {
             "input_per_million": 0.14,
             "output_per_million": 0.28,
@@ -57,6 +63,12 @@ class PricingTable:
         "openai/gpt-oss-120b": {
             "input_per_million": 0.15,
             "output_per_million": 0.60,
+            "currency": "USD",
+            "pricing_version": "2026-07",
+        },
+        "poolside/laguna-m.1:free": {
+            "input_per_million": 0.20,
+            "output_per_million": 0.40,
             "currency": "USD",
             "pricing_version": "2026-07",
         },
