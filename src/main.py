@@ -46,6 +46,12 @@ def parse_args():
         default=None,
         help="Batas jumlah issue untuk testing (default: semua 50)",
     )
+    parser.add_argument(
+        "--repo-spec",
+        action="append",
+        default=[],
+        help="Override sampling repo, format: repo=count (mis. django/django=10)",
+    )
     return parser.parse_args()
 
 
@@ -135,6 +141,14 @@ def _to_yaml(data, indent: int = 0) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _parse_repo_specs(repo_specs: list[str]) -> list[tuple[str, int]]:
+    parsed: list[tuple[str, int]] = []
+    for spec in repo_specs:
+        repo, count_text = spec.split("=", 1)
+        parsed.append((repo.strip(), int(count_text.strip())))
+    return parsed
+
+
 def main():
     args = parse_args()
 
@@ -153,8 +167,9 @@ def main():
         return
 
     from dataset_loader import DEFAULT_REPO_SPECS
-    logger.info(f"Loading SWE-bench Lite — multi-repo: {DEFAULT_REPO_SPECS}")
-    issues = select_issues()
+    repo_specs = _parse_repo_specs(args.repo_spec) if args.repo_spec else DEFAULT_REPO_SPECS
+    logger.info(f"Loading SWE-bench Lite — multi-repo: {repo_specs}")
+    issues = select_issues(repo_specs)
     logger.info(f"Loaded {len(issues)} issues")
 
     if args.issues:
