@@ -6,6 +6,7 @@ from config import Config
 from utils.logger import logger
 from models.inference import InferenceResult
 from evaluation.retry import with_retry
+from providers.response_utils import build_openai_inference_result
 
 
 class GroqProvider:
@@ -34,31 +35,20 @@ class GroqProvider:
             )
 
             elapsed = time.perf_counter() - t0
-            usage = response.usage
-            finish = response.choices[0].finish_reason or ""
-            content = response.choices[0].message.content or ""
-            prompt_t = usage.prompt_tokens if usage else 0
-            comp_t = usage.completion_tokens if usage else 0
-            total_t = usage.total_tokens if usage else 0
+            result = build_openai_inference_result(
+                response,
+                role=role,
+                model=self.model,
+                elapsed=elapsed,
+            )
 
-            if finish == "length":
+            if result.finish_reason == "length":
                 logger.warning(
                     f"Groq response truncated (finish_reason='length'). "
-                    f"Tokens: {total_t}. Role: {role}"
+                    f"Tokens: {result.total_tokens}. Role: {role}"
                 )
 
-            return InferenceResult(
-                role=role,
-                response=content,
-                usage={
-                    "prompt_tokens": prompt_t,
-                    "completion_tokens": comp_t,
-                    "total_tokens": total_t,
-                },
-                execution_time=elapsed,
-                finish_reason=finish,
-                model=self.model,
-            )
+            return result
 
         except Exception as e:
             logger.error(f"Groq Generate Error: {e}")
