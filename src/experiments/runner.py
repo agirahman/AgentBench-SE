@@ -211,17 +211,19 @@ def run_experiments(
                     time.sleep(delay)
 
             except Exception as e:
+                error_detail = str(e)
                 logger.error(
-                    f"  ❌ FAILED: {issue.instance_id} ({name}, {issue.difficulty}) — {type(e).__name__}: {str(e)[:200]}"
+                    f"  ❌ FAILED: {issue.instance_id} ({name}, {issue.difficulty}) — {type(e).__name__}: {error_detail[:400]}"
                 )
 
-                # --- Truncated JSON → patch = "" ---
                 error_entry = {
                     "instance_id": issue.instance_id,
                     "model_patch": "",
                     "model_name_or_path": provider_name,
                     "strategy": name,
                     "patch_status": "TIMEOUT",
+                    "error_type": type(e).__name__,
+                    "error_message": error_detail,
                 }
                 strategy_jsonl = str(pred_dir / f"{name}.jsonl")
                 _append_jsonl(strategy_jsonl, error_entry)
