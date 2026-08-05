@@ -2,5 +2,5 @@
 pythonpath = ["src"]
 
 [tool.pyright]
-extraPaths = ["src"]
-include = ["src", "tests"]
+extraPaths = ["src", "agentbench"]
+include = ["src", "tests", "agentbench"]

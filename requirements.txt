@@ -9,3 +9,5 @@ datasets
 pandas
 pyright
 modal
+rich>=13.0
+click>=8.1
