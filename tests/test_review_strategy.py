@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 from models.issue import Issue
 from strategies.review_strategy import ReviewStrategy, _extract_verdict
 
@@ -39,7 +37,7 @@ def test_review_strategy_uses_fallback_prompt_when_template_missing(monkeypatch)
     strategy = ReviewStrategy(provider)
 
     monkeypatch.setattr(
-        "strategies.review_strategy.load_prompt_or_default",
+        "agents.base.load_prompt_or_default",
         lambda filename, default="": str(default),
     )
 

@@ -35,22 +35,30 @@ class StrategyProtocol(Protocol):
 def _save_artifacts(
     output_dir: str,
     instance_id: str,
+    strategy_name: str,
     inferences,
     final_patch: str,
+    messages=None,
 ) -> None:
-    """Simpan artifact per-agent ke ``<exp_dir>/artifacts/<instance_id>/``."""
-    art_dir = Path(f"{output_dir}/artifacts/{instance_id}")
+    """Simpan artifact per-agent ke ``<exp_dir>/artifacts/<instance_id>/<strategy_name>/``.
+
+    Dipisah per strategi agar ``messages.jsonl``, ``patch.txt``, dan ``<role>.md``
+    setiap strategi tidak saling menimpa.
+    """
+    art_dir = Path(f"{output_dir}/artifacts/{instance_id}/{strategy_name}")
     art_dir.mkdir(parents=True, exist_ok=True)
 
     for inf in inferences:
-        if inf.role == "planner":
-            (art_dir / "planner.md").write_text(inf.response, encoding="utf-8")
-        elif inf.role == "executor":
-            (art_dir / "executor.md").write_text(inf.response, encoding="utf-8")
-        elif inf.role == "reviewer":
-            (art_dir / "reviewer.md").write_text(inf.response, encoding="utf-8")
+        if not inf.role:
+            continue
+        (art_dir / f"{inf.role}.md").write_text(inf.response, encoding="utf-8")
 
     (art_dir / "patch.txt").write_text(final_patch, encoding="utf-8")
+
+    if messages:
+        with (art_dir / "messages.jsonl").open("w", encoding="utf-8") as f:
+            for msg in messages:
+                f.write(json.dumps(msg.to_dict(), ensure_ascii=False) + "\n")
 
 
 def _load_existing_ids(jsonl_path: str) -> set[str]:
@@ -85,6 +93,7 @@ def run_experiments(
     provider_name: str = "unknown",
     rate_limit_seconds: float = 1.5,
     resume: bool = False,
+    agents: list[dict[str, str]] | None = None,
 ) -> tuple[pd.DataFrame, str]:
     """Execute experiments and dump results to a per-experiment folder.
 
@@ -195,7 +204,12 @@ def run_experiments(
                         patch.response, encoding="utf-8"
                     )
                     _save_artifacts(
-                        str(exp_dir), issue.instance_id, result.execution.inferences, patch.response
+                        str(exp_dir),
+                        issue.instance_id,
+                        name,
+                        result.execution.inferences,
+                        patch.response,
+                        result.execution.run.messages,
                     )
                     logger.info(f"  → Patch saved: {issue.instance_id}_{name}.txt")
 
@@ -282,6 +296,7 @@ def run_experiments(
         provider_name=provider_name,
         experiment_id=exp_id,
         output_dir=str(exp_dir),
+        agents=agents,
     )
     manifest_path = f"{exp_dir}/manifest.json"
     Path(manifest_path).write_text(json.dumps(manifest, indent=2), encoding="utf-8")

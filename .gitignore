@@ -50,3 +50,6 @@ docs/*
 !docs/TECHNICAL.md
 !docs/UPDATE_PLAN.md
 !docs/setup-docker.md
+!docs/MULTI_AGENT_MIGRATION.md
+!docs/FRAMEWORK_FLOW_RESEARCH.md
+!docs/FRAMEWORK_FLOW_TECHNICAL.md

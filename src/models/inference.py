@@ -1,6 +1,9 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agents.messages import AgentMessage
 
 
 @dataclass
@@ -12,11 +15,11 @@ class InferenceResult:
     oleh objek ini sehingga tidak ada state tersembunyi (last_usage).
     """
 
-    role: str  # "planner" | "executor" | "reviewer"
+    role: str
     response: str
-    usage: Optional[dict] = None  # {prompt_tokens, completion_tokens, total_tokens}
+    usage: Optional[dict] = None
     execution_time: float = 0.0
-    finish_reason: str = ""  # "STOP" | "MAX_TOKENS" | "stop" | ...
+    finish_reason: str = ""
     model: str = ""
     timestamp: str = ""
 
@@ -43,6 +46,7 @@ class InferenceRun:
 
     patch: str
     inferences: list[InferenceResult] = field(default_factory=list)
+    messages: list["AgentMessage"] = field(default_factory=list)
 
     @property
     def total_time(self) -> float:
@@ -59,3 +63,4 @@ class InferenceRun:
     @property
     def total_completion_tokens(self) -> int:
         return sum(inf.completion_tokens for inf in self.inferences)
+
