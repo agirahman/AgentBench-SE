@@ -591,10 +591,10 @@ AgantBech-SE/
 **Deliverable:** Results viewing & export functional
 
 ### Phase 5: Data Management Commands (1-2 hours)
-- [ ] Create `agentbench/commands/dataset.py` (show dataset info)
-- [ ] Create `agentbench/commands/artifacts.py` (browse artifacts)
-- [ ] Implement `provider` command (health check)
-- [ ] Test: `dataset` → shows repo breakdown
+- [x] Create `agentbench/commands/dataset.py` (show dataset info)
+- [x] Create `agentbench/commands/artifacts.py` (browse artifacts)
+- [x] Implement `provider` command (health check)
+- [x] Test: `dataset` → shows repo breakdown
 
 **Deliverable:** All commands implemented
 

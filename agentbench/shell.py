@@ -145,18 +145,22 @@ class AgentBenchShell(cmd.Cmd):
         ExportCommand(self.config, self.console).execute(arg)
 
     def do_provider(self, arg: str) -> None:
-        """Show/test provider connection (Phase 5)."""
-        self._not_ready("provider")
+        """Show/test provider connection.
+        Usage: provider [--test]"""
+        from agentbench.commands.provider import ProviderCommand
+
+        ProviderCommand(self.config, self.console).execute(arg)
 
     def do_dataset(self, arg: str) -> None:
-        """Show dataset info (Phase 5)."""
-        self._not_ready("dataset")
+        """Show dataset info.
+        Usage: dataset [--refresh]"""
+        from agentbench.commands.dataset import DatasetCommand
+
+        DatasetCommand(self.config, self.console).execute(arg)
 
     def do_artifacts(self, arg: str) -> None:
-        """Browse saved artifacts (Phase 5)."""
-        self._not_ready("artifacts")
+        """Browse saved artifacts.
+        Usage: artifacts <issue_id> <strategy>"""
+        from agentbench.commands.artifacts import ArtifactsCommand
 
-    def _not_ready(self, name: str) -> None:
-        self.console.print(
-            f"[yellow]Command '{name}' is not implemented yet — coming in a later phase.[/yellow]"
-        )
+        ArtifactsCommand(self.config, self.console).execute(arg)

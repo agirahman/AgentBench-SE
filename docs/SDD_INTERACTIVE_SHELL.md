@@ -1203,11 +1203,11 @@ pip install -e .
 - [x] Test: `results summary` shows table
 
 ### Phase 5: Data Management (1-2h)
-- [ ] Create `agentbench/commands/config.py`
-- [ ] Create `agentbench/commands/provider.py`
-- [ ] Create `agentbench/commands/dataset.py`
-- [ ] Create `agentbench/commands/artifacts.py`
-- [ ] Test: `config show`, `provider --test`, `dataset`
+- [x] Create `agentbench/commands/config.py`
+- [x] Create `agentbench/commands/provider.py`
+- [x] Create `agentbench/commands/dataset.py`
+- [x] Create `agentbench/commands/artifacts.py`
+- [x] Test: `config show`, `provider --test`, `dataset`
 
 ### Phase 6: Polish & Documentation (2-3h)
 - [ ] Update `README.md` (installation & usage)
