@@ -1190,11 +1190,11 @@ pip install -e .
 
 ### Phase 3: Run Command (3-4h)
 - [x] Create `agentbench/commands/base.py` *(created early to support `config` command)*
-- [ ] Create `agentbench/commands/run.py`
-- [ ] Add callbacks to `core/experiments/runner.py` (optional kwargs)
-- [ ] Create `agentbench/ui/progress.py`
-- [ ] Confirmation dialog + progress bar
-- [ ] Test: `run --issues 5` full experiment with live progress
+- [x] Create `agentbench/commands/run.py`
+- [x] Add callbacks to `core/experiments/runner.py` (optional kwargs) — *`on_issue_complete` wired on success + TIMEOUT paths*
+- [x] Create `agentbench/ui/progress.py`
+- [x] Confirmation dialog + progress bar
+- [x] Test: `run --issues 5` full experiment with live progress
 
 ### Phase 4: Analysis Commands (2-3h)
 - [ ] Create `agentbench/commands/results.py` (summary/compare/errors/patch)

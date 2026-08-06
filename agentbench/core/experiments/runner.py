@@ -5,7 +5,7 @@ import time
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 import pandas as pd
 
@@ -94,6 +94,7 @@ def run_experiments(
     rate_limit_seconds: float = 1.5,
     resume: bool = False,
     agents: list[dict[str, str]] | None = None,
+    on_issue_complete: "Callable[..., None] | None" = None,
 ) -> tuple[pd.DataFrame, str]:
     """Execute experiments and dump results to a per-experiment folder.
 
@@ -104,6 +105,11 @@ def run_experiments(
         provider_name: Name of provider (gemini/groq/deepseek)
         rate_limit_seconds: Delay between strategies (for API rate limiting)
         resume: If True, skip issues already completed in existing jsonl files
+        on_issue_complete: Optional callback fired after each (issue, strategy)
+            finishes (success or failure). Signature:
+            on_issue_complete(instance_id, strategy, elapsed, tokens, cost_usd,
+                              success, status). Used by the interactive shell
+            to update its progress bar.
 
     Returns:
         (DataFrame, experiment_id) where DataFrame is the flattened results.csv
@@ -220,6 +226,17 @@ def run_experiments(
                     f"${result.cost.total_cost_usd:.6f} | model={result.model}"
                 )
 
+                if on_issue_complete is not None:
+                    on_issue_complete(
+                        instance_id=issue.instance_id,
+                        strategy=name,
+                        elapsed=elapsed,
+                        tokens=result.execution.total_tokens,
+                        cost_usd=result.cost.total_cost_usd,
+                        success=bool(diff.strip()),
+                        status=patch_status,
+                    )
+
                 write_issue_run_summary(
                     output_dir=str(exp_dir),
                     issue=issue,
@@ -272,6 +289,17 @@ def run_experiments(
                     evaluation=empty_eval,
                     patch_status="TIMEOUT",
                 ))
+
+                if on_issue_complete is not None:
+                    on_issue_complete(
+                        instance_id=issue.instance_id,
+                        strategy=name,
+                        elapsed=0.0,
+                        tokens=0,
+                        cost_usd=0.0,
+                        success=False,
+                        status="TIMEOUT",
+                    )
 
     # --- Final exports ---
     rows = [flatten_for_csv(r) for r in all_results]

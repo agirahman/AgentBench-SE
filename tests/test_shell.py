@@ -100,6 +100,10 @@ def test_do_config_set_unknown_path(shell):
     assert "Unknown config path" in shell.console.export_text()
 
 
-def test_phase3_stub_not_ready(shell):
-    shell.do_run("--issues 5")
-    assert "not implemented yet" in shell.console.export_text()
+def test_do_run_accepts_flags(shell, monkeypatch):
+    """do_run delegates to RunCommand; unknown flag surfaces a validation error."""
+    from rich.prompt import Confirm
+
+    monkeypatch.setattr(Confirm, "ask", lambda *a, **k: False)
+    shell.do_run("--issues 999")
+    assert "must be between 1 and 50" in shell.console.export_text()

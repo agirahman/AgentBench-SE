@@ -124,8 +124,11 @@ class AgentBenchShell(cmd.Cmd):
     # Phase 3-5 stubs (wired as the command modules land)
     # ------------------------------------------------------------------ #
     def do_run(self, arg: str) -> None:
-        """Start experiment run (Phase 3)."""
-        self._not_ready("run")
+        """Start experiment run.
+        Usage: run [--issues N] [--strategy all|direct|planning|review] [--output DIR] [--resume]"""
+        from agentbench.commands.run import RunCommand
+
+        RunCommand(self.config, self.console).execute(arg)
 
     def do_results(self, arg: str) -> None:
         """View experiment results (Phase 4)."""

@@ -569,14 +569,14 @@ AgantBech-SE/
 **Deliverable:** Shell works, basic commands functional
 
 ### Phase 3: Core Commands — Run (3-4 hours)
-- [ ] Create `agentbench/commands/run.py`
-- [ ] Integrate with existing `src/experiments/runner.py`
-- [ ] Add progress UI:
+- [x] Create `agentbench/commands/run.py`
+- [x] Integrate with existing `src/experiments/runner.py` (via `agentbench.core.experiments.runner`)
+- [x] Add progress UI:
   - Overall progress bar (rich.progress)
   - Per-issue status (spinner, time, tokens, cost)
-- [ ] Add confirmation prompt before starting
-- [ ] Add CTRL+C handling (confirm abort)
-- [ ] Test: `run --issues 5` → full experiment with live progress
+- [x] Add confirmation prompt before starting
+- [x] Add CTRL+C handling (confirm abort)
+- [x] Test: `run --issues 5` → full experiment with live progress
 
 **Deliverable:** `run` command works with beautiful progress UI
 
