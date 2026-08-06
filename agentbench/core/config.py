@@ -51,7 +51,7 @@ class Config:
     OPENROUTER_API_KEY = _get_env("OPENROUTER_API_KEY")
     OPENROUTER_MODEL = _get_env(
         "OPENROUTER_MODEL",
-        "tencent/hy3:free",
+        "deepseek/deepseek-v4-flash",
     )
 
     TEMPERATURE = _get_float_env("TEMPERATURE", 0.2)

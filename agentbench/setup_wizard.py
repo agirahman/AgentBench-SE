@@ -17,10 +17,10 @@ from rich.prompt import Confirm, FloatPrompt, IntPrompt, Prompt
 from agentbench.config_manager import ConfigManager, ConfigError
 
 DEFAULT_MODELS = {
-    "openrouter": "tencent/hy3:free",
+    "openrouter": "deepseek/deepseek-v4-flash",
     "gemini": "gemini-2.0-flash",
     "groq": "llama-3.3-70b-versatile",
-    "opencode": "default",
+    "opencode": "deepseek-v4-flash",
 }
 
 VALID_TEMPERATURE = (0.0, 1.0)

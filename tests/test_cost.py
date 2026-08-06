@@ -1,8 +1,37 @@
+"""Tests for cost calculation (deterministic via a config pricing override).
+
+All cost tests use a manual pricing override so nothing hits the network and
+prices are stable.
+"""
+
 import pytest
 
 from agentbench.core.config import Config
 from agentbench.core.models.inference import InferenceResult
 from agentbench.core.evaluation.cost import CostCalculator, CostResult, PricingTable
+
+
+@pytest.fixture(autouse=True)
+def pricing_override(tmp_path, monkeypatch):
+    """Point costs at a stable manual override for deterministic tests."""
+    from agentbench.config_manager import ConfigManager
+
+    monkeypatch.setenv("AGENTBENCH_CONFIG_DIR", str(tmp_path))
+    cm = ConfigManager(config_path=tmp_path / "config.yaml")
+    cm.save({
+        "researcher": {"name": "Agi"},
+        "provider": {"name": "openrouter", "api_key": "x", "model": "tencent/hy3"},
+        "experiment": {"temperature": 0.2, "max_retries": 3,
+                       "rate_limit": 1.5, "usd_idr_rate": 16500.0},
+        "pricing": {
+            "tencent/hy3": {
+                "input_per_million": 0.14,
+                "output_per_million": 0.58,
+                "pricing_source": "manual",
+            },
+        },
+    })
+    return cm
 
 
 def _inference(model="tencent/hy3", prompt=1000, completion=500):
@@ -23,10 +52,10 @@ def test_pricing_table_hit():
     assert pricing is not None
     assert pricing["input_per_million"] == 0.14
     assert pricing["output_per_million"] == 0.58
-    assert pricing["pricing_version"] == "2026-07"
 
 
 def test_pricing_table_miss_returns_none():
+    # unknown model with no override and no catalog entry
     pricing = PricingTable.get("unknown-model-xyz")
     assert pricing is None
 
@@ -43,7 +72,7 @@ def test_calculator_accuracy():
 def test_cost_idr_conversion():
     result = CostCalculator().calculate(_inference())
     assert result.total_cost_idr == pytest.approx(
-        result.total_cost_usd * Config.USD_IDR_RATE
+        result.total_cost_usd * 16500.0
     )
 
 

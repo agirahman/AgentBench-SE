@@ -136,6 +136,7 @@ class ConfigManager:
                 "rate_limit": float(experiment.get("rate_limit", 1.5)),
                 "usd_idr_rate": float(experiment.get("usd_idr_rate", 16500.0)),
             },
+            "pricing": config.get("pricing", {}) or {},
         }
 
     # ------------------------------------------------------------------ #

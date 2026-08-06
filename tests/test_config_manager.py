@@ -16,6 +16,7 @@ VALID_CONFIG = {
     "provider": {"name": "openrouter", "api_key": "sk-x", "model": "tencent/hy3:free"},
     "experiment": {"temperature": 0.2, "max_retries": 3, "rate_limit": 1.5,
                    "usd_idr_rate": 16500.0},
+    "pricing": {},
 }
 
 

@@ -23,66 +23,42 @@ class CostResult:
 
 
 class PricingTable:
-    PRICING = {
-        "gemini-3-flash-preview": {
-            "input_per_million": 0.50,
-            "output_per_million": 3.00,
-            "currency": "USD",
-            "pricing_version": "2026-07",
-        },
-        "oc/deepseek-v4-flash-free": {
-            "input_per_million": 0.14,
-            "output_per_million": 0.28,
-            "currency": "USD",
-            "pricing_version": "2026-07",
-        },
-        "deepseek-v4-flash": {
-            "input_per_million": 0.14,
-            "output_per_million": 0.28,
-            "currency": "USD",
-            "pricing_version": "2026-07",
-        },
-        "tencent/hy3:free": {
-            "input_per_million": 0.14,
-            "output_per_million": 0.58,
-            "currency": "USD",
-            "pricing_version": "2026-07",
-        },
-        "tencent/hy3": {
-            "input_per_million": 0.14,
-            "output_per_million": 0.58,
-            "currency": "USD",
-            "pricing_version": "2026-07",
-        },
-        "llama-3.3-70b-versatile": {
-            "input_per_million": 0.59,
-            "output_per_million": 0.79,
-            "currency": "USD",
-            "pricing_version": "2026-07",
-        },
-        "openai/gpt-oss-120b": {
-            "input_per_million": 0.15,
-            "output_per_million": 0.60,
-            "currency": "USD",
-            "pricing_version": "2026-07",
-        },
-        "poolside/laguna-m.1:free": {
-            "input_per_million": 0.20,
-            "output_per_million": 0.40,
-            "currency": "USD",
-            "pricing_version": "2026-07",
-        },
-        "poolside/laguna-s-2.1:free": {
-            "input_per_million": 0.10,
-            "output_per_million": 0.20,
-            "currency": "USD",
-            "pricing_version": "2026-08",
-        },
-    }
+    """2-layer model pricing resolver.
+
+    Order (first match wins):
+      1. config override — user-set ``pricing`` section (config.yaml)
+      2. OpenRouter catalog — live prices, cached 6h (free => $0)
+      3. None — caller treats cost as $0 with a visible warning
+    """
+
+    @staticmethod
+    def _config_overrides() -> dict:
+        """Return the user ``pricing`` overrides from config.yaml (memoized)."""
+        try:
+            from agentbench.config_manager import ConfigManager
+
+            cm = ConfigManager()
+            if not cm.config_exists():
+                return {}
+            cfg = cm.load()
+            return cfg.get("pricing", {}) or {}
+        except Exception:  # noqa: BLE001 - overrides are best-effort
+            return {}
 
     @staticmethod
     def get(model: str) -> Optional[dict]:
-        return PricingTable.PRICING.get(model)
+        if not model:
+            return None
+
+        # 1) config override (explicit user value wins)
+        overrides = PricingTable._config_overrides()
+        if model in overrides:
+            return dict(overrides[model])
+
+        # 2) OpenRouter catalog (dynamic)
+        from agentbench.core.evaluation.pricing_source import _openrouter_lookup
+
+        return _openrouter_lookup(model)
 
     @staticmethod
     def get_rates(model: str) -> tuple[float, float]:
@@ -93,13 +69,37 @@ class PricingTable:
 
 
 class CostCalculator:
+    def __init__(self, usd_idr_rate: float | None = None):
+        """``usd_idr_rate`` defaults to the live value from config.yaml
+        (fallback: Config.USD_IDR_RATE env, then 16500)."""
+        self._usd_idr_rate = usd_idr_rate if usd_idr_rate is not None else self._load_rate()
+
+    @staticmethod
+    def _load_rate() -> float:
+        try:
+            from agentbench.config_manager import ConfigManager
+
+            cm = ConfigManager()
+            if cm.config_exists():
+                rate = cm.load().get("experiment", {}).get("usd_idr_rate")
+                if rate:
+                    return float(rate)
+        except Exception:  # noqa: BLE001 - fall back to env/default
+            pass
+        return float(Config.USD_IDR_RATE)
+
     def calculate(self, inference: InferenceResult) -> CostResult:
-        input_rate, output_rate = PricingTable.get_rates(inference.model)
+        pricing = PricingTable.get(inference.model)
+        if pricing is None:
+            input_rate = output_rate = 0.0
+        else:
+            input_rate = pricing.get("input_per_million", 0.0)
+            output_rate = pricing.get("output_per_million", 0.0)
 
         input_cost_usd = (inference.prompt_tokens / 1_000_000) * input_rate
         output_cost_usd = (inference.completion_tokens / 1_000_000) * output_rate
         total_cost_usd = input_cost_usd + output_cost_usd
-        total_cost_idr = total_cost_usd * Config.USD_IDR_RATE
+        total_cost_idr = total_cost_usd * self._usd_idr_rate
 
         return CostResult(
             model=inference.model,

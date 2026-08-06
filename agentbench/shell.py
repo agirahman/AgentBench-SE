@@ -58,6 +58,7 @@ class AgentBenchShell(cmd.Cmd):
         table.add_row("Experiment", "run, resume, status")
         table.add_row("Analysis", "results, compare, export")
         table.add_row("Configuration", "config, setup, provider")
+        table.add_row("Pricing", "pricing (set/remove/show/refresh)")
         table.add_row("Data", "dataset, artifacts")
         table.add_row("Help", "help, info, version, exit")
         self.console.print(table)
@@ -150,6 +151,13 @@ class AgentBenchShell(cmd.Cmd):
         from agentbench.commands.provider import ProviderCommand
 
         ProviderCommand(self.config, self.console).execute(arg)
+
+    def do_pricing(self, arg: str) -> None:
+        """Manage model pricing (config override + OpenRouter live).
+        Usage: pricing <set <model> <in> <out>|remove <model>|show [model]|refresh>"""
+        from agentbench.commands.pricing import PricingCommand
+
+        PricingCommand(self.config, self.console).execute(arg)
 
     def do_dataset(self, arg: str) -> None:
         """Show dataset info.

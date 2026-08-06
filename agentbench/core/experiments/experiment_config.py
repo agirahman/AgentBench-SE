@@ -86,7 +86,7 @@ def save_experiment_config(
                 "from": "USD",
                 "to": "IDR",
                 "rate": experiment.get("usd_idr_rate", 16500.0),
-                "source": "https://www.google.com/finance/beta/quote/USD-IDR",
+                "source": "https://frankfurter.dev/",
             },
         },
         "rate_limiting": {
