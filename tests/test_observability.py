@@ -62,8 +62,11 @@ def test_write_issue_run_summary_creates_json_artifact(tmp_path):
         error="",
     )
 
-    assert Path(summary_path).exists()
-    payload = json.loads(Path(summary_path).read_text(encoding="utf-8"))
+    summary = Path(summary_path)
+    assert summary.exists()
+    assert summary.name == "summary.json"
+    assert summary.parent.name == "review"
+    payload = json.loads(summary.read_text(encoding="utf-8"))
     assert payload["instance_id"] == "sympy-1"
     assert payload["strategy"] == "review"
     assert payload["difficulty"] == "hard"

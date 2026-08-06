@@ -4,7 +4,9 @@ from models.issue import Issue
 from models.patch import Patch
 from models.result import ExperimentResult, ExecutionResult, EvaluationResult
 from models.inference import InferenceRun
-from utils.prompt_loader import load_prompt_or_default
+from agents.messages import AgentMessage
+from agents.blackboard import Blackboard
+from agents.registry import build_agent_team
 from evaluation.cost import CostCalculator
 
 
@@ -23,46 +25,42 @@ class ReviewStrategy:
 
     def __init__(self, provider):
         self.provider = provider
+        self.team = build_agent_team(provider)
         self.calculator = CostCalculator()
 
     def run(self, issue: Issue) -> tuple[Patch, ExperimentResult]:
+        bb = Blackboard(issue=issue)
         inferences = []
 
-        plan_prompt = load_prompt_or_default("planner.md", "{{issue}}\n").replace("{{issue}}", issue.to_prompt())
-        plan_inf = self.provider.generate(plan_prompt, role="planner")
-        inferences.append(plan_inf)
+        plan_task = AgentMessage(sender="orchestrator", receiver="planner", content=issue.to_prompt())
+        plan_resp = self.team["planner"].act(plan_task, bb)
+        bb.plan = plan_resp.inference.response
+        inferences.append(plan_resp.inference)
 
-        exec_prompt = (
-            load_prompt_or_default("executor.md", "{{issue}}\n\nPlan:\n{{plan}}")
-            .replace("{{issue}}", issue.to_prompt())
-            .replace("{{plan}}", plan_inf.response)
-        )
-        initial_inf = self.provider.generate(exec_prompt, role="executor")
-        inferences.append(initial_inf)
+        exec_task = AgentMessage(sender="planner", receiver="executor", content=issue.to_prompt())
+        initial_resp = self.team["executor"].act(exec_task, bb)
+        bb.patch = initial_resp.inference.response
+        inferences.append(initial_resp.inference)
 
-        review_prompt = (
-            load_prompt_or_default("reviewer.md", "{{issue}}\n\nPlan:\n{{plan}}\n\nPatch:\n{{patch}}")
-            .replace("{{issue}}", issue.to_prompt())
-            .replace("{{plan}}", plan_inf.response)
-            .replace("{{patch}}", initial_inf.response)
-        )
-        review_inf = self.provider.generate(review_prompt, role="reviewer")
-        inferences.append(review_inf)
+        review_task = AgentMessage(sender="executor", receiver="reviewer", content=issue.to_prompt())
+        review_resp = self.team["reviewer"].act(review_task, bb)
+        inferences.append(review_resp.inference)
 
-        needs_revision = _extract_verdict(review_inf.response) != "APPROVED"
-        final_response = initial_inf.response
+        needs_revision = _extract_verdict(review_resp.inference.response) != "APPROVED"
+        final_response = initial_resp.inference.response
         if needs_revision:
-            revision_prompt = (
-                load_prompt_or_default("executor.md", "{{issue}}\n\nPlan:\n{{plan}}\n\nFeedback:\n{{feedback}}")
-                .replace("{{issue}}", issue.to_prompt())
-                .replace("{{plan}}", plan_inf.response)
-                .replace("{{feedback}}", review_inf.response)
-            )
-            revision_inf = self.provider.generate(revision_prompt, role="executor")
-            inferences.append(revision_inf)
-            final_response = revision_inf.response
+            bb.feedback = review_resp.inference.response
+            revision_task = AgentMessage(sender="reviewer", receiver="executor", content=issue.to_prompt())
+            revision_resp = self.team["executor"].act(revision_task, bb)
+            inferences.append(revision_resp.inference)
+            final_response = revision_resp.inference.response
+            bb.patch = final_response
 
-        run = InferenceRun(patch=final_response, inferences=inferences)
+        run = InferenceRun(
+            patch=final_response,
+            inferences=inferences,
+            messages=list(bb.history),
+        )
         cost = self.calculator.aggregate(inferences)
         exec_res = ExecutionResult(run=run)
         eval_res = EvaluationResult(success=final_response.strip() != "", error="")

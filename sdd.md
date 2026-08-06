@@ -132,29 +132,47 @@ D:\development\Skripsi2\AgantBech-SE\
 │   ├── models/
 │   │   ├── issue.py              # Issue dataclass
 │   │   ├── patch.py              # Patch dataclass
+│   │   ├── inference.py          # InferenceResult / InferenceRun (termasuk jejak message)
 │   │   └── result.py             # ExperimentResult dataclass
+│   │
+│   ├── agents/
+│   │   ├── messages.py           # AgentMessage — satuan komunikasi antar agent
+│   │   ├── blackboard.py         # Blackboard — shared state per-issue
+│   │   ├── base.py               # BaseAgent abstrak + AgentResponse
+│   │   ├── direct_agent.py       # DirectAgent (S1)
+│   │   ├── planner_agent.py      # PlannerAgent (S2, S3)
+│   │   ├── executor_agent.py     # ExecutorAgent (S2, S3 + revisi)
+│   │   ├── reviewer_agent.py     # ReviewerAgent (S3)
+│   │   └── registry.py           # build_agent_team(provider)
 │   │
 │   ├── providers/
 │   │   ├── gemini_provider.py    # Gemini API wrapper + token tracking
-│   │   └── groq_provider.py      # Groq API wrapper (fallback) + token tracking
+│   │   ├── groq_provider.py      # Groq API wrapper (fallback) + token tracking
+│   │   ├── openrouter_provider.py# OpenRouter API wrapper (tencent/hy3)
+│   │   └── opencode_provider.py  # OpenCode API wrapper (deepseek)
 │   │
 │   ├── strategies/
-│   │   ├── direct_strategy.py    # S1 — 1 agent
-│   │   ├── planning_strategy.py  # S2 — 2 agent
-│   │   └── review_strategy.py    # S3 — 3 agent
+│   │   ├── direct_strategy.py    # S1 — komposisi DirectAgent
+│   │   ├── planning_strategy.py  # S2 — PlannerAgent → ExecutorAgent
+│   │   └── review_strategy.py    # S3 — Planner → Executor → Reviewer → (revisi)
 │   │
 │   ├── evaluation/
+│   │   ├── cost.py               # Pricing + CostCalculator
+│   │   ├── retry.py              # @with_retry
+│   │   ├── statistics.py         # Statistik eksperimen
 │   │   └── evaluator.py          # (Diisi untuk validasi lokal opsional)
 │   │
 │   ├── experiments/
 │   │   ├── runner.py             # Experiment orchestrator
+│   │   ├── observability.py      # Manifest + issue run summary
+│   │   ├── csv_exporter.py       # Flatten result → CSV
 │   │   └── swebench_adapter.py   # Konversi patch → predictions.jsonl
 │   │
 │   ├── prompts/
-│   │   ├── direct_prompt.md      # Prompt S1
-│   │   ├── planner.md            # Prompt Planner (S2, S3)
-│   │   ├── executor.md           # Prompt Executor (S2, S3)
-│   │   └── reviewer.md           # Prompt Reviewer (S3)
+│   │   ├── direct_prompt.md      # Prompt S1 (DirectAgent)
+│   │   ├── planner.md            # Prompt PlannerAgent (S2, S3)
+│   │   ├── executor.md           # Prompt ExecutorAgent (S2, S3)
+│   │   └── reviewer.md           # Prompt ReviewerAgent (S3)
 │   │
 │   └── utils/
 │       ├── logger.py             # Loguru config
@@ -165,9 +183,10 @@ D:\development\Skripsi2\AgantBech-SE\
 │   ├── logs/                     # Execution logs (kosong — lihat logs/agentbench.log)
 │   ├── plot/                     # Visualizations (future)
 │   ├── predictions/              # SWE-bench predictions JSONL
-│   └── patches/                  # Raw patch files
+│   ├── patches/                  # Raw patch files
+│   └── <EXP-ID>/artifacts/       # Artifact per-agent + messages.jsonl per issue
 │
-└── tests/                        # (Kosong — tidak ada unit test khusus)
+└── tests/                        # Unit test (agents, strategies, runner, dll.)
 ```
 
 ---
@@ -870,6 +889,50 @@ if __name__ == "__main__":
 | | Menentukan hasil akhir eksperimen (itu tugas Evaluation Engine) |
 | **Output** | **Review Feedback** — issue, saran, verdict (APPROVED / NEEDS_REVISION) |
 
+## 4.1.1 Layer Agent (Multi-Agent Orchestration)
+
+Sejak branch `19/feat/multi-agent-orchestration`, setiap role di atas direpresentasikan sebagai **agent object sungguhan** (bukan sekadar label `role` pada panggilan provider). Layer ini menambah satu agen lagi, **DirectAgent**, untuk komposisi strategi S1-S3.
+
+### Komponen
+
+| Komponen | File | Tanggung Jawab |
+|---|---|---|
+| `AgentMessage` | `src/agents/messages.py` | Satuan komunikasi antar agent (sender, receiver, kind, content, timestamp) |
+| `Blackboard` | `src/agents/blackboard.py` | Shared state per-issue (plan, patch, feedback, revision, history) |
+| `BaseAgent` | `src/agents/base.py` | Abstraksi agent + `act(task, context)` yang membungkus 1 panggilan LLM |
+| `build_agent_team` | `src/agents/registry.py` | Membangun 4 agent konkret dari provider |
+
+### Agent Konkret
+
+| Agent | Name | Prompt File | Tugas |
+|---|---|---|---|
+| `DirectAgent` | `direct` | `direct_prompt.md` | One-shot patch (S1) |
+| `PlannerAgent` | `planner` | `planner.md` | Analisis + planning document (S2, S3) |
+| `ExecutorAgent` | `executor` | `executor.md` | Implementasi patch dari plan (S2, S3); revisi bila `bb.feedback` terisi (S3) |
+| `ReviewerAgent` | `reviewer` | `reviewer.md` | Evaluasi patch + verdict (S3) |
+
+### Alur dengan Message Passing
+
+```
+[Orchestrator] ──task──► DirectAgent       ──result──► (S1)
+[Orchestrator] ──task──► PlannerAgent      ──result──► ExecutorAgent      ──result──► (S2)
+[Orchestrator] ──task──► PlannerAgent      ──result──► ExecutorAgent      ──result──► ReviewerAgent
+                                                                                      │
+                                                              NEEDS_REVISION ─────────┘
+                                                                                      ▼
+                                                                            ExecutorAgent (revisi)
+```
+
+### Observability
+
+Setiap strategi mengisi `InferenceRun.messages` dari `Blackboard.history`. Runner (`_save_artifacts`) menulis tiap pesan ke `artifacts/<instance_id>/messages.jsonl` sebagai jejak message passing real antar agent. Manifest eksperimen + `experiment.yaml` memuat field `agents` (nama + prompt file) untuk reproducibility.
+
+### Implikasi ke Riset
+
+- **S1–S3 tetap valid sebagai pembanding**: jumlah inferensi, token, cost, dan waktu tidak berubah dari sisi metrik.
+- **Tambahan observability**: `messages.jsonl` adalah kontribusi baru untuk diskusi di skripsi tanpa mengubah variabel yang diukur.
+- **Beban pengembangan**: tidak ada dependency baru; semua dibangun di atas `Provider` dan `InferenceResult` yang sudah ada.
+
 ## 4.2 Perbedaan Output Per Strategi (Trade-off)
 
 ### S1 — Direct Execution
@@ -1238,7 +1301,10 @@ python -m swebench.harness.run_evaluation \
 Groq dan Gemini digunakan hanya jika OpenRouter sedang rate-limited atau quota habis. Untuk konsistensi penelitian, **semua eksperimen utama harus pakai tencent/hy3 via OpenRouter**. Groq/Gemini hanya untuk testing saat development.
 
 ## Desain Minimal
-Proyek ini sengaja dibuat **tanpa abstract class, tanpa complex controller, tanpa Docker untuk strategi**. Setiap strategi adalah kelas mandiri yang memanggil provider secara sequential. Ini cukup untuk menjawab RQ1, RQ2, RQ3 tanpa overengineering.
+Proyek ini sengaja dibuat **tanpa framework orchestrator eksternal** (LangGraph / AutoGen / CrewAI). Sejak branch `19/feat/multi-agent-orchestration`, strategi memanggil agent object internal (`build_agent_team`) yang membungkus `provider.generate(...)` — bukan `provider` langsung. Ini cukup untuk menjawab RQ1, RQ2, RQ3 tanpa menambah dependency.
+
+## Layer Agent (Sejak Branch 19)
+S1–S3 sebelumnya diimplementasikan sebagai "1 agent dengan beberapa role via prompt". Sejak branch `19/feat/multi-agent-orchestration`, setiap role adalah **agent object sungguhan** dengan message passing lewat `Blackboard` — lihat section 4.1.1. S1–S3 tetap sebagai pembanding riset; fungsional message passing + `messages.jsonl` adalah observability tambahan yang tidak mengubah metrik.
 
 ---
 

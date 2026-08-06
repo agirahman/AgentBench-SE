@@ -31,7 +31,8 @@ class OpenRouterProvider:
                 messages=[{"role": "user", "content": prompt}],
                 temperature=Config.TEMPERATURE,
                 timeout=60,
-                max_tokens=4096,
+                max_tokens=8192,
+                # max_tokens=4096,
             )
 
             elapsed = time.perf_counter() - t0

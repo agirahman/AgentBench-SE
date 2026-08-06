@@ -6,6 +6,7 @@ from providers.gemini_provider import GeminiProvider
 from providers.groq_provider import GroqProvider
 from providers.opencode_provider import OpenCodeProvider
 from providers.openrouter_provider import OpenRouterProvider
+from agents.registry import build_agent_team
 from strategies.direct_strategy import DirectStrategy
 from strategies.planning_strategy import PlanningStrategy
 from strategies.review_strategy import ReviewStrategy
@@ -61,6 +62,7 @@ def _save_experiment_config(
     issue_count: int,
     strategy_names: list[str],
     experiment_id: str = "",
+    agents: list[dict[str, str]] | None = None,
 ) -> None:
     """Simpan experiment.yaml untuk reproducibility (Kritik #8)."""
     model_name = (
@@ -97,6 +99,7 @@ def _save_experiment_config(
             "n_issues": issue_count,
         },
         "strategies": strategy_names,
+        "agents": agents or [],
         "pricing": {
             "provider": args.provider,
             "model": model_name,
@@ -108,7 +111,7 @@ def _save_experiment_config(
                 "from": "USD",
                 "to": "IDR",
                 "rate": Config.USD_IDR_RATE,
-                "source": "ENV",
+                "source": "https://www.google.com/finance/beta/quote/USD-IDR",
             },
         },
         "rate_limiting": {
@@ -176,6 +179,12 @@ def main():
         issues = issues[:args.issues]
         logger.info(f"Limit: testing with {len(issues)} issues")
 
+    agent_team = build_agent_team(provider)
+    agents = [
+        {"name": name, "prompt_file": agent.prompt_file}
+        for name, agent in agent_team.items()
+    ]
+
     strategies = {
         "direct": DirectStrategy(provider),
         "planning": PlanningStrategy(provider),
@@ -192,11 +201,12 @@ def main():
         provider_name=args.provider,
         rate_limit_seconds=args.rate_limit,
         resume=args.resume,
+        agents=agents,
     )
 
     # Save experiment.yaml to per-experiment folder
     exp_dir = f"{args.output}/{exp_id}"
-    _save_experiment_config(exp_dir, args, len(issues), strategy_names, exp_id)
+    _save_experiment_config(exp_dir, args, len(issues), strategy_names, exp_id, agents)
 
     manifest_path = Path(exp_dir) / "manifest.json"
     if manifest_path.exists():

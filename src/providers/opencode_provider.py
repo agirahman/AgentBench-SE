@@ -32,8 +32,8 @@ class OpenCodeProvider:
                 messages=[{"role": "user", "content": prompt}],
                 temperature=Config.TEMPERATURE,
                 timeout=60,
-                max_tokens=4096,
-                response_format={"type": "json_object"},
+                max_tokens=8192,
+                # response_format={"type": "json_object"},
             )
 
             elapsed = time.perf_counter() - t0

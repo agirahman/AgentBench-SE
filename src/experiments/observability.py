@@ -12,6 +12,7 @@ def build_experiment_manifest(
     provider_name: str,
     experiment_id: str,
     output_dir: str,
+    agents: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Build a structured manifest describing the experiment dataset and execution setup."""
     difficulty_counts = {"easy": 0, "medium": 0, "hard": 0, "unknown": 0}
@@ -37,6 +38,7 @@ def build_experiment_manifest(
             "difficulty_counts": {k: v for k, v in difficulty_counts.items() if v > 0},
         },
         "strategies": strategies,
+        "agents": agents or [],
     }
     return manifest
 
@@ -52,10 +54,14 @@ def write_issue_run_summary(
     success: bool,
     error: str = "",
 ) -> str:
-    """Write a small JSON artifact summarizing an issue-level run."""
-    artifact_dir = Path(output_dir) / "artifacts" / issue.instance_id
+    """Write a small JSON artifact summarizing an issue-level run.
+
+    Disimpan ke ``<exp_dir>/artifacts/<instance_id>/<strategy_name>/summary.json``
+    agar seragam dengan struktur artifact per-agent.
+    """
+    artifact_dir = Path(output_dir) / "artifacts" / issue.instance_id / strategy_name
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    summary_path = artifact_dir / f"{strategy_name}_summary.json"
+    summary_path = artifact_dir / "summary.json"
 
     payload = {
         "instance_id": issue.instance_id,

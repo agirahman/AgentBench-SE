@@ -32,18 +32,23 @@ Dataset: [princeton-nlp/SWE-bench_Lite](https://huggingface.co/datasets/princeto
 ```mermaid
 flowchart LR
     A[SWE-bench Lite] --> B[main.py]
+    B --> T[build_agent_team: DirectAgent/PlannerAgent/ExecutorAgent/ReviewerAgent]
     B --> C1[DirectStrategy]
     B --> C2[PlanningStrategy]
     B --> C3[ReviewStrategy]
-    C1 --> P[Provider: tencent/hy3 via OpenRouter]
-    C2 --> P
-    C3 --> P
-    P --> D[Patch + Metadata]
+    C1 --> T
+    C2 --> T
+    C3 --> T
+    T --> P[Provider: tencent/hy3 via OpenRouter]
+    P --> D[Patch + Messages + Metadata]
     D --> E[results/csv/experiment_results.csv]
     D --> F[results/predictions/predictions.jsonl]
     F --> G[SWE-bench Harness]
     G --> H[Build Success + Test Pass]
 ```
+
+> [!NOTE]
+> Sejak branch `19/feat/multi-agent-orchestration`, setiap role (direct, planner, executor, reviewer) adalah **agent object sungguhan** dengan message passing via `Blackboard`. Jejak komunikasi antar agent disimpan di `artifacts/<instance_id>/messages.jsonl`.
 
 ## Strategi yang Dibandingkan
 
@@ -64,18 +69,28 @@ AgantBech-SE/
 │   ├── config.py               # Loader .env
 │   ├── dataset_loader.py       # Filter SWE-bench Lite
 │   ├── view_results.py         # Inspeksi hasil
+│   ├── models/                 # Issue, Patch, InferenceResult/Run, ExperimentResult
+│   ├── agents/                 # Layer multi-agent (sejak branch 19)
+│   │   ├── messages.py         # AgentMessage
+│   │   ├── blackboard.py       # Blackboard (shared state + message history)
+│   │   ├── base.py             # BaseAgent + AgentResponse
+│   │   ├── direct_agent.py     # DirectAgent (S1)
+│   │   ├── planner_agent.py    # PlannerAgent (S2, S3)
+│   │   ├── executor_agent.py   # ExecutorAgent (S2, S3 + revisi)
+│   │   ├── reviewer_agent.py   # ReviewerAgent (S3)
+│   │   └── registry.py         # build_agent_team(provider)
 │   ├── providers/              # OpenRouter, Gemini, Groq, OpenCode
-│   ├── strategies/             # Direct, Planning, Review
-│   ├── experiments/            # Runner + SWE-bench adapter
-│   ├── evaluation/             # Evaluator
-│   └── prompts/                # Template prompt per role
+│   ├── strategies/             # Direct, Planning, Review (komposisi agent_team)
+│   ├── experiments/            # Runner + SWE-bench adapter + observability
+│   ├── evaluation/             # Cost, retry, statistics, evaluator
+│   └── prompts/                # Template prompt per agent
 ├── datasets/                   # Cache HuggingFace
-├── docs/                       # Setup, technical, feedback
+├── docs/                       # Setup, technical, feedback, MULTI_AGENT_MIGRATION
 ├── results/
 │   ├── csv/                    # experiment_results.csv
 │   ├── patches/                # Raw patch per issue
 │   ├── predictions/            # predictions.jsonl
-│   └── logs/
+│   └── <EXP-ID>/artifacts/     # Per-agent .md + messages.jsonl per issue
 ├── graphify-out/               # Knowledge graph (auto-generated)
 ├── logs/
 ├── sdd.md                      # Spec-Driven Development
@@ -193,6 +208,7 @@ Ringkasan rata-rata dicetak di akhir run. Untuk analisis RQ1-RQ3, lihat `sdd.md`
 ## Dokumentasi Terkait
 
 - [`sdd.md`](./sdd.md) — Spec-Driven Development (arsitektur, role, trade-off, runbook).
+- [`docs/MULTI_AGENT_MIGRATION.md`](./docs/MULTI_AGENT_MIGRATION.md) — Rencana & implementasi migrasi Single-role → Multi-Agent Orchestration.
 - [`docs/SRS.md`](./docs/SRS.md) — Software Requirements Specification (SA/DD).
 - [`docs/DSR_MAPPING.md`](./docs/DSR_MAPPING.md) — Design Science Research Mapping (SA/DD).
 - [`docs/USE_CASE_SPEC.md`](./docs/USE_CASE_SPEC.md) — Use Case Specification (SA/DD).
