@@ -599,12 +599,12 @@ AgantBech-SE/
 **Deliverable:** All commands implemented
 
 ### Phase 6: Polish & Documentation (2-3 hours)
-- [ ] Update README.md (new installation & usage)
-- [ ] Add command help strings (`help <command>`)
-- [ ] Add error handling (friendly error messages)
-- [ ] Add input validation (e.g., `--issues` must be 1-50)
-- [ ] Test full workflow: setup → run → results → export
-- [ ] Record demo GIF for README
+- [x] Update README.md (new installation & usage)
+- [x] Add command help strings (`help <command>`)
+- [x] Add error handling (friendly error messages)
+- [x] Add input validation (e.g., `--issues` must be 1-50)
+- [x] Test full workflow: setup → run → results → export
+- [ ] Record demo GIF for README *(deferred — optional)*
 
 **Deliverable:** Production-ready, documented framework
 

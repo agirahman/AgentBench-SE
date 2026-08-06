@@ -62,30 +62,30 @@ Trade-off inti: semakin banyak agent, semakin tinggi biaya (token + waktu) namun
 
 ## Struktur Proyek
 
-```
+```text
 AgantBech-SE/
-├── src/
-│   ├── main.py                 # CLI entry point
-│   ├── config.py               # Loader .env
-│   ├── dataset_loader.py       # Filter SWE-bench Lite
-│   ├── view_results.py         # Inspeksi hasil
-│   ├── models/                 # Issue, Patch, InferenceResult/Run, ExperimentResult
-│   ├── agents/                 # Layer multi-agent (sejak branch 19)
-│   │   ├── messages.py         # AgentMessage
-│   │   ├── blackboard.py       # Blackboard (shared state + message history)
-│   │   ├── base.py             # BaseAgent + AgentResponse
-│   │   ├── direct_agent.py     # DirectAgent (S1)
-│   │   ├── planner_agent.py    # PlannerAgent (S2, S3)
-│   │   ├── executor_agent.py   # ExecutorAgent (S2, S3 + revisi)
-│   │   ├── reviewer_agent.py   # ReviewerAgent (S3)
-│   │   └── registry.py         # build_agent_team(provider)
-│   ├── providers/              # OpenRouter, Gemini, Groq, OpenCode
-│   ├── strategies/             # Direct, Planning, Review (komposisi agent_team)
-│   ├── experiments/            # Runner + SWE-bench adapter + observability
-│   ├── evaluation/             # Cost, retry, statistics, evaluator
-│   └── prompts/                # Template prompt per agent
+├── agentbench/                 # Package interactive shell (baru, sejak branch 20)
+│   ├── cli/main.py             # Entry: `agentbench` & `agentbench setup`
+│   ├── shell.py                # REPL (cmd.Cmd) — banner, help, command dispatch
+│   ├── config_manager.py       # YAML config ~/.agentbench/config.yaml
+│   ├── setup_wizard.py         # Wizard interaktif `agentbench setup`
+│   ├── commands/               # run, results, export, config, provider, dataset, artifacts
+│   ├── ui/                     # banner, progress, tables (rich)
+│   └── core/                   # EXISTING src/ (di-rename ke sini)
+│       ├── main.py             # CLI entry point legacy
+│       ├── config.py           # Loader .env
+│       ├── dataset_loader.py   # Filter SWE-bench Lite
+│       ├── view_results.py     # Inspeksi hasil
+│       ├── models/             # Issue, Patch, InferenceResult/Run, ExperimentResult
+│       ├── agents/             # Layer multi-agent (sejak branch 19)
+│       ├── providers/          # OpenRouter, Gemini, Groq, OpenCode
+│       ├── strategies/         # Direct, Planning, Review
+│       ├── experiments/        # Runner + SWE-bench adapter + observability
+│       ├── evaluation/         # Cost, retry, statistics, evaluator
+│       └── prompts/            # Template prompt per agent
+├── src/                        # Shim backward-compat (main.py, view_results.py)
 ├── datasets/                   # Cache HuggingFace
-├── docs/                       # Setup, technical, feedback, MULTI_AGENT_MIGRATION
+├── docs/                       # Setup, technical, PRD/SDD interactive shell
 ├── results/
 │   ├── csv/                    # experiment_results.csv
 │   ├── patches/                # Raw patch per issue
@@ -94,9 +94,15 @@ AgantBech-SE/
 ├── graphify-out/               # Knowledge graph (auto-generated)
 ├── logs/
 ├── sdd.md                      # Spec-Driven Development
+├── setup.py                    # Packaging (entry point `agentbench`)
 ├── requirements.txt
 └── .env                        # API keys (tidak di-commit)
 ```
+
+> [!NOTE]
+> `src/` telah di-rename ke `agentbench/core/` (SDD Interactive Shell §7).
+> `src/main.py` & `src/view_results.py` tetap ada sebagai **shim** agar perintah
+> legacy `python src/main.py ...` masih berfungsi.
 
 ## Prasyarat
 
@@ -114,9 +120,24 @@ cd AgantBech-SE
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
+
+# (Opsional) install sebagai package — menyediakan perintah `agentbench`
+pip install -e .
 ```
 
 ## Konfigurasi
+
+### Opsi A — Wizard interaktif (disarankan)
+
+```powershell
+agentbench setup
+```
+
+Wizard memandu: info peneliti → pilih provider → API key → model → pengaturan
+eksperimen (temperature, retries, rate limit, kurs USD/IDR) → tes koneksi.
+Hasilnya disimpan ke `~/.agentbench/config.yaml`.
+
+### Opsi B — Manual (`.env`, legacy)
 
 Buat file `.env` di root proyek:
 
@@ -131,6 +152,55 @@ USD_IDR_RATE=16500.0
 
 > [!NOTE]
 > Untuk konsistensi riset, eksperimen utama memakai OpenRouter (`tencent/hy3`).
+> API key pada `~/.agentbench/config.yaml` disimpan plain text — jangan commit
+> file tersebut.
+
+## Interactive Shell
+
+Jalankan `agentbench` (tanpa argumen) untuk masuk ke REPL:
+
+```powershell
+agentbench
+```
+
+```text
+╭──────────────────────────────────────────────────────────╮
+│ 🧪 AgentBench-SE Interactive Shell                       │
+│ Framework for AI Agent Orchestration Strategy Evaluation │
+│ Version 0.1.0 | Research by <nama>                       │
+╰──────────────────────────────────────────────────────────╯
+agentbench>
+```
+
+### Perintah
+
+| Perintah | Kegunaan |
+|:---------|:---------|
+| `run [--issues N] [--strategy S] [--output DIR] [--resume]` | Jalankan eksperimen dengan progress bar live |
+| `results summary` | Ringkasan metrik per strategi |
+| `results compare` | Perbandingan strategi side-by-side |
+| `results errors` | Daftar issue gagal |
+| `results patch <issue_id> [--strategy S]` | Tampilkan patch sebuah issue |
+| `export [--format csv\|json\|markdown] [--output PATH]` | Ekspor hasil |
+| `config show` / `config set <key> <value>` / `config reset` | Kelola konfigurasi |
+| `provider [--test]` | Info provider / uji koneksi |
+| `dataset [--refresh]` | Info dataset (repo & difficulty) |
+| `artifacts <issue_id> <strategy>` | Lihat artifact per agent |
+| `info`, `version`, `help [cmd]` | Info framework & bantuan |
+| `exit` / `quit` / `Ctrl+D` | Keluar |
+
+Contoh sesi:
+
+```text
+agentbench> run --issues 10 --strategy all
+agentbench> results summary
+agentbench> export --format markdown --output thesis_appendix.md
+agentbench> exit
+```
+
+> [!NOTE]
+> Perintah legacy `python src/main.py --issues 2` dan
+> `python src/view_results.py summary` tetap berfungsi (shim backward-compat).
 
 ## Penggunaan
 

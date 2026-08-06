@@ -1210,11 +1210,11 @@ pip install -e .
 - [x] Test: `config show`, `provider --test`, `dataset`
 
 ### Phase 6: Polish & Documentation (2-3h)
-- [ ] Update `README.md` (installation & usage)
-- [ ] Command help strings (`help <command>`)
-- [ ] Input validation + friendly errors
-- [ ] Full workflow test: setup -> run -> results -> export
-- [ ] Optional: demo GIF
+- [x] Update `README.md` (installation & usage)
+- [x] Command help strings (`help <command>`)
+- [x] Input validation + friendly errors
+- [x] Full workflow test: setup -> run -> results -> export
+- [ ] Optional: demo GIF *(deferred)*
 
 **Total: 12-18 hours**
 
