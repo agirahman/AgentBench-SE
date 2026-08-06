@@ -1,4 +1,4 @@
-from experiments.swebench_adapter import extract_diff
+from agentbench.core.experiments.swebench_adapter import extract_diff
 
 
 def test_extract_diff_from_python_fenced_block():

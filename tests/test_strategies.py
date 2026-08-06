@@ -1,9 +1,9 @@
 import pytest
 
-from models.issue import Issue
-from strategies.direct_strategy import DirectStrategy
-from strategies.planning_strategy import PlanningStrategy
-from strategies.review_strategy import ReviewStrategy
+from agentbench.core.models.issue import Issue
+from agentbench.core.strategies.direct_strategy import DirectStrategy
+from agentbench.core.strategies.planning_strategy import PlanningStrategy
+from agentbench.core.strategies.review_strategy import ReviewStrategy
 
 
 class DummyInference:

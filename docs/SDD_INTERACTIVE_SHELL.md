@@ -1174,7 +1174,7 @@ pip install -e .
 
 ### Phase 1: Setup & Packaging (2-3h)
 - [x] `pip install rich click pyyaml`
-- [ ] Rename `src/` -> `agentbench/core/` (update imports) *(deferred: non-breaking approach — src/ kept intact)*
+- [x] Rename `src/` -> `agentbench/core/` (update imports) — *git mv + rewrite imports; shim `src/main.py` & `src/view_results.py` keep legacy entry points working; 81/81 tests pass*
 - [x] Create `agentbench/__init__.py`, `__version__.py`
 - [x] Create `setup.py` (entry_points)
 - [x] Create `agentbench/cli/main.py`

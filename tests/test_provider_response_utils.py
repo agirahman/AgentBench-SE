@@ -1,4 +1,4 @@
-from providers.response_utils import build_openai_inference_result
+from agentbench.core.providers.response_utils import build_openai_inference_result
 
 
 class _Choice:

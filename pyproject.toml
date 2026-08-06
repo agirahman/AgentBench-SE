@@ -1,6 +1,6 @@
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["."]
 
 [tool.pyright]
-extraPaths = ["src", "agentbench"]
-include = ["src", "tests", "agentbench"]
+extraPaths = ["."]
+include = ["agentbench", "tests"]

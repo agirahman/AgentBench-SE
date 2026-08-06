@@ -1,10 +1,10 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-from models.inference import InferenceResult
-from agents.messages import AgentMessage
-from agents.blackboard import Blackboard
-from utils.prompt_loader import load_prompt_or_default
+from agentbench.core.models.inference import InferenceResult
+from agentbench.core.agents.messages import AgentMessage
+from agentbench.core.agents.blackboard import Blackboard
+from agentbench.core.utils.prompt_loader import load_prompt_or_default
 
 
 @dataclass

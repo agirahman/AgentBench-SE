@@ -2,20 +2,20 @@ import json
 from pathlib import Path
 import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 
-from models.issue import Issue
-from models.inference import InferenceResult
-from agents.messages import AgentMessage
-from agents.blackboard import Blackboard
-from agents.base import BaseAgent
-from agents.direct_agent import DirectAgent
-from agents.planner_agent import PlannerAgent
-from agents.executor_agent import ExecutorAgent
-from agents.reviewer_agent import ReviewerAgent
-from agents.registry import build_agent_team
+from agentbench.core.models.issue import Issue
+from agentbench.core.models.inference import InferenceResult
+from agentbench.core.agents.messages import AgentMessage
+from agentbench.core.agents.blackboard import Blackboard
+from agentbench.core.agents.base import BaseAgent
+from agentbench.core.agents.direct_agent import DirectAgent
+from agentbench.core.agents.planner_agent import PlannerAgent
+from agentbench.core.agents.executor_agent import ExecutorAgent
+from agentbench.core.agents.reviewer_agent import ReviewerAgent
+from agentbench.core.agents.registry import build_agent_team
 
 
 class DummyProvider:

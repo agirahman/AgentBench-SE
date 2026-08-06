@@ -1,5 +1,5 @@
-from models.issue import Issue
-from strategies.review_strategy import ReviewStrategy, _extract_verdict
+from agentbench.core.models.issue import Issue
+from agentbench.core.strategies.review_strategy import ReviewStrategy, _extract_verdict
 
 
 class DummyInference:
@@ -37,7 +37,7 @@ def test_review_strategy_uses_fallback_prompt_when_template_missing(monkeypatch)
     strategy = ReviewStrategy(provider)
 
     monkeypatch.setattr(
-        "agents.base.load_prompt_or_default",
+        "agentbench.core.agents.base.load_prompt_or_default",
         lambda filename, default="": str(default),
     )
 

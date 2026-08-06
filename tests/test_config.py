@@ -1,4 +1,4 @@
-from config import Config, _get_env, _get_float_env, _get_int_env
+from agentbench.core.config import Config, _get_env, _get_float_env, _get_int_env
 
 
 def test_get_env_returns_default_when_blank(monkeypatch):

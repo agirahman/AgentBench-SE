@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from agents.messages import AgentMessage
+    from agentbench.core.agents.messages import AgentMessage
 
 
 @dataclass

@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from evaluation.statistics import (
+from agentbench.core.evaluation.statistics import (
     compute_summary,
     compute_success_rate,
     compute_avg_time_per_inference,

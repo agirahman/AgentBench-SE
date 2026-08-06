@@ -2,9 +2,9 @@ import json
 import tempfile
 from pathlib import Path
 
-from agents.messages import AgentMessage
-from experiments.runner import _load_existing_ids, _append_jsonl, _save_artifacts
-from models.inference import InferenceResult
+from agentbench.core.agents.messages import AgentMessage
+from agentbench.core.experiments.runner import _load_existing_ids, _append_jsonl, _save_artifacts
+from agentbench.core.models.inference import InferenceResult
 
 
 def test_load_existing_ids_skips_invalid_json_lines(tmp_path):

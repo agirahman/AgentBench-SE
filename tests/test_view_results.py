@@ -1,6 +1,6 @@
 import pandas as pd
 
-from view_results import build_strategy_difficulty_summary
+from agentbench.core.view_results import build_strategy_difficulty_summary
 
 
 def test_build_strategy_difficulty_summary_aggregates_metrics():

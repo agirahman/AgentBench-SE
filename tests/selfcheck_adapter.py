@@ -1,8 +1,10 @@
 """Self-check: extract_diff menangani semua edge case model response."""
 import sys
-sys.path.insert(0, "src")
+from pathlib import Path
 
-from experiments.swebench_adapter import extract_diff, _is_valid_patch_syntax, _check_patch_syntax
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from agentbench.core.experiments.swebench_adapter import extract_diff, _is_valid_patch_syntax, _check_patch_syntax
 
 # Case 1: raw patch with hunk count mismatch → auto-fix succeeds → VALID
 case1 = r"""diff --git a/django/conf/global_settings.py b/django/conf/global_settings.py

@@ -1,8 +1,8 @@
 import pytest
 
-from config import Config
-from models.inference import InferenceResult
-from evaluation.cost import CostCalculator, CostResult, PricingTable
+from agentbench.core.config import Config
+from agentbench.core.models.inference import InferenceResult
+from agentbench.core.evaluation.cost import CostCalculator, CostResult, PricingTable
 
 
 def _inference(model="tencent/hy3", prompt=1000, completion=500):

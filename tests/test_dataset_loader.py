@@ -1,5 +1,5 @@
-import dataset_loader
-from models.issue import Issue
+from agentbench.core import dataset_loader
+from agentbench.core.models.issue import Issue
 
 
 def test_normalize_repo_specs_accepts_mapping():

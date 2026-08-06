@@ -1,8 +1,8 @@
 import json
 from pathlib import Path
 
-from experiments.observability import build_experiment_manifest, write_issue_run_summary
-from models.issue import Issue
+from agentbench.core.experiments.observability import build_experiment_manifest, write_issue_run_summary
+from agentbench.core.models.issue import Issue
 
 
 def test_build_experiment_manifest_reports_dataset_mix(tmp_path):

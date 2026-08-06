@@ -1,6 +1,6 @@
-from agents.base import BaseAgent
-from agents.messages import AgentMessage
-from agents.blackboard import Blackboard
+from agentbench.core.agents.base import BaseAgent
+from agentbench.core.agents.messages import AgentMessage
+from agentbench.core.agents.blackboard import Blackboard
 
 
 class ExecutorAgent(BaseAgent):

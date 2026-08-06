@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from experiment_id import generate_experiment_id, create_experiment_dir, INDEX_FILE
+from agentbench.core.experiment_id import generate_experiment_id, create_experiment_dir, INDEX_FILE
 import json
 import tempfile
 

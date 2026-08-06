@@ -1,6 +1,6 @@
 import pytest
 
-from evaluation.retry import with_retry
+from agentbench.core.evaluation.retry import with_retry
 
 
 def test_success_first_attempt():

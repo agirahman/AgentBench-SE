@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 
-from models.issue import Issue
-from agents.messages import AgentMessage
+from agentbench.core.models.issue import Issue
+from agentbench.core.agents.messages import AgentMessage
 
 
 @dataclass

@@ -1,6 +1,6 @@
 import argparse
 
-from main import parse_args
+from agentbench.core.main import parse_args
 
 
 def test_parse_args_accepts_repo_spec_override(monkeypatch):
