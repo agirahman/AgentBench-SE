@@ -131,7 +131,39 @@ class RunCommand(BaseCommand):
             raise
 
         elapsed_total = time.perf_counter() - t0
+        self._save_config_snapshot(
+            exp_id, output, len(issue_objs), list(strategies), provider
+        )
         self._print_summary(df, exp_id, output, elapsed_total)
+
+    def _save_config_snapshot(
+        self,
+        exp_id: str,
+        output: str,
+        issue_count: int,
+        strategy_names: list[str],
+        provider,
+    ) -> None:
+        """Write experiment.yaml into the run's output dir (reproducibility)."""
+        try:
+            from agentbench.core.experiments.experiment_config import (
+                save_experiment_config,
+            )
+
+            exp_dir = f"{output}/{exp_id}" if exp_id else output
+            path = save_experiment_config(
+                exp_dir,
+                researcher=self.config.get("researcher", {}),
+                provider=self.config.get("provider", {}),
+                experiment=self.config.get("experiment", {}),
+                issue_count=issue_count,
+                strategy_names=strategy_names,
+                experiment_id=exp_id,
+                agents=self._agent_manifest(provider),
+            )
+            self.info(f"  Config snapshot: {path}")
+        except Exception as e:  # noqa: BLE001 - snapshot must not abort a run
+            self.warning(f"Could not write experiment.yaml: {e}")
 
     # ------------------------------------------------------------------ #
     # Resolution helpers

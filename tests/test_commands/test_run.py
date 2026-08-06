@@ -201,3 +201,71 @@ def test_agent_manifest_uses_registry(monkeypatch, command):
     )
     manifest = command._agent_manifest(FakeProvider())
     assert manifest == [{"name": "direct", "prompt_file": "direct.md"}]
+
+
+# --------------------------------------------------------------------- #
+# experiment.yaml snapshot
+# --------------------------------------------------------------------- #
+def test_save_experiment_config_writes_yaml(tmp_path):
+    from agentbench.core.experiments.experiment_config import (
+        save_experiment_config,
+    )
+
+    path = save_experiment_config(
+        str(tmp_path),
+        researcher={"name": "Agi", "institution": "UNJ"},
+        provider={"name": "openrouter", "model": "tencent/hy3:free"},
+        experiment={"temperature": 0.2, "max_retries": 3, "usd_idr_rate": 16500.0},
+        issue_count=5,
+        strategy_names=["direct", "planning"],
+        experiment_id="EXP-1",
+        agents=[{"name": "direct", "prompt_file": "direct.md"}],
+    )
+    assert path == str(tmp_path / "experiment.yaml")
+    assert (tmp_path / "experiment.yaml").exists()
+
+    import yaml
+
+    data = yaml.safe_load(open(path))
+    assert data["experiment"]["id"] == "EXP-1"
+    assert data["experiment"]["researcher"] == "Agi"
+    assert data["provider"]["model"] == "tencent/hy3:free"
+    assert data["dataset"]["n_issues"] == 5
+    assert data["strategies"] == ["direct", "planning"]
+
+
+def test_save_experiment_config_uses_defaults(tmp_path):
+    from agentbench.core.experiments.experiment_config import (
+        save_experiment_config,
+    )
+
+    path = save_experiment_config(str(tmp_path), issue_count=2)
+    import yaml
+
+    data = yaml.safe_load(open(path))
+    assert data["experiment"]["researcher"] == "Agi Rahman Setiadi"
+    assert data["provider"]["model"] == "unknown"
+
+
+def test_execute_writes_experiment_yaml(monkeypatch, command, tmp_path):
+    """Full run through execute() must produce experiment.yaml."""
+    from rich.prompt import Confirm
+    import pandas as pd
+
+    monkeypatch.setattr(Confirm, "ask", lambda *a, **k: True)
+
+    def fake_run_experiments(issues, strategies, **kwargs):
+        df = pd.DataFrame([{
+            "instance_id": "x", "strategy": "direct", "total_tokens": 10,
+            "cost_usd": 0.001, "success": 1,
+        }])
+        return df, "EXP-SNAP"
+
+    monkeypatch.setattr(
+        "agentbench.core.experiments.runner.run_experiments", fake_run_experiments
+    )
+    out = str(tmp_path / "out")
+    command.execute(f"--issues 1 --strategy direct --output {out}")
+    text = command.console.export_text()
+    assert "Config snapshot" in text
+    assert (tmp_path / "out" / "EXP-SNAP" / "experiment.yaml").exists()
