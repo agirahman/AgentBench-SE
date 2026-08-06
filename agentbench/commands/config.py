@@ -33,8 +33,28 @@ class ConfigCommand(BaseCommand):
             self._set_config(parts[1:])
         elif sub == "reset":
             self._reset_config()
+        elif sub == "rate":
+            self._refresh_rate()
         else:
-            self.error(f"Unknown subcommand: '{sub}'. Use: show|set|reset")
+            self.error(f"Unknown subcommand: '{sub}'. Use: show|set|reset|rate")
+
+    def _refresh_rate(self) -> None:
+        """Fetch a fresh USD/IDR rate from trusted APIs and persist it."""
+        self.info("Fetching USD/IDR rate from trusted API...")
+        try:
+            from agentbench.exchange_rate import fetch_usd_idr_rate
+
+            rate, source, ts = fetch_usd_idr_rate(use_cache=False)
+            updated = self._cm.set_value(
+                "experiment.usd_idr_rate", str(rate)
+            )
+            new_rate = updated["experiment"]["usd_idr_rate"]
+            self.success(
+                f"✓ USD/IDR updated to {new_rate:,.0f} "
+                f"(source: {source}, fetched {ts[:10]})."
+            )
+        except Exception as e:  # noqa: BLE001
+            self.error(f"Could not fetch rate: {e}")
 
     def _show_config(self) -> None:
         try:

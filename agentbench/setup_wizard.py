@@ -67,7 +67,26 @@ def run_setup() -> None:
     temperature = FloatPrompt.ask("[cyan]Temperature (0.0-1.0)[/cyan]", default=0.2)
     max_retries = IntPrompt.ask("[cyan]Max retries[/cyan]", default=3)
     rate_limit = FloatPrompt.ask("[cyan]Rate limit (s)[/cyan]", default=1.5)
-    usd_idr_rate = FloatPrompt.ask("[cyan]USD/IDR rate[/cyan]", default=16500.0)
+
+    # USD/IDR: prefer a live rate from trusted APIs (BI JISDOR -> ECB -> fallback)
+    usd_idr_default = 16500.0
+    usd_idr_source = "default"
+    try:
+        from agentbench.exchange_rate import fetch_usd_idr_rate
+
+        usd_idr_default, usd_idr_source, _ = fetch_usd_idr_rate()
+        console.print(
+            f"[cyan]Live USD/IDR rate: {usd_idr_default:,.0f} "
+            f"(source: {usd_idr_source})[/cyan]"
+        )
+    except Exception as e:  # noqa: BLE001
+        console.print(
+            f"[yellow]Could not fetch live USD/IDR rate ({e}); "
+            "using default.[/yellow]"
+        )
+    usd_idr_rate = FloatPrompt.ask(
+        "[cyan]USD/IDR rate[/cyan]", default=usd_idr_default
+    )
 
     config = {
         "researcher": {

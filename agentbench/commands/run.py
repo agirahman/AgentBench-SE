@@ -52,6 +52,9 @@ class RunCommand(BaseCommand):
             self.error(str(e))
             return
 
+        # Refresh USD/IDR from a trusted API (BI JISDOR -> ECB -> fallback)
+        self._refresh_rate()
+
         # Confirmation dialog
         self.console.print(Panel.fit(
             f"[bold]Experiment Run[/bold]\n"
@@ -208,6 +211,36 @@ class RunCommand(BaseCommand):
         if raw and raw is not True:
             return str(raw)
         return self._resolve_default_output()
+
+    def _refresh_rate(self) -> None:
+        """Fetch a fresh USD/IDR rate from trusted APIs and persist it.
+
+        Non-fatal: on failure the configured rate is kept and a warning is
+        shown (a run must never be blocked by an offline rate service).
+        """
+        try:
+            from agentbench.exchange_rate import fetch_usd_idr_rate
+
+            rate, source, ts = fetch_usd_idr_rate()
+            self.config.setdefault("experiment", {})["usd_idr_rate"] = rate
+            try:
+                from agentbench.config_manager import ConfigManager
+
+                cm = ConfigManager()
+                if cm.config_exists():
+                    cfg = cm.load()
+                    cfg.setdefault("experiment", {})["usd_idr_rate"] = rate
+                    cm.save(cfg)
+            except Exception:  # noqa: BLE001 - persistence is best-effort
+                pass
+            self.info(
+                f"  USD/IDR: {rate:,.0f} (source: {source}, fetched {ts[:10]})"
+            )
+        except Exception as e:  # noqa: BLE001
+            self.warning(
+                f"  Could not fetch live USD/IDR rate ({e}); "
+                "using configured rate."
+            )
 
     # ------------------------------------------------------------------ #
     # Core wiring

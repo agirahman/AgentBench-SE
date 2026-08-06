@@ -45,6 +45,19 @@ def command(console):
     )
 
 
+@pytest.fixture(autouse=True)
+def no_network_rate(monkeypatch):
+    """Keep tests offline: silence live rate fetch by default."""
+    original = RunCommand._refresh_rate
+
+    def fake_refresh(self):
+        self.config.setdefault("experiment", {})["usd_idr_rate"] = 17000.0
+
+    monkeypatch.setattr(RunCommand, "_refresh_rate", fake_refresh)
+    yield original
+    # restore happens automatically via monkeypatch teardown
+
+
 def _fake_issues(n):
     from agentbench.core.models.issue import Issue
 
@@ -308,3 +321,38 @@ def test_silence_console_idempotent_when_no_sink():
     silence_console()
     restore_console()  # clean up
     silence_console()  # leave clean
+
+
+# --------------------------------------------------------------------- #
+# live USD/IDR rate
+# --------------------------------------------------------------------- #
+def test_refresh_rate_updates_config(monkeypatch, command, no_network_rate):
+    """_refresh_rate persists the fetched rate to config and logs source."""
+    original = no_network_rate
+    monkeypatch.setattr(RunCommand, "_refresh_rate", original)
+    monkeypatch.setattr(
+        "agentbench.exchange_rate.fetch_usd_idr_rate",
+        lambda use_cache=True: (17900.0, "bi.jisdor", "2026-08-06T00:00:00+00:00"),
+    )
+    command._refresh_rate()
+    assert command.config["experiment"]["usd_idr_rate"] == 17900.0
+    text = command.console.export_text()
+    assert "USD/IDR: 17,900" in text
+    assert "bi.jisdor" in text
+
+
+def test_refresh_rate_failure_keeps_config(monkeypatch, command, no_network_rate):
+    from agentbench.exchange_rate import RateFetchError
+
+    original = no_network_rate
+    monkeypatch.setattr(RunCommand, "_refresh_rate", original)
+
+    def boom(*a, **k):
+        raise RateFetchError("all sources down")
+
+    import agentbench.exchange_rate as er_mod
+
+    monkeypatch.setattr(er_mod, "fetch_usd_idr_rate", boom)
+    command._refresh_rate()
+    text = command.console.export_text()
+    assert "Could not fetch live USD/IDR rate" in text

@@ -121,3 +121,21 @@ def test_coerce():
     assert _coerce("3") == 3
     assert _coerce("1.5") == 1.5
     assert _coerce("abc") == "abc"
+
+
+# --------------------------------------------------------------------- #
+# config rate (live USD/IDR)
+# --------------------------------------------------------------------- #
+def test_config_rate_refreshes(monkeypatch, cm_with_config):
+    import agentbench.commands.config as cfg_mod
+    from rich.console import Console
+
+    monkeypatch.setattr(
+        "agentbench.exchange_rate.fetch_usd_idr_rate",
+        lambda **k: (17900.0, "bi.jisdor", "2026-08-06T00:00:00+00:00"),
+    )
+    console = Console(force_terminal=True, width=100, record=True)
+    command = cfg_mod.ConfigCommand(cm_with_config.load(), console, cm_with_config)
+    command.execute("rate")
+    # persisted via ConfigManager.set_value -> loaded back with new rate
+    assert cm_with_config.load()["experiment"]["usd_idr_rate"] == 17900.0
