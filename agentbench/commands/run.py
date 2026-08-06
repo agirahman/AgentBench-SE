@@ -86,6 +86,9 @@ class RunCommand(BaseCommand):
             issue_objs = issue_objs[:issues]
 
         t0 = time.perf_counter()
+        from agentbench.core.utils.logger import silence_console, restore_console
+
+        silenced = silence_console()  # keep rich progress bar clean (1 bar, no loguru noise)
         try:
             with create_experiment_progress() as progress:
                 task = progress.add_task(
@@ -124,11 +127,16 @@ class RunCommand(BaseCommand):
                     on_issue_complete=on_issue_complete,
                 )
         except KeyboardInterrupt:
+            if silenced:
+                restore_console()
             if Confirm.ask("\nAbort experiment? Partial results are saved.", default=False):
                 self.warning("Aborted — partial results saved in output dir.")
                 return
             self.info("Continuing...")
             raise
+        finally:
+            if silenced:
+                restore_console()
 
         elapsed_total = time.perf_counter() - t0
         self._save_config_snapshot(
@@ -190,14 +198,16 @@ class RunCommand(BaseCommand):
             )
         return raw
 
+    @staticmethod
+    def _resolve_default_output() -> str:
+        """Default base output = 'results' (runner appends EXP-<id> itself)."""
+        return "results"
+
     def _resolve_output(self, parsed: dict) -> str:
         raw = parsed.get("output")
         if raw and raw is not True:
             return str(raw)
-        from datetime import datetime
-
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        return f"results/EXP-{stamp}"
+        return self._resolve_default_output()
 
     # ------------------------------------------------------------------ #
     # Core wiring

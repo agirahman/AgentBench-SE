@@ -95,9 +95,9 @@ def test_strategy_unknown_rejected(command):
         command._resolve_strategy({"strategy": "nope"})
 
 
-def test_output_default_has_results_prefix(command):
-    out = command._resolve_output({})
-    assert out.startswith("results/EXP-")
+def test_output_default_is_results(command):
+    """Default output is the base dir; runner appends EXP-<id> itself."""
+    assert command._resolve_output({}) == "results"
 
 
 def test_output_from_flag(command):
@@ -269,3 +269,42 @@ def test_execute_writes_experiment_yaml(monkeypatch, command, tmp_path):
     text = command.console.export_text()
     assert "Config snapshot" in text
     assert (tmp_path / "out" / "EXP-SNAP" / "experiment.yaml").exists()
+
+
+# --------------------------------------------------------------------- #
+# console silencing (progress bar cleanliness)
+# --------------------------------------------------------------------- #
+def test_silence_console_removes_stderr_sink():
+    from agentbench.core.utils.logger import (
+        logger,
+        silence_console,
+        restore_console,
+        stderr_sink_ids,
+    )
+
+    stderr_sink_ids.clear()
+    # ensure at least one stderr sink exists to silence
+    restore_console()
+    assert silence_console() is True
+    # after silencing, no stderr sink is tracked
+    assert stderr_sink_ids == set()
+    # restore re-adds and tracks it
+    restore_console()
+    assert stderr_sink_ids != set()
+    # silence again for a clean end state
+    silence_console()
+
+
+def test_silence_console_idempotent_when_no_sink():
+    from agentbench.core.utils.logger import (
+        silence_console,
+        restore_console,
+        stderr_sink_ids,
+    )
+
+    stderr_sink_ids.clear()
+    silence_console()  # nothing to remove
+    # remove the tracked sink directly so the next call is a no-op
+    silence_console()
+    restore_console()  # clean up
+    silence_console()  # leave clean
