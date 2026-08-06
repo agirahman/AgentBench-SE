@@ -581,12 +581,12 @@ AgantBech-SE/
 **Deliverable:** `run` command works with beautiful progress UI
 
 ### Phase 4: Analysis Commands (2-3 hours)
-- [ ] Create `agentbench/commands/results.py`
-- [ ] Integrate with existing `src/view_results.py`
-- [ ] Implement subcommands: `summary`, `compare`, `errors`, `patch`
-- [ ] Add rich.table for result tables
-- [ ] Create `agentbench/commands/export.py` (CSV, JSON, Markdown)
-- [ ] Test: `results summary` → table displayed
+- [x] Create `agentbench/commands/results.py`
+- [x] Integrate with existing `src/view_results.py` (via `agentbench.core.view_results` + `evaluation.statistics`)
+- [x] Implement subcommands: `summary`, `compare`, `errors`, `patch`
+- [x] Add rich.table for result tables
+- [x] Create `agentbench/commands/export.py` (CSV, JSON, Markdown)
+- [x] Test: `results summary` → table displayed
 
 **Deliverable:** Results viewing & export functional
 

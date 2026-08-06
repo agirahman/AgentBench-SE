@@ -1197,10 +1197,10 @@ pip install -e .
 - [x] Test: `run --issues 5` full experiment with live progress
 
 ### Phase 4: Analysis Commands (2-3h)
-- [ ] Create `agentbench/commands/results.py` (summary/compare/errors/patch)
-- [ ] Create `agentbench/ui/tables.py`
-- [ ] Create `agentbench/commands/export.py` (csv/json/markdown)
-- [ ] Test: `results summary` shows table
+- [x] Create `agentbench/commands/results.py` (summary/compare/errors/patch)
+- [x] Create `agentbench/ui/tables.py`
+- [x] Create `agentbench/commands/export.py` (csv/json/markdown)
+- [x] Test: `results summary` shows table
 
 ### Phase 5: Data Management (1-2h)
 - [ ] Create `agentbench/commands/config.py`

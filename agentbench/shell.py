@@ -131,12 +131,18 @@ class AgentBenchShell(cmd.Cmd):
         RunCommand(self.config, self.console).execute(arg)
 
     def do_results(self, arg: str) -> None:
-        """View experiment results (Phase 4)."""
-        self._not_ready("results")
+        """View experiment results.
+        Usage: results <summary|compare|errors|patch <id>|cost_per_success|strategy_difficulty>"""
+        from agentbench.commands.results import ResultsCommand
+
+        ResultsCommand(self.config, self.console).execute(arg)
 
     def do_export(self, arg: str) -> None:
-        """Export results (Phase 4)."""
-        self._not_ready("export")
+        """Export results to file.
+        Usage: export [--format csv|json|markdown] [--output PATH]"""
+        from agentbench.commands.export import ExportCommand
+
+        ExportCommand(self.config, self.console).execute(arg)
 
     def do_provider(self, arg: str) -> None:
         """Show/test provider connection (Phase 5)."""
