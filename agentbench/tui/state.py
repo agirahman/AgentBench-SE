@@ -164,6 +164,19 @@ class BenchmarkState:
         self.emit("config.saved", {"config": self.config})
         return self.config
 
+    def apply_config(self, updates: dict) -> dict:
+        """Deep-merge nested ``updates`` into the config and persist once.
+
+        Unlike calling :meth:`update_config` per key, this validates the
+        *complete* config a single time — required for forms that fill
+        several fields at once (Patch 3 Setup screen). Emits
+        ``config.saved``.
+        """
+        from agentbench.config_manager import deep_merge
+
+        self.config = deep_merge(self.config, updates)
+        return self.save_config()
+
     def update_config(self, key: str, value: Any) -> dict:
         """Set a dotted config key in memory and persist when bound.
 

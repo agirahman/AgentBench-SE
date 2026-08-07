@@ -86,3 +86,37 @@ Input:focus, Select:focus { border: round #58a6ff; }
 .ok { color: #3fb950; }
 .warn { color: #d29922; }
 .accent { color: #58a6ff; }
+
+/* ---------- Setup form (Patch 3) ---------- */
+#setup-title { margin-bottom: 1; }
+
+.field-row { height: auto; }
+.field-label {
+    width: 14;
+    color: #8b949e;
+    padding-top: 0;
+}
+
+#setup-form Input, #setup-form Select { width: 36; }
+
+.field-err {
+    color: #f85149;
+    margin: 0 1;
+    display: none;
+}
+.field-err.visible { display: block; }
+
+#setup-tasks {
+    height: 12;
+    border: round #30363d;
+    margin-bottom: 1;
+}
+#setup-tasks Checkbox { padding: 0 1; }
+
+#setup-task-actions { margin-bottom: 1; }
+#setup-task-actions Button.small { width: auto; margin-right: 1; }
+
+#setup-actions { margin-top: 1; }
+#setup-actions Button { width: auto; margin-right: 1; }
+
+#setup-status { margin-top: 1; }

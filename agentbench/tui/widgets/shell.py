@@ -8,6 +8,8 @@ switches the active screen (PRD §5.2).
 
 from __future__ import annotations
 
+from typing import Any, Iterable
+
 from textual.app import ComposeResult
 from textual.containers import Horizontal, VerticalScroll
 from textual.screen import Screen
@@ -46,7 +48,7 @@ class ShellScreen(Screen):
         yield Static("", id="sh-footer")
 
     # ------------------------------------------------------------------ #
-    def body(self):
+    def body(self) -> Iterable[Any]:
         """Screen content widgets (override in subclasses)."""
         return []
 
