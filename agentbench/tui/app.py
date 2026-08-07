@@ -45,12 +45,16 @@ class AgentBenchTUI(App[None]):
         Binding("ctrl+h", "cmd_help", "Help"),
         Binding("ctrl+l", "clear_log", "Clear log"),
         Binding("ctrl+d", "toggle_details", "Details"),
+        Binding("ctrl+y", "copy_log", "Copy log"),
+        Binding("ctrl+w", "save_log", "Save log"),
     ]
 
-    def __init__(self, config: dict | None = None) -> None:
+    def __init__(self, config: dict | None = None, log_dir: str | None = None) -> None:
         super().__init__()
         self.config_manager = ConfigManager()
         self.config = config if config is not None else self._load_config()
+        # where `save_log` writes (default: <cwd>/logs)
+        self._log_dir = log_dir or "logs"
 
     # ------------------------------------------------------------------ #
     def _load_config(self) -> dict:
@@ -151,6 +155,47 @@ class AgentBenchTUI(App[None]):
         """Expand/collapse the detail panel (Collapsible)."""
         collapsible = self.query_one("#detail-panel", Collapsible)
         collapsible.collapsed = not collapsible.collapsed
+
+    # ------------------------------------------------------------------ #
+    # copy / save log (so errors & output can be shared)
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _extract_text(log: RichLog) -> str:
+        """Return the full log content as plain text."""
+        out = []
+        for line in log.lines:
+            pieces = [seg.text for seg in line if seg.text]
+            if pieces:
+                out.append("".join(pieces))
+        return "\n".join(out)
+
+    def action_copy_log(self) -> None:
+        """Copy the main log to the clipboard + show a notification."""
+        text = self._extract_text(self.query_one("#log", RichLog))
+        if not text:
+            self.notify("Log is empty.", severity="warning")
+            return
+        try:
+            self.copy_to_clipboard(text)
+            self.notify("Copied log to clipboard.")
+        except Exception as e:  # noqa: BLE001 - clipboard can fail (WSL/SSH)
+            self.notify(f"Clipboard unavailable: {e}", severity="warning")
+
+    def action_save_log(self) -> None:
+        """Write the log to a file, then report the absolute path."""
+        text = self._extract_text(self.query_one("#log", RichLog))
+        if not text:
+            self.notify("Log is empty.", severity="warning")
+            return
+        from pathlib import Path
+        from datetime import datetime
+
+        out_dir = Path(self._log_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = out_dir / f"tui-log-{stamp}.txt"
+        path.write_text(text, encoding="utf-8")
+        self.notify(f"Saved log to {path}")
 
     # ------------------------------------------------------------------ #
     # Dispatch (coroutine worker)

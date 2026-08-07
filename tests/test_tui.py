@@ -217,3 +217,49 @@ async def test_keyboard_shortcut_actions(monkeypatch, tmp_path):
         app.action_clear_log()
         await pilot.pause(0.2)
         assert "junk-line-to-clear" not in _log_text(app)
+
+
+@pytest.mark.asyncio
+async def test_copy_log_copies_to_clipboard(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENTBENCH_CONFIG_DIR", str(tmp_path))
+    from agentbench.config_manager import ConfigManager
+
+    cm = ConfigManager(config_path=tmp_path / "config.yaml")
+    cm.save(make_config())
+
+    captured = {}
+
+    app = AgentBenchTUI()
+    async with app.run_test(size=(110, 40)) as pilot:
+        # seed the log with an error line, then copy
+        app.query_one("#log").write("some progress")
+        app.query_one("#log").write("ERROR: something broke")
+        await pilot.pause(0.1)
+        monkeypatch.setattr(app, "copy_to_clipboard", lambda t: captured.__setitem__("txt", t))
+        app.action_copy_log()
+        await pilot.pause(0.2)
+        assert "ERROR: something broke" in captured.get("txt", "")
+
+
+@pytest.mark.asyncio
+async def test_save_log_writes_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENTBENCH_CONFIG_DIR", str(tmp_path))
+    from agentbench.config_manager import ConfigManager
+
+    cm = ConfigManager(config_path=tmp_path / "config.yaml")
+    cm.save(make_config())
+
+    app = AgentBenchTUI()
+    # save_log writes to <cwd>/logs; give it a dedicated dir so the test
+    # doesn't pollute the repo. Point it via the app's working directory.
+    app._log_dir = tmp_path  # used by action_save_log
+    async with app.run_test(size=(110, 40)) as pilot:
+        app.query_one("#log").write("debug line alpha")
+        app.query_one("#log").write("WARNING: something")
+        await pilot.pause(0.1)
+        app.action_save_log()
+        await pilot.pause(0.2)
+    files = list(tmp_path.glob("tui-log-*.txt"))
+    assert files, "save_log should write a file"
+    content = files[0].read_text(encoding="utf-8")
+    assert "WARNING: something" in content
