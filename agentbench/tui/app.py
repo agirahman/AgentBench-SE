@@ -31,6 +31,7 @@ from agentbench.tui.screens import (
     RunScreen,
     SetupScreen,
 )
+from agentbench.tui.state import BenchmarkState
 from agentbench.tui.widgets.shell import ShellScreen
 
 
@@ -254,10 +255,14 @@ class AgentBenchTUI(App[None]):
     def __init__(self, config: dict | None = None, log_dir: str | None = None) -> None:
         super().__init__()
         self.config_manager = ConfigManager()
-        self.config = config if config is not None else self._load_config()
+        # Patch 2: observable state owns the config; the app keeps ``self.config``
+        # as a convenience mirror for the legacy command console.
+        self.state = BenchmarkState(config=config).attach(self.config_manager)
+        self.config = self.state.config
         self._log_dir = log_dir or "logs"
 
     def _load_config(self) -> dict:
+        """(Legacy helper) — state owns config; kept for back-compat."""
         try:
             return self.config_manager.load()
         except Exception:  # noqa: BLE001
@@ -276,6 +281,8 @@ class AgentBenchTUI(App[None]):
         """Navigate to a screen by nav key (setup/run/results/.../console)."""
         if key in self.SCREENS:
             self.switch_screen(key)
+            self.state.current_screen = key
+            self.state.emit("screen.changed", {"screen": key})
 
     # ------------------------------------------------------------------ #
     # Progress feedback (used by the Console screen)
