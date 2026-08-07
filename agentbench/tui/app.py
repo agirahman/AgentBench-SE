@@ -245,13 +245,19 @@ class AgentBenchTUI(App[None]):
 
         def _work() -> None:
             if cmd == "run":
-                # TUI mode: no stdin Confirm prompts, no rich live progress
-                # (both block/flood when the console is a capture buffer).
-                cls(
-                    self.config, console, self.config_manager, interactive=False
-                ).execute(args)
-            else:
+                # RunCommand signature: (config, console, provider_factory,
+                # issue_loader, interactive). It does NOT take a config_manager,
+                # so don't pass one (it would land in provider_factory and
+                # crash with "object is not callable").
+                cls(self.config, console, interactive=False).execute(args)
+            elif cmd == "config":
+                # ConfigCommand is the only one taking a config_manager.
                 cls(self.config, console, self.config_manager).execute(args)
+            else:
+                # results/export/provider/pricing/dataset/artifacts take
+                # (config, console) only — passing config_manager would shift
+                # it into csv_path or crash on unexpected argument.
+                cls(self.config, console).execute(args)
 
         def _flush() -> None:
             text = capture.getvalue()

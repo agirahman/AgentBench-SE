@@ -29,6 +29,14 @@ def _submit(app: AgentBenchTUI, text: str) -> None:
     app.on_input_submitted(SimpleNamespace(value=text))
 
 
+def _patch_command_class(monkeypatch, func):
+    """Patch the static _command_class with a staticmethod (avoids binding)."""
+    monkeypatch.setattr(
+        "agentbench.tui.app.AgentBenchTUI._command_class",
+        staticmethod(func),
+    )
+
+
 def _log_text(app: AgentBenchTUI) -> str:
     """Extract the RichLog contents as plain text."""
     lines = app.query_one("#log").lines
@@ -98,7 +106,7 @@ async def test_module_command_routes(monkeypatch, tmp_path):
 
     # stub the command class so we don't hit OpenRouter/network
     class FakePricing:
-        def __init__(self, cfg, console, cm):
+        def __init__(self, cfg, console, *args, **kwargs):
             self.console = console
             self._ = cfg
 
@@ -107,7 +115,7 @@ async def test_module_command_routes(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         "agentbench.tui.app.AgentBenchTUI._command_class",
-        lambda self, cmd: FakePricing if cmd == "pricing" else None,
+        staticmethod(lambda cmd: FakePricing if cmd == "pricing" else None),
     )
 
     app = AgentBenchTUI()
@@ -116,6 +124,49 @@ async def test_module_command_routes(monkeypatch, tmp_path):
         await pilot.pause(0.6)
         log_text = _log_text(app)
         assert "pricing stub ran" in log_text
+
+
+@pytest.mark.asyncio
+async def test_dispatch_passes_correct_args(monkeypatch, tmp_path):
+    """Regression: each command gets the constructor args its signature needs.
+
+    run -> (config, console, interactive=False)      [no config_manager]
+    config -> (config, console, config_manager)
+    others -> (config, console)                       [no config_manager]
+    """
+    monkeypatch.setenv("AGENTBENCH_CONFIG_DIR", str(tmp_path))
+    from agentbench.config_manager import ConfigManager
+
+    cm = ConfigManager(config_path=tmp_path / "config.yaml")
+    cm.save(make_config())
+
+    capture = {}
+    seen = {}
+
+    def fake_class_for(cmd):
+        cls = _fake_class_factory(["stub output"], capture)
+
+        class Typed(cls):
+            def __init__(self, cfg, console, *args, **kwargs):
+                super().__init__(cfg, console, *args, **kwargs)
+                seen[cmd] = (len(args), sorted(kwargs.keys()))
+
+        return Typed
+
+    monkeypatch.setattr(
+        "agentbench.tui.app.AgentBenchTUI._command_class",
+        staticmethod(fake_class_for),
+    )
+
+    app = AgentBenchTUI()
+    async with app.run_test(size=(110, 40)) as pilot:
+        for line in ("run --issues 0", "config", "results"):
+            _submit(app, line)
+            await pilot.pause(0.4)
+
+    assert seen["run"] == (0, ["interactive"])
+    assert seen["config"] == (1, [])
+    assert seen["results"] == (0, [])
 
 
 def test_welcome_banner_contains_model():
@@ -128,14 +179,17 @@ def test_welcome_banner_contains_model():
 # --------------------------------------------------------------------- #
 # TUI-2: streaming color, collapsible details, keyboard shortcuts
 # --------------------------------------------------------------------- #
-def _fake_class_factory(lines):
+def _fake_class_factory(lines, capture=None):
     """Return a fake command class that prints given lines on execute."""
+    if capture is None:
+        capture = {}
 
     class Fake:
-        def __init__(self, cfg, console, cm, interactive=True):
+        def __init__(self, cfg, console, *args, **kwargs):
             self.console = console
             self._ = cfg
-            self.interactive = interactive
+            self.capture = capture
+            self.capture.setdefault("call_args", []).append((args, kwargs))
 
         def execute(self, args):
             for line in lines:
@@ -160,7 +214,7 @@ async def test_streamed_output_resolves_colors(monkeypatch, tmp_path):
     ])
     monkeypatch.setattr(
         "agentbench.tui.app.AgentBenchTUI._command_class",
-        lambda self, cmd: fake if cmd == "run" else None,
+        staticmethod(lambda cmd: fake if cmd == "run" else None),
     )
 
     app = AgentBenchTUI()
