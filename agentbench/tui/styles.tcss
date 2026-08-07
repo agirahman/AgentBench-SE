@@ -1,0 +1,88 @@
+/* AgentBench TUI — global stylesheet (SDD §5.1/5.2). */
+
+Screen {
+    background: #0d1117;
+    color: #c9d1d9;
+}
+
+/* ---------- Shell frame ---------- */
+#sh-header {
+    height: 1;
+    background: #161b22;
+    color: #c9d1d9;
+    padding: 0 1;
+    border-bottom: solid #30363d;
+}
+
+#sh-header .brand { color: #58a6ff; text-style: bold; }
+#sh-header .model { color: #8b949e; }
+#sh-header .status-dot { text-style: bold; }
+
+#sh-body { layout: horizontal; }
+
+/* ---------- Sidebar ---------- */
+#sh-sidebar {
+    width: 20;
+    background: #161b22;
+    border-right: solid #30363d;
+    padding: 1 0;
+}
+
+#sh-sidebar Button.nav-btn {
+    width: 100%;
+    background: transparent;
+    border: none;
+    color: #8b949e;
+    padding: 0 1;
+    text-align: left;
+}
+
+#sh-sidebar Button.nav-btn:hover { background: #1f2630; }
+#sh-sidebar Button.nav-btn:focus,
+#sh-sidebar Button.nav-btn.active { background: #232d3d; color: #c9d1d9; }
+#sh-sidebar Button.nav-btn.active { text-style: bold; }
+
+/* ---------- Main panel ---------- */
+#sh-content {
+    width: 1fr;
+    padding: 1 1;
+}
+
+/* ---------- Footer ---------- */
+#sh-footer {
+    height: 1;
+    background: #161b22;
+    color: #8b949e;
+    padding: 0 1;
+    border-top: solid #30363d;
+}
+
+#sh-footer .foot-accent { color: #58a6ff; }
+
+/* ---------- Generic widgets ---------- */
+Button {
+    background: #21262d;
+    color: #c9d1d9;
+    border: none;
+}
+
+Button:hover, Button:focus {
+    background: #30363d;
+    color: #c9d1d9;
+}
+
+Button.primary { background: #58a6ff; color: #0d1117; text-style: bold; }
+Button.danger { background: #f85149; color: #0d1117; }
+
+Input, Select {
+    border: round #30363d;
+    background: #161b22;
+}
+
+Input:focus, Select:focus { border: round #58a6ff; }
+
+.stale { color: #8b949e; }
+.err { color: #f85149; }
+.ok { color: #3fb950; }
+.warn { color: #d29922; }
+.accent { color: #58a6ff; }

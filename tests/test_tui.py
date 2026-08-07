@@ -1,10 +1,11 @@
-"""Tests for the Textual TUI (TUI-1): mount, banner, native + module dispatch.
+"""Tests for the AgentBench TUI shell (Patch 1: screens + nav + console).
 
-Uses Textual's ``App.run_test()`` headless mode — no real terminal needed,
-which keeps CI deterministic.
+Uses Textual's ``App.run_test()`` headless mode — no terminal needed, so CI
+is deterministic.
 """
 
 import pytest
+from textual.widgets import Input
 
 from agentbench.tui.app import AgentBenchTUI
 from agentbench.tui.banner import welcome_banner
@@ -21,94 +22,116 @@ def make_config() -> dict:
     }
 
 
-def _submit(app: AgentBenchTUI, text: str) -> None:
-    """Simulate typing a command into the input and pressing Enter."""
+def _submit_console(app: AgentBenchTUI, text: str) -> None:
     from types import SimpleNamespace
 
-    app.query_one("#command-input").value = text
-    app.on_input_submitted(SimpleNamespace(value=text))
+    # NOTE: App.query_one() targets the DEFAULT screen; widget queries must
+    # go through the ACTIVE screen (Textual DOM design). The input-submitted
+    # handler lives on the console screen, not the app.
+    screen = app.screen
+    screen.query_one("#console-input", Input).value = text
+    screen.on_input_submitted(SimpleNamespace(value=text))  # type: ignore[attr-defined]
 
 
-def _patch_command_class(monkeypatch, func):
-    """Patch the static _command_class with a staticmethod (avoids binding)."""
-    monkeypatch.setattr(
-        "agentbench.tui.app.AgentBenchTUI._command_class",
-        staticmethod(func),
-    )
+def _console_log_text(app: AgentBenchTUI) -> str:
+    from agentbench.tui.widgets.shell import ShellScreen
 
-
-def _log_text(app: AgentBenchTUI) -> str:
-    """Extract the RichLog contents as plain text."""
-    lines = app.query_one("#log").lines
+    # the active screen hosts the console widgets
+    screen = app.screen
+    rl = screen.query_one("#console-log")
     out = []
-    for line in lines:
+    for line in rl.lines:
         pieces = [seg.text for seg in line if seg.text]
-        out.append("".join(pieces))
+        if pieces:
+            out.append("".join(pieces))
     return "\n".join(out)
 
 
+def _current_nav_key(app: AgentBenchTUI) -> str:
+    return app.screen.nav_key
+
+
+# --------------------------------------------------------------------- #
+# Patch 1: boot + shell frame
+# --------------------------------------------------------------------- #
 @pytest.mark.asyncio
-async def test_app_mounts_widgets():
-    app = AgentBenchTUI(config={
-        "provider": {"model": "m", "name": "openrouter"},
-    })
-    async with app.run_test(size=(100, 30)) as pilot:
-        # banner is not a sticky top-pinned widget anymore
-        try:
-            app.query_one("#banner")
-            assert False, "sticky #banner widget should not exist"
-        except Exception:
-            pass  # expected: no sticky banner widget
-        assert app.query_one("#log") is not None
-        assert app.query_one("#command-input") is not None
-        text = _log_text(app)
-        # banner summary lines are plain-text (not ASCII-glyph), so check those
-        assert "Model" in text
-        assert "Provider" in text
-        await pilot.pause()
-
-
-@pytest.mark.asyncio
-async def test_help_native_command():
-    app = AgentBenchTUI(config={
-        "provider": {"model": "m", "name": "openrouter"},
-        "researcher": {"name": "Agi"},
-    })
-    async with app.run_test(size=(100, 30)) as pilot:
-        _submit(app, "help")
-        await pilot.pause(0.3)
-        log_text = _log_text(app)
-        assert "Commands" in log_text
-        assert "/run" in log_text
-
-
-@pytest.mark.asyncio
-async def test_info_native_command_shows_model():
-    app = AgentBenchTUI(config={
-        "provider": {"model": "deepseek/deepseek-v4-flash", "name": "openrouter"},
-        "researcher": {"name": "Agi", "institution": "UNJ"},
-    })
-    async with app.run_test(size=(100, 30)) as pilot:
-        _submit(app, "info")
-        await pilot.pause(0.3)
-        log_text = _log_text(app)
-        assert "deepseek/deepseek-v4-flash" in log_text
-
-
-@pytest.mark.asyncio
-async def test_module_command_routes(monkeypatch, tmp_path):
-    """Module commands route to real classes; capture into the log."""
+async def test_boots_to_setup_screen(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENTBENCH_CONFIG_DIR", str(tmp_path))
     from agentbench.config_manager import ConfigManager
 
     cm = ConfigManager(config_path=tmp_path / "config.yaml")
     cm.save(make_config())
 
-    # stub the command class so we don't hit OpenRouter/network
+    app = AgentBenchTUI()
+    async with app.run_test(size=(110, 40)) as pilot:
+        await pilot.pause(0.3)
+        assert _current_nav_key(app) == "setup"
+        assert app.query_one("#sh-header") is not None
+        assert app.query_one("#sh-sidebar") is not None
+        assert app.query_one("#sh-content") is not None
+        assert app.query_one("#sh-footer") is not None
+
+
+@pytest.mark.asyncio
+async def test_nav_to_all_screens(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENTBENCH_CONFIG_DIR", str(tmp_path))
+    from agentbench.config_manager import ConfigManager
+
+    ConfigManager(config_path=tmp_path / "config.yaml").save(make_config())
+
+    seen = set()
+    app = AgentBenchTUI()
+    async with app.run_test(size=(110, 40)) as pilot:
+        for key in ("setup", "run", "results", "config", "logs", "help", "console"):
+            app.nav_to(key)
+            await pilot.pause(0.2)
+            seen.add(_current_nav_key(app))
+    assert {"setup", "run", "results", "config", "logs", "help", "console"} <= seen
+
+
+@pytest.mark.asyncio
+async def test_console_screen_focuses_input(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENTBENCH_CONFIG_DIR", str(tmp_path))
+    from agentbench.config_manager import ConfigManager
+
+    ConfigManager(config_path=tmp_path / "config.yaml").save(make_config())
+
+    app = AgentBenchTUI()
+    async with app.run_test(size=(110, 40)) as pilot:
+        app.nav_to("console")
+        await pilot.pause(0.3)
+        # Query the active screen (App.query_one targets the default screen).
+        assert app.screen.query_one("#console-input") is not None
+
+
+@pytest.mark.asyncio
+async def test_console_help_native(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENTBENCH_CONFIG_DIR", str(tmp_path))
+    from agentbench.config_manager import ConfigManager
+
+    ConfigManager(config_path=tmp_path / "config.yaml").save(make_config())
+
+    app = AgentBenchTUI()
+    async with app.run_test(size=(110, 40)) as pilot:
+        app.nav_to("console")
+        await pilot.pause(0.3)
+        _submit_console(app, "help")
+        await pilot.pause(0.3)
+        text = _console_log_text(app)
+        assert "Commands" in text
+        assert "/run" in text
+
+
+@pytest.mark.asyncio
+async def test_console_module_dispatch(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENTBENCH_CONFIG_DIR", str(tmp_path))
+    from agentbench.config_manager import ConfigManager
+
+    ConfigManager(config_path=tmp_path / "config.yaml").save(make_config())
+
     class FakePricing:
         def __init__(self, cfg, console, *args, **kwargs):
             self.console = console
-            self._ = cfg
 
         def execute(self, args):
             self.console.print("[green]pricing stub ran[/green]")
@@ -119,54 +142,13 @@ async def test_module_command_routes(monkeypatch, tmp_path):
     )
 
     app = AgentBenchTUI()
-    async with app.run_test(size=(100, 40)) as pilot:
-        _submit(app, "pricing show")
-        await pilot.pause(0.6)
-        log_text = _log_text(app)
-        assert "pricing stub ran" in log_text
-
-
-@pytest.mark.asyncio
-async def test_dispatch_passes_correct_args(monkeypatch, tmp_path):
-    """Regression: each command gets the constructor args its signature needs.
-
-    run -> (config, console, interactive=False)      [no config_manager]
-    config -> (config, console, config_manager)
-    others -> (config, console)                       [no config_manager]
-    """
-    monkeypatch.setenv("AGENTBENCH_CONFIG_DIR", str(tmp_path))
-    from agentbench.config_manager import ConfigManager
-
-    cm = ConfigManager(config_path=tmp_path / "config.yaml")
-    cm.save(make_config())
-
-    capture = {}
-    seen = {}
-
-    def fake_class_for(cmd):
-        cls = _fake_class_factory(["stub output"], capture)
-
-        class Typed(cls):
-            def __init__(self, cfg, console, *args, **kwargs):
-                super().__init__(cfg, console, *args, **kwargs)
-                seen[cmd] = (len(args), sorted(kwargs.keys()))
-
-        return Typed
-
-    monkeypatch.setattr(
-        "agentbench.tui.app.AgentBenchTUI._command_class",
-        staticmethod(fake_class_for),
-    )
-
-    app = AgentBenchTUI()
     async with app.run_test(size=(110, 40)) as pilot:
-        for line in ("run --issues 0", "config", "results"):
-            _submit(app, line)
-            await pilot.pause(0.4)
-
-    assert seen["run"] == (0, ["interactive", "progress_cb"])
-    assert seen["config"] == (1, [])
-    assert seen["results"] == (0, [])
+        app.nav_to("console")
+        await pilot.pause(0.3)
+        _submit_console(app, "pricing")
+        await pilot.pause(0.6)
+        text = _console_log_text(app)
+        assert "pricing stub ran" in text
 
 
 def test_welcome_banner_contains_model():
@@ -174,188 +156,3 @@ def test_welcome_banner_contains_model():
         "provider": {"model": "deepseek/deepseek-v4-flash", "name": "openrouter"},
     })
     assert "deepseek/deepseek-v4-flash" in text
-
-
-# --------------------------------------------------------------------- #
-# TUI-2: streaming color, collapsible details, keyboard shortcuts
-# --------------------------------------------------------------------- #
-def _fake_class_factory(lines, capture=None):
-    """Return a fake command class that prints given lines on execute."""
-    if capture is None:
-        capture = {}
-
-    class Fake:
-        def __init__(self, cfg, console, *args, **kwargs):
-            self.console = console
-            self._ = cfg
-            self.capture = capture
-            self.capture.setdefault("call_args", []).append((args, kwargs))
-
-        def execute(self, args):
-            for line in lines:
-                self.console.print(line)
-
-    return Fake
-
-
-@pytest.mark.asyncio
-async def test_streamed_output_resolves_colors(monkeypatch, tmp_path):
-    monkeypatch.setenv("AGENTBENCH_CONFIG_DIR", str(tmp_path))
-    from agentbench.config_manager import ConfigManager
-
-    cm = ConfigManager(config_path=tmp_path / "config.yaml")
-    cm.save(make_config())
-
-    fake = _fake_class_factory([
-        "some progress",
-        "[info] WARNING: token budget low",
-        "ERROR: strategy failed",
-        "SUCCESS: run completed",
-    ])
-    monkeypatch.setattr(
-        "agentbench.tui.app.AgentBenchTUI._command_class",
-        staticmethod(lambda cmd: fake if cmd == "run" else None),
-    )
-
-    app = AgentBenchTUI()
-    async with app.run_test(size=(110, 40)) as pilot:
-        _submit(app, "run --issues 0")
-        await pilot.pause(0.8)
-        text = _log_text(app)
-        assert "some progress" in text
-        assert "WARNING" in text
-        assert "ERROR" in text
-        assert "SUCCESS" in text
-        assert "run finished" in text
-
-
-@pytest.mark.asyncio
-async def test_detail_collapsible_toggles(monkeypatch, tmp_path):
-    monkeypatch.setenv("AGENTBENCH_CONFIG_DIR", str(tmp_path))
-    from agentbench.config_manager import ConfigManager
-    from textual.widgets import Collapsible
-
-    cm = ConfigManager(config_path=tmp_path / "config.yaml")
-    cm.save(make_config())
-
-    app = AgentBenchTUI()
-    async with app.run_test(size=(110, 40)) as pilot:
-        cp = app.query_one("#detail-panel", Collapsible)
-        assert cp.collapsed is True
-        app.action_toggle_details()
-        await pilot.pause(0.2)
-        assert cp.collapsed is False
-        app.action_toggle_details()
-        await pilot.pause(0.2)
-        assert cp.collapsed is True
-
-
-@pytest.mark.asyncio
-async def test_keyboard_shortcut_actions(monkeypatch, tmp_path):
-    monkeypatch.setenv("AGENTBENCH_CONFIG_DIR", str(tmp_path))
-    from agentbench.config_manager import ConfigManager
-
-    cm = ConfigManager(config_path=tmp_path / "config.yaml")
-    cm.save(make_config())
-
-    app = AgentBenchTUI()
-    async with app.run_test(size=(110, 40)) as pilot:
-        # ctrl+h -> help lands in log
-        app.action_cmd_help()
-        await pilot.pause(0.4)
-        text = _log_text(app)
-        assert "Commands" in text
-        # ctrl+l clears
-        app.query_one("#log").write("junk-line-to-clear")
-        await pilot.pause(0.1)
-        app.action_clear_log()
-        await pilot.pause(0.2)
-        assert "junk-line-to-clear" not in _log_text(app)
-
-
-@pytest.mark.asyncio
-async def test_copy_log_copies_to_clipboard(monkeypatch, tmp_path):
-    monkeypatch.setenv("AGENTBENCH_CONFIG_DIR", str(tmp_path))
-    from agentbench.config_manager import ConfigManager
-
-    cm = ConfigManager(config_path=tmp_path / "config.yaml")
-    cm.save(make_config())
-
-    captured = {}
-
-    app = AgentBenchTUI()
-    async with app.run_test(size=(110, 40)) as pilot:
-        # seed the log with an error line, then copy
-        app.query_one("#log").write("some progress")
-        app.query_one("#log").write("ERROR: something broke")
-        await pilot.pause(0.1)
-        monkeypatch.setattr(app, "copy_to_clipboard", lambda t: captured.__setitem__("txt", t))
-        app.action_copy_log()
-        await pilot.pause(0.2)
-        assert "ERROR: something broke" in captured.get("txt", "")
-
-
-@pytest.mark.asyncio
-async def test_save_log_writes_file(monkeypatch, tmp_path):
-    monkeypatch.setenv("AGENTBENCH_CONFIG_DIR", str(tmp_path))
-    from agentbench.config_manager import ConfigManager
-
-    cm = ConfigManager(config_path=tmp_path / "config.yaml")
-    cm.save(make_config())
-
-    app = AgentBenchTUI()
-    # save_log writes to <cwd>/logs; give it a dedicated dir so the test
-    # doesn't pollute the repo. Point it via the app's working directory.
-    app._log_dir = tmp_path  # used by action_save_log
-    async with app.run_test(size=(110, 40)) as pilot:
-        app.query_one("#log").write("debug line alpha")
-        app.query_one("#log").write("WARNING: something")
-        await pilot.pause(0.1)
-        app.action_save_log()
-        await pilot.pause(0.2)
-    files = list(tmp_path.glob("tui-log-*.txt"))
-    assert files, "save_log should write a file"
-    content = files[0].read_text(encoding="utf-8")
-    assert "WARNING: something" in content
-
-
-# --------------------------------------------------------------------- #
-# TUI-2.5: live run feedback (ProgressBar + status line)
-# --------------------------------------------------------------------- #
-@pytest.mark.asyncio
-async def test_run_progress_bar_updates(monkeypatch, tmp_path):
-    """progress_cb drives the ProgressBar + status line (REPL-like feedback)."""
-    monkeypatch.setenv("AGENTBENCH_CONFIG_DIR", str(tmp_path))
-    from agentbench.config_manager import ConfigManager
-    from textual.widgets import ProgressBar
-
-    cm = ConfigManager(config_path=tmp_path / "config.yaml")
-    cm.save(make_config())
-
-    class FakeRun:
-        def __init__(self, cfg, console, *args, **kwargs):
-            self.console = console
-            self.pcb = kwargs.get("progress_cb")
-
-        def execute(self, args):
-            # simulate 2 of 4 steps completing
-            self.pcb(1, 4, "  [1/4] ✓ direct on django-1")
-            self.pcb(2, 4, "  [2/4] ✓ planning on django-1")
-
-    monkeypatch.setattr(
-        "agentbench.tui.app.AgentBenchTUI._command_class",
-        staticmethod(lambda cmd: FakeRun if cmd == "run" else None),
-    )
-
-    app = AgentBenchTUI()
-    async with app.run_test(size=(110, 40)) as pilot:
-        _submit(app, "run --issues 4")
-        await pilot.pause(0.6)
-        pb = app.query_one("#run-progress", ProgressBar)
-        assert pb.progress == 2
-        assert pb.total == 4
-        # status line updates live; direct call proves the wiring
-        app._on_run_progress(2, 4, "  [2/4] ✓ planning on django-1")
-        await pilot.pause(0.2)
-        meta = str(app.query_one("#run-meta").content)
-        assert "2/4" in meta
