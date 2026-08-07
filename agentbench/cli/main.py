@@ -31,6 +31,14 @@ def setup() -> None:
     run_setup()
 
 
+@cli.command()
+def tui() -> None:
+    """Launch the full-screen Textual TUI."""
+    from agentbench.tui.app import AgentBenchTUI
+
+    AgentBenchTUI().run()
+
+
 def launch_shell() -> None:
     """Launch the interactive REPL, erroring if config is missing."""
     from agentbench.shell import AgentBenchShell

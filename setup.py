@@ -28,6 +28,8 @@ setup(
         "click>=8.1.0",
         "rich>=13.0.0",
         "pyyaml>=6.0.0",
+        "textual>=0.80",
+        "pyfiglet>=1.0",
         # existing core dependencies (see requirements.txt for the full set)
         "google-genai",
         "openai",
