@@ -31,13 +31,18 @@ class RunCommand(BaseCommand):
     def __init__(
         self,
         config: dict,
-        console,
+        console=None,
         provider_factory: Callable[..., Any] | None = None,
         issue_loader: Callable[..., list] | None = None,
+        interactive: bool = True,
     ):
         super().__init__(config, console)
         self._provider_factory = provider_factory
         self._issue_loader = issue_loader
+        # When called from the TUI (interactive=False) we must not block on
+        # Confirm prompts (stdin belongs to Textual) nor render the rich live
+        # progress bar into a captured buffer (it floods the log stream).
+        self._interactive = interactive
 
     # ------------------------------------------------------------------ #
     def execute(self, args: str) -> None:
@@ -55,7 +60,8 @@ class RunCommand(BaseCommand):
         # Refresh USD/IDR from a trusted API (BI JISDOR -> ECB -> fallback)
         self._refresh_rate()
 
-        # Confirmation dialog
+        # Confirmation dialog (skipped when running under the TUI, where the
+        # terminal stdin belongs to Textual and would block the worker).
         self.console.print(Panel.fit(
             f"[bold]Experiment Run[/bold]\n"
             f"  Issues: {issues}\n"
@@ -64,7 +70,7 @@ class RunCommand(BaseCommand):
             f"  Mode: {'resume' if resume else 'fresh'}",
             border_style="cyan",
         ))
-        if not Confirm.ask("Start experiment?", default=True):
+        if self._interactive and not Confirm.ask("Start experiment?", default=True):
             self.info("Aborted.")
             return
 
@@ -92,31 +98,36 @@ class RunCommand(BaseCommand):
         from agentbench.core.utils.logger import silence_console, restore_console
 
         silenced = silence_console()  # keep rich progress bar clean (1 bar, no loguru noise)
-        try:
-            with create_experiment_progress() as progress:
-                task = progress.add_task(
-                    "Running experiment", total=len(issue_objs) * len(strategies)
+
+        def _simple_callback():
+            """Line-based progress reporter for the TUI (no buffer flood)."""
+            total = len(issue_objs) * len(strategies)
+            done = {"n": 0}
+
+            def on_issue_complete(
+                instance_id: str,
+                strategy: str,
+                elapsed: float,
+                tokens: int,
+                cost_usd: float,
+                success: bool,
+                status: str,
+            ) -> None:
+                done["n"] += 1
+                mark = "✓" if success else "✗"
+                self.info(
+                    f"  [{done['n']}/{total}] {mark} {strategy} on {instance_id} "
+                    f"({elapsed:.1f}s, {tokens} tok) — {status}"
                 )
 
-                def on_issue_complete(
-                    instance_id: str,
-                    strategy: str,
-                    elapsed: float,
-                    tokens: int,
-                    cost_usd: float,
-                    success: bool,
-                    status: str,
-                ) -> None:
-                    mark = "✓" if success else "✗"
-                    progress.update(
-                        task,
-                        advance=1,
-                        description=(
-                            f"{mark} {strategy} on {instance_id} "
-                            f"({elapsed:.1f}s, {tokens} tok, ${cost_usd:.4f})"
-                        ),
-                    )
+            return on_issue_complete
 
+        df = None
+        exp_id = ""
+        try:
+            if not self._interactive:
+                # TUI mode: no rich live progress (floods the captured log),
+                # no stdin prompts; a simple per-issue line reporter instead.
                 df, exp_id = run_experiments(
                     issue_objs,
                     strategies,
@@ -127,12 +138,51 @@ class RunCommand(BaseCommand):
                     ),
                     resume=resume,
                     agents=self._agent_manifest(provider),
-                    on_issue_complete=on_issue_complete,
+                    on_issue_complete=_simple_callback(),
                 )
+            else:
+                with create_experiment_progress() as progress:
+                    task = progress.add_task(
+                        "Running experiment", total=len(issue_objs) * len(strategies)
+                    )
+
+                    def on_issue_complete(
+                        instance_id: str,
+                        strategy: str,
+                        elapsed: float,
+                        tokens: int,
+                        cost_usd: float,
+                        success: bool,
+                        status: str,
+                    ) -> None:
+                        mark = "✓" if success else "✗"
+                        progress.update(
+                            task,
+                            advance=1,
+                            description=(
+                                f"{mark} {strategy} on {instance_id} "
+                                f"({elapsed:.1f}s, {tokens} tok, ${cost_usd:.4f})"
+                            ),
+                        )
+
+                    df, exp_id = run_experiments(
+                        issue_objs,
+                        strategies,
+                        base_dir=output,
+                        provider_name=self.config.get("provider", {}).get("name", "unknown"),
+                        rate_limit_seconds=float(
+                            self.config.get("experiment", {}).get("rate_limit", 1.5)
+                        ),
+                        resume=resume,
+                        agents=self._agent_manifest(provider),
+                        on_issue_complete=on_issue_complete,
+                    )
         except KeyboardInterrupt:
             if silenced:
                 restore_console()
-            if Confirm.ask("\nAbort experiment? Partial results are saved.", default=False):
+            if self._interactive and Confirm.ask(
+                "\nAbort experiment? Partial results are saved.", default=False
+            ):
                 self.warning("Aborted — partial results saved in output dir.")
                 return
             self.info("Continuing...")

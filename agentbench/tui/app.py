@@ -199,7 +199,14 @@ class AgentBenchTUI(App[None]):
         shown = {"pos": 0}
 
         def _work() -> None:
-            cls(self.config, console, self.config_manager).execute(args)
+            if cmd == "run":
+                # TUI mode: no stdin Confirm prompts, no rich live progress
+                # (both block/flood when the console is a capture buffer).
+                cls(
+                    self.config, console, self.config_manager, interactive=False
+                ).execute(args)
+            else:
+                cls(self.config, console, self.config_manager).execute(args)
 
         def _flush() -> None:
             text = capture.getvalue()

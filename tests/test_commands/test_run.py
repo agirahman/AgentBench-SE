@@ -356,3 +356,46 @@ def test_refresh_rate_failure_keeps_config(monkeypatch, command, no_network_rate
     command._refresh_rate()
     text = command.console.export_text()
     assert "Could not fetch live USD/IDR rate" in text
+
+
+# --------------------------------------------------------------------- #
+# non-interactive (TUI) mode: no stdin prompts, no rich progress flood
+# --------------------------------------------------------------------- #
+def test_non_interactive_skips_confirm(monkeypatch, console, tmp_path):
+    """TUI mode must not call Confirm.ask (stdin belongs to Textual)."""
+    import agentbench.commands.run as run_mod
+    from agentbench.commands.run import RunCommand
+    import pandas as pd
+
+    called = {"confirm": 0}
+
+    def fake_confirm(*a, **k):
+        called["confirm"] += 1
+        return True
+
+    monkeypatch.setattr(run_mod, "Confirm", type("C", (), {"ask": staticmethod(fake_confirm)})())
+
+    def fake_runner(issues, strategies, **kw):
+        kw["on_issue_complete"](
+            instance_id="django__django-1", strategy="direct", elapsed=0.5,
+            tokens=100, cost_usd=0.001, success=True, status="VALID",
+        )
+        return pd.DataFrame(), "EXP-TUI"
+
+    monkeypatch.setattr(
+        "agentbench.core.experiments.runner.run_experiments", fake_runner
+    )
+    monkeypatch.setattr(
+        "agentbench.core.dataset_loader.select_issues", lambda: _fake_issues(1)
+    )
+
+    cmd = RunCommand(CONFIG, console, interactive=False)
+    cmd._default_provider = lambda: FakeProvider()
+    cmd._refresh_rate = lambda: None
+    cmd._save_config_snapshot = lambda *a, **k: None
+    cmd._print_summary = lambda *a, **k: None
+    cmd.execute("--issues 1 --strategy direct --output /tmp/ab-tui-run")
+
+    assert called["confirm"] == 0  # no prompt shown in TUI mode
+    text = console.export_text()
+    assert "VALID" in text  # simple reporter line landed

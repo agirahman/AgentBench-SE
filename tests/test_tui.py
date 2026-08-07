@@ -132,9 +132,10 @@ def _fake_class_factory(lines):
     """Return a fake command class that prints given lines on execute."""
 
     class Fake:
-        def __init__(self, cfg, console, cm):
+        def __init__(self, cfg, console, cm, interactive=True):
             self.console = console
             self._ = cfg
+            self.interactive = interactive
 
         def execute(self, args):
             for line in lines:
