@@ -123,3 +123,96 @@ def test_welcome_banner_contains_model():
         "provider": {"model": "deepseek/deepseek-v4-flash", "name": "openrouter"},
     })
     assert "deepseek/deepseek-v4-flash" in text
+
+
+# --------------------------------------------------------------------- #
+# TUI-2: streaming color, collapsible details, keyboard shortcuts
+# --------------------------------------------------------------------- #
+def _fake_class_factory(lines):
+    """Return a fake command class that prints given lines on execute."""
+
+    class Fake:
+        def __init__(self, cfg, console, cm):
+            self.console = console
+            self._ = cfg
+
+        def execute(self, args):
+            for line in lines:
+                self.console.print(line)
+
+    return Fake
+
+
+@pytest.mark.asyncio
+async def test_streamed_output_resolves_colors(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENTBENCH_CONFIG_DIR", str(tmp_path))
+    from agentbench.config_manager import ConfigManager
+
+    cm = ConfigManager(config_path=tmp_path / "config.yaml")
+    cm.save(make_config())
+
+    fake = _fake_class_factory([
+        "some progress",
+        "[info] WARNING: token budget low",
+        "ERROR: strategy failed",
+        "SUCCESS: run completed",
+    ])
+    monkeypatch.setattr(
+        "agentbench.tui.app.AgentBenchTUI._command_class",
+        lambda self, cmd: fake if cmd == "run" else None,
+    )
+
+    app = AgentBenchTUI()
+    async with app.run_test(size=(110, 40)) as pilot:
+        _submit(app, "run --issues 0")
+        await pilot.pause(0.8)
+        text = _log_text(app)
+        assert "some progress" in text
+        assert "WARNING" in text
+        assert "ERROR" in text
+        assert "SUCCESS" in text
+        assert "run finished" in text
+
+
+@pytest.mark.asyncio
+async def test_detail_collapsible_toggles(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENTBENCH_CONFIG_DIR", str(tmp_path))
+    from agentbench.config_manager import ConfigManager
+    from textual.widgets import Collapsible
+
+    cm = ConfigManager(config_path=tmp_path / "config.yaml")
+    cm.save(make_config())
+
+    app = AgentBenchTUI()
+    async with app.run_test(size=(110, 40)) as pilot:
+        cp = app.query_one("#detail-panel", Collapsible)
+        assert cp.collapsed is True
+        app.action_toggle_details()
+        await pilot.pause(0.2)
+        assert cp.collapsed is False
+        app.action_toggle_details()
+        await pilot.pause(0.2)
+        assert cp.collapsed is True
+
+
+@pytest.mark.asyncio
+async def test_keyboard_shortcut_actions(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENTBENCH_CONFIG_DIR", str(tmp_path))
+    from agentbench.config_manager import ConfigManager
+
+    cm = ConfigManager(config_path=tmp_path / "config.yaml")
+    cm.save(make_config())
+
+    app = AgentBenchTUI()
+    async with app.run_test(size=(110, 40)) as pilot:
+        # ctrl+h -> help lands in log
+        app.action_cmd_help()
+        await pilot.pause(0.4)
+        text = _log_text(app)
+        assert "Commands" in text
+        # ctrl+l clears
+        app.query_one("#log").write("junk-line-to-clear")
+        await pilot.pause(0.1)
+        app.action_clear_log()
+        await pilot.pause(0.2)
+        assert "junk-line-to-clear" not in _log_text(app)

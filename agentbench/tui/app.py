@@ -15,7 +15,7 @@ import io
 from rich.console import Console
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import Footer, Input, RichLog
+from textual.widgets import Collapsible, Footer, Input, RichLog
 
 from agentbench.__version__ import __version__
 from agentbench.config_manager import ConfigManager
@@ -30,12 +30,21 @@ class AgentBenchTUI(App[None]):
     Screen { background: #16161e; }
     #log { border: round $primary; padding: 0 1; }
     #command-input { dock: bottom; margin: 1 0; }
+    #detail-panel { dock: bottom; height: auto; max-height: 45%; margin: 0 1 3 1; }
+    Collapsible { background: $surface; padding: 0 1; }
     """
 
     BINDINGS = [
         Binding("ctrl+q", "quit", "Quit"),
         Binding("ctrl+space", "focus_input", "Prompt"),
         Binding("ctrl+p", "focus_input", "Prompt"),
+        # --- TUI-2: quick command shortcuts (power users) ---
+        Binding("ctrl+r", "cmd_run", "Run"),
+        Binding("ctrl+s", "cmd_results", "Results"),
+        Binding("ctrl+e", "cmd_export", "Export"),
+        Binding("ctrl+h", "cmd_help", "Help"),
+        Binding("ctrl+l", "clear_log", "Clear log"),
+        Binding("ctrl+d", "toggle_details", "Details"),
     ]
 
     def __init__(self, config: dict | None = None) -> None:
@@ -55,6 +64,13 @@ class AgentBenchTUI(App[None]):
     # ------------------------------------------------------------------ #
     def compose(self) -> ComposeResult:
         yield RichLog(id="log", markup=True, highlight=True, wrap=True)
+        # TUI-2: collapsible detail panel for the last command's full output
+        yield Collapsible(
+            RichLog(id="detail-log", markup=True, highlight=True, wrap=True),
+            title="Details",
+            collapsed=True,
+            id="detail-panel",
+        )
         yield Input(
             placeholder="Type a command (run, results, export, config, help) then Enter",
             id="command-input",
@@ -105,6 +121,38 @@ class AgentBenchTUI(App[None]):
         self.query_one("#command-input", Input).focus()
 
     # ------------------------------------------------------------------ #
+    # TUI-2: quick-command actions (keyboard shortcuts)
+    # ------------------------------------------------------------------ #
+    def _run_input(self, line: str) -> None:
+        """Inject a command line into the dispatch pipeline."""
+        self.run_worker(
+            self._run_command(line),
+            name="dispatch",
+            exit_on_error=False,
+        )
+
+    def action_cmd_run(self) -> None:
+        self._run_input("run")
+
+    def action_cmd_results(self) -> None:
+        self._run_input("results summary")
+
+    def action_cmd_export(self) -> None:
+        self._run_input("export --format markdown")
+
+    def action_cmd_help(self) -> None:
+        self._run_input("help")
+
+    def action_clear_log(self) -> None:
+        self.query_one("#log", RichLog).clear()
+        self.query_one("#log", RichLog).write("")
+
+    def action_toggle_details(self) -> None:
+        """Expand/collapse the detail panel (Collapsible)."""
+        collapsible = self.query_one("#detail-panel", Collapsible)
+        collapsible.collapsed = not collapsible.collapsed
+
+    # ------------------------------------------------------------------ #
     # Dispatch (coroutine worker)
     # ------------------------------------------------------------------ #
     async def _run_command(self, command_line: str) -> None:
@@ -146,22 +194,54 @@ class AgentBenchTUI(App[None]):
         capture = io.StringIO()
         console = Console(file=capture, force_terminal=False, width=90)
 
+        # Live streaming: read the capture buffer incrementally so the user
+        # sees output as it is produced instead of after the command ends.
+        shown = {"pos": 0}
+
         def _work() -> None:
             cls(self.config, console, self.config_manager).execute(args)
 
         def _flush() -> None:
             text = capture.getvalue()
-            if text.strip():
-                log.write(text)
+            new = text[shown["pos"]:]
+            if new.strip():
+                self._write_streamed(log, new)
+                # mirror raw output into the collapsible detail panel
+                dlog = self.query_one("#detail-log", RichLog)
+                dlog.write(new)
+            shown["pos"] = len(text)
 
         def _poll(worker) -> None:
-            if worker.is_finished:
-                _flush()
-            else:
+            _flush()
+            if not worker.is_finished:
                 self.set_timer(0.2, lambda: _poll(worker))
+            else:
+                self._write_done(log, cmd)
 
         worker = self.run_worker(_work, thread=True, exit_on_error=False)
         self.set_timer(0.2, lambda: _poll(worker))
+
+    @staticmethod
+    def _write_streamed(log: RichLog, text: str) -> None:
+        """Write streamed output, annotating severity lines (low color)."""
+        for raw in text.splitlines():
+            line = raw.rstrip()
+            if not line:
+                continue
+            lowered = line.lower()
+            if any(k in lowered for k in ("error", "traceback", "exception")):
+                log.write(f"[dim red]{line}[/dim red]")
+            elif any(k in lowered for k in ("warning", "warn:", "⚠", "aborted")):
+                log.write(f"[dim yellow]{line}[/dim yellow]")
+            elif any(k in lowered for k in ("success", "completed", "saved", "✓")):
+                log.write(f"[dim green]{line}[/dim green]")
+            else:
+                log.write(line)
+
+    @staticmethod
+    def _write_done(log: RichLog, cmd: str) -> None:
+        log.write(f"[dim]{cmd} finished[/dim]")
+        log.write("")
 
     def _show_help(self, log: RichLog) -> None:
         log.write("Commands:")
