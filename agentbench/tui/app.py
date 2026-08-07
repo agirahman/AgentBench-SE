@@ -15,7 +15,7 @@ import io
 from rich.console import Console
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import Footer, Input, RichLog, Static
+from textual.widgets import Footer, Input, RichLog
 
 from agentbench.__version__ import __version__
 from agentbench.config_manager import ConfigManager
@@ -27,15 +27,14 @@ class AgentBenchTUI(App[None]):
     """Textual application wrapping AgentBench-SE commands."""
 
     CSS = """
-    Screen { background: #1a1b26; }
-    #banner { height: auto; padding: 0 1; }
+    Screen { background: #16161e; }
     #log { border: round $primary; padding: 0 1; }
     #command-input { dock: bottom; margin: 1 0; }
     """
 
     BINDINGS = [
         Binding("ctrl+q", "quit", "Quit"),
-        Binding("ctrl+space", "focus_input", "Palette"),
+        Binding("ctrl+space", "focus_input", "Prompt"),
         Binding("ctrl+p", "focus_input", "Prompt"),
     ]
 
@@ -55,7 +54,6 @@ class AgentBenchTUI(App[None]):
     # Compose / mount
     # ------------------------------------------------------------------ #
     def compose(self) -> ComposeResult:
-        yield Static(welcome_banner(self.config), id="banner")
         yield RichLog(id="log", markup=True, highlight=True, wrap=True)
         yield Input(
             placeholder="Type a command (run, results, export, config, help) then Enter",
@@ -64,13 +62,27 @@ class AgentBenchTUI(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
+        # Banner appears once at startup inside the log (scrolls away after),
+        # not as a sticky top-pinned widget.
         log = self.query_one("#log", RichLog)
+        log.write(welcome_banner(self.config))
+        log.write("")
         log.write(
-            "[cyan]AgentBench TUI ready. Type [/cyan]"
-            "[bold]help[/bold] [cyan]or a command like [/cyan]"
-            "[bold]run --issues 2[/bold][cyan].[/cyan]"
+            "Type [bold]help[/bold] for commands, or "
+            "[bold]run --issues 2[/bold] to launch an experiment."
         )
+        log.write("")
+        # Ensure later module output is separated from the banner.
         self.query_one("#command-input", Input).focus()
+
+    @staticmethod
+    def _blank(log: RichLog) -> None:
+        log.write("")
+
+    @staticmethod
+    def _sep(log: RichLog, label: str | None = None) -> None:
+        """Blank line before a command's output (keeps results spaced)."""
+        log.write("")
 
     # ------------------------------------------------------------------ #
     # Handling
@@ -108,6 +120,9 @@ class AgentBenchTUI(App[None]):
         args = " ".join(parts[1:])
         log = self._log_ref()
 
+        # Add spacing so consecutive results aren't crammed together.
+        self._sep(log, f"/{cmd}" if cmd else None)
+
         # --- native (in-app) commands --------------------------------
         if cmd in ("help", "h"):
             self._show_help(log)
@@ -125,9 +140,7 @@ class AgentBenchTUI(App[None]):
         # --- module commands -----------------------------------------
         cls = self._command_class(cmd)
         if cls is None:
-            log.write(
-                f"[red]Unknown command: '{cmd}'. Try [/red][bold]/help[/bold][red].[/red]"
-            )
+            log.write(f"Unknown command: '{cmd}'. Try /help.")
             return
 
         capture = io.StringIO()
@@ -151,22 +164,22 @@ class AgentBenchTUI(App[None]):
         self.set_timer(0.2, lambda: _poll(worker))
 
     def _show_help(self, log: RichLog) -> None:
-        log.write("[bold cyan]Available commands[/bold cyan]")
+        log.write("Commands:")
         for name, desc in COMMAND_HELP.items():
-            log.write(f"  [yellow]/{name:<10}[/yellow] {desc}")
+            log.write(f"  /{name:<10} {desc}")
 
     def _show_info(self, log: RichLog) -> None:
         researcher = self.config.get("researcher", {}) or {}
         provider = self.config.get("provider", {}) or {}
-        log.write("[bold cyan]AgentBench-SE[/bold cyan]")
-        log.write(f"  Version:    {__version__}")
-        log.write(f"  Model:      {provider.get('model', 'not set')}")
-        log.write(f"  Provider:   {provider.get('name', 'not set')}")
+        log.write("AgentBench-SE")
+        log.write(f"  Version     {__version__}")
+        log.write(f"  Model       {provider.get('model', 'not set')}")
+        log.write(f"  Provider    {provider.get('name', 'not set')}")
         log.write(
-            f"  Researcher: {researcher.get('name', 'guest')} "
-            f"({researcher.get('institution', '')})"
+            f"  Researcher  {researcher.get('name', 'guest')}"
+            + (f" ({researcher.get('institution', '')})" if researcher.get("institution") else "")
         )
-        log.write(f"  Config:     {self.config_manager.config_path}")
+        log.write(f"  Config      {self.config_manager.config_path}")
 
     @staticmethod
     def _command_class(cmd: str):

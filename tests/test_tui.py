@@ -32,7 +32,11 @@ def _submit(app: AgentBenchTUI, text: str) -> None:
 def _log_text(app: AgentBenchTUI) -> str:
     """Extract the RichLog contents as plain text."""
     lines = app.query_one("#log").lines
-    return "\n".join(str(line) for line in lines)
+    out = []
+    for line in lines:
+        pieces = [seg.text for seg in line if seg.text]
+        out.append("".join(pieces))
+    return "\n".join(out)
 
 
 @pytest.mark.asyncio
@@ -41,9 +45,18 @@ async def test_app_mounts_widgets():
         "provider": {"model": "m", "name": "openrouter"},
     })
     async with app.run_test(size=(100, 30)) as pilot:
-        assert app.query_one("#banner") is not None
+        # banner is not a sticky top-pinned widget anymore
+        try:
+            app.query_one("#banner")
+            assert False, "sticky #banner widget should not exist"
+        except Exception:
+            pass  # expected: no sticky banner widget
         assert app.query_one("#log") is not None
         assert app.query_one("#command-input") is not None
+        text = _log_text(app)
+        # banner summary lines are plain-text (not ASCII-glyph), so check those
+        assert "Model" in text
+        assert "Provider" in text
         await pilot.pause()
 
 
@@ -57,7 +70,8 @@ async def test_help_native_command():
         _submit(app, "help")
         await pilot.pause(0.3)
         log_text = _log_text(app)
-        assert "Available commands" in log_text
+        assert "Commands" in log_text
+        assert "/run" in log_text
 
 
 @pytest.mark.asyncio

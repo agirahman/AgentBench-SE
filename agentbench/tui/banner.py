@@ -21,9 +21,9 @@ def welcome_banner(config: dict | None = None) -> str:
     lines = [
         ascii_banner(),
         "",
-        f"[bold cyan]  Model:      [/bold cyan]{provider.get('model', 'not set')}",
-        f"[bold cyan]  Provider:   [/bold cyan]{provider.get('name', 'not set')}",
-        f"[bold cyan]  Researcher: [/bold cyan]{researcher.get('name', 'guest')}",
-        f"[bold cyan]  Start:      [/bold cyan]/help for commands, /run to launch",
+        f"  Model       {provider.get('model', 'not set')}",
+        f"  Provider    {provider.get('name', 'not set')}",
+        f"  Researcher  {researcher.get('name', 'guest')}",
+        f"  Start       type 'help' for commands, or 'run --issues N'",
     ]
     return "\n".join(lines)
