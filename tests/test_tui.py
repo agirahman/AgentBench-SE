@@ -164,7 +164,7 @@ async def test_dispatch_passes_correct_args(monkeypatch, tmp_path):
             _submit(app, line)
             await pilot.pause(0.4)
 
-    assert seen["run"] == (0, ["interactive"])
+    assert seen["run"] == (0, ["interactive", "progress_cb"])
     assert seen["config"] == (1, [])
     assert seen["results"] == (0, [])
 
@@ -317,3 +317,45 @@ async def test_save_log_writes_file(monkeypatch, tmp_path):
     assert files, "save_log should write a file"
     content = files[0].read_text(encoding="utf-8")
     assert "WARNING: something" in content
+
+
+# --------------------------------------------------------------------- #
+# TUI-2.5: live run feedback (ProgressBar + status line)
+# --------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_run_progress_bar_updates(monkeypatch, tmp_path):
+    """progress_cb drives the ProgressBar + status line (REPL-like feedback)."""
+    monkeypatch.setenv("AGENTBENCH_CONFIG_DIR", str(tmp_path))
+    from agentbench.config_manager import ConfigManager
+    from textual.widgets import ProgressBar
+
+    cm = ConfigManager(config_path=tmp_path / "config.yaml")
+    cm.save(make_config())
+
+    class FakeRun:
+        def __init__(self, cfg, console, *args, **kwargs):
+            self.console = console
+            self.pcb = kwargs.get("progress_cb")
+
+        def execute(self, args):
+            # simulate 2 of 4 steps completing
+            self.pcb(1, 4, "  [1/4] ✓ direct on django-1")
+            self.pcb(2, 4, "  [2/4] ✓ planning on django-1")
+
+    monkeypatch.setattr(
+        "agentbench.tui.app.AgentBenchTUI._command_class",
+        staticmethod(lambda cmd: FakeRun if cmd == "run" else None),
+    )
+
+    app = AgentBenchTUI()
+    async with app.run_test(size=(110, 40)) as pilot:
+        _submit(app, "run --issues 4")
+        await pilot.pause(0.6)
+        pb = app.query_one("#run-progress", ProgressBar)
+        assert pb.progress == 2
+        assert pb.total == 4
+        # status line updates live; direct call proves the wiring
+        app._on_run_progress(2, 4, "  [2/4] ✓ planning on django-1")
+        await pilot.pause(0.2)
+        meta = str(app.query_one("#run-meta").content)
+        assert "2/4" in meta

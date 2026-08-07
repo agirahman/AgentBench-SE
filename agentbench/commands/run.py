@@ -35,6 +35,7 @@ class RunCommand(BaseCommand):
         provider_factory: Callable[..., Any] | None = None,
         issue_loader: Callable[..., list] | None = None,
         interactive: bool = True,
+        progress_cb: Callable[[int, int, str], None] | None = None,
     ):
         super().__init__(config, console)
         self._provider_factory = provider_factory
@@ -42,7 +43,10 @@ class RunCommand(BaseCommand):
         # When called from the TUI (interactive=False) we must not block on
         # Confirm prompts (stdin belongs to Textual) nor render the rich live
         # progress bar into a captured buffer (it floods the log stream).
+        # ``progress_cb`` lets the TUI drive a real ProgressBar widget with
+        # (done, total, summary_line) updates without touching stdin/stdout.
         self._interactive = interactive
+        self._progress_cb = progress_cb
 
     # ------------------------------------------------------------------ #
     def execute(self, args: str) -> None:
@@ -100,7 +104,7 @@ class RunCommand(BaseCommand):
         silenced = silence_console()  # keep rich progress bar clean (1 bar, no loguru noise)
 
         def _simple_callback():
-            """Line-based progress reporter for the TUI (no buffer flood)."""
+            """Line-based progress + optional TUI ProgressBar updates."""
             total = len(issue_objs) * len(strategies)
             done = {"n": 0}
 
@@ -115,10 +119,14 @@ class RunCommand(BaseCommand):
             ) -> None:
                 done["n"] += 1
                 mark = "✓" if success else "✗"
-                self.info(
+                line = (
                     f"  [{done['n']}/{total}] {mark} {strategy} on {instance_id} "
                     f"({elapsed:.1f}s, {tokens} tok) — {status}"
                 )
+                self.info(line)
+                # drive a real ProgressBar in the TUI (thread-safe via call)
+                if self._progress_cb is not None:
+                    self._progress_cb(done["n"], total, line)
 
             return on_issue_complete
 

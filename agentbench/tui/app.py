@@ -15,7 +15,7 @@ import io
 from rich.console import Console
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import Collapsible, Footer, Input, RichLog
+from textual.widgets import Collapsible, Footer, Input, ProgressBar, RichLog, Static
 
 from agentbench.__version__ import __version__
 from agentbench.config_manager import ConfigManager
@@ -32,6 +32,11 @@ class AgentBenchTUI(App[None]):
     #command-input { dock: bottom; margin: 1 0; }
     #detail-panel { dock: bottom; height: auto; max-height: 45%; margin: 0 1 3 1; }
     Collapsible { background: $surface; padding: 0 1; }
+    #run-progress {
+        dock: bottom; margin: 0 1; display: none;
+    }
+    #run-progress.visible { display: block; }
+    #run-meta { color: $text-muted; }
     """
 
     BINDINGS = [
@@ -75,6 +80,9 @@ class AgentBenchTUI(App[None]):
             collapsed=True,
             id="detail-panel",
         )
+        # TUI run feedback: real ProgressBar + status line (live, like REPL)
+        yield Static("", id="run-meta")
+        yield ProgressBar(total=1, id="run-progress", show_eta=True)
         yield Input(
             placeholder="Type a command (run, results, export, config, help) then Enter",
             id="command-input",
@@ -245,11 +253,16 @@ class AgentBenchTUI(App[None]):
 
         def _work() -> None:
             if cmd == "run":
-                # RunCommand signature: (config, console, provider_factory,
-                # issue_loader, interactive). It does NOT take a config_manager,
-                # so don't pass one (it would land in provider_factory and
-                # crash with "object is not callable").
-                cls(self.config, console, interactive=False).execute(args)
+                # TUI mode: no stdin Confirm prompts, no rich live progress,
+                # but drive a real Textual ProgressBar via progress_cb.
+                self._show_progress()
+                cls(
+                    self.config,
+                    console,
+                    interactive=False,
+                    progress_cb=self._on_run_progress,
+                ).execute(args)
+                self.call_from_thread(self._hide_progress)
             elif cmd == "config":
                 # ConfigCommand is the only one taking a config_manager.
                 cls(self.config, console, self.config_manager).execute(args)
@@ -278,6 +291,36 @@ class AgentBenchTUI(App[None]):
 
         worker = self.run_worker(_work, thread=True, exit_on_error=False)
         self.set_timer(0.2, lambda: _poll(worker))
+
+    # ------------------------------------------------------------------ #
+    # TUI-2.5: live run feedback (ProgressBar + status line)
+    # ------------------------------------------------------------------ #
+    def _show_progress(self) -> None:
+        pb = self.query_one("#run-progress", ProgressBar)
+        pb.total = 1
+        pb.progress = 0
+        pb.add_class("visible")
+        self.query_one("#run-meta", Static).update("Running...")
+
+    def _hide_progress(self) -> None:
+        self.query_one("#run-progress", ProgressBar).remove_class("visible")
+        self.query_one("#run-meta", Static).update("")
+
+    def _on_run_progress(self, done: int, total: int, line: str) -> None:
+        """Update the live ProgressBar + status line from the run worker."""
+        import threading
+
+        def _update() -> None:
+            pb = self.query_one("#run-progress", ProgressBar)
+            pb.total = total
+            pb.progress = done
+            clean = line.strip().lstrip("/").strip()
+            self.query_one("#run-meta", Static).update(clean)
+
+        if self._thread_id == threading.get_ident():
+            _update()  # already on the UI thread (e.g. tests)
+        else:
+            self.call_from_thread(_update)
 
     @staticmethod
     def _write_streamed(log: RichLog, text: str) -> None:
