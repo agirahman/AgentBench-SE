@@ -19,7 +19,11 @@ REPO = Path(__file__).resolve().parent.parent
 def cli_env(tmp_path):
     """Environment where AGENTBENCH_CONFIG_DIR is isolated per test."""
     env = {**os.environ, "PYTHONPATH": str(REPO),
-           "AGENTBENCH_CONFIG_DIR": str(tmp_path)}
+           "AGENTBENCH_CONFIG_DIR": str(tmp_path),
+           # Windows pipes default to the locale codec (cp1252), which cannot
+           # encode the wizard's Unicode glyphs (e.g. ✎). Force UTF-8 so the
+           # subprocess CLI behaves identically on every platform.
+           "PYTHONUTF8": "1"}
     return env, tmp_path
 
 
@@ -27,6 +31,10 @@ def _run_cli(args, stdin, env):
     return subprocess.run(
         [sys.executable, "-m", "agentbench.cli.main", *args],
         input=stdin, text=True, capture_output=True, cwd=REPO, env=env,
+        # The subprocess runs with PYTHONUTF8=1 and emits UTF-8; the parent
+        # pytest process may default to the locale codec (cp1252 on Windows)
+        # and crash decoding the wizard's Unicode glyphs otherwise.
+        encoding="utf-8", errors="replace",
     )
 
 
@@ -109,7 +117,8 @@ print("HAS_EXP:", "EXP-E2E" in text)
 print("EXPORT_EXISTS:", os.path.exists(out_path))
 """ % (str(REPO), str(tmp_path / "export.md"))
     r = subprocess.run([sys.executable, "-c", session], cwd=REPO,
-                       capture_output=True, text=True, env=env)
+                       capture_output=True, text=True, env=env,
+                       encoding="utf-8", errors="replace")
     assert r.returncode == 0, r.stderr[-2000:]
     assert "HAS_SUMMARY: True" in r.stdout
     assert "HAS_EXP: True" in r.stdout

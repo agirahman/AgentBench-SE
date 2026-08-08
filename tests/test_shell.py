@@ -76,6 +76,10 @@ def test_default_unknown_command(shell):
 
 
 def test_do_info_shows_paths(shell):
+    # Windows temp paths are long (C:\Users\...\pytest-of-\...\config.yaml);
+    # rich folds an unbreakable word mid-filename when the panel is narrower
+    # than the path, which would split "config.yaml". Widen for this test.
+    shell.console.width = 160
     shell.do_info("")
     text = shell.console.export_text()
     assert "AgentBench-SE Information" in text
