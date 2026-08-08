@@ -260,6 +260,10 @@ class AgentBenchTUI(App[None]):
         self.state = BenchmarkState(config=config).attach(self.config_manager)
         self.config = self.state.config
         self._log_dir = log_dir or "logs"
+        # Patch 4: active experiment runner (simulated until Patch 5 wires
+        # the real backend). Owned by the app so RunScreen and SetupScreen
+        # can start/stop it without knowing the implementation.
+        self.runner = None
 
     def _load_config(self) -> dict:
         """(Legacy helper) — state owns config; kept for back-compat."""
@@ -276,6 +280,42 @@ class AgentBenchTUI(App[None]):
         # what switch_screen() itself does after popping.
         screen = self.screen
         screen._push_result_callback(screen, None)  # type: ignore[attr-defined]
+        # Patch 4: the Run screen reacts to setup submissions (form Start).
+        self.state.events.subscribe(self._on_state_event)
+
+    def on_unmount(self) -> None:
+        # Note: Textual 8.2.8 Screen has no base on_unmount to chain to.
+        self.state.events.unsubscribe(self._on_state_event)
+
+    def _on_state_event(self, event) -> None:
+        """App-level state events: start the run when the form submits."""
+        if event.type == "setup.submitted":
+            self._start_run(event.payload)
+
+    def _start_run(self, payload: dict) -> None:
+        """Launch an experiment run from setup-form parameters (Patch 4).
+
+        Creates a :class:`SimulatedRunner` (real backend in Patch 5),
+        navigates to the Run screen and starts the run.
+        """
+        from agentbench.tui.runner import SimulatedRunner
+
+        tasks = list(payload.get("tasks") or [])
+        concurrency = int(payload.get("concurrency") or 1)
+        output_dir = str(payload.get("output_dir") or "./results")
+        if not tasks:
+            self.state.log("warn", "run skipped: no tasks selected")
+            return
+        self.state.log(
+            "info",
+            f"starting run: {len(tasks)} task(s), concurrency {concurrency}, "
+            f"output {output_dir}",
+        )
+        self.runner = SimulatedRunner(
+            self.state, tasks, concurrency=concurrency
+        )
+        self.nav_to("run")
+        self.runner.start()
 
     def nav_to(self, key: str) -> None:
         """Navigate to a screen by nav key (setup/run/results/.../console)."""

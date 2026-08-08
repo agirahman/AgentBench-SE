@@ -120,3 +120,40 @@ Input:focus, Select:focus { border: round #58a6ff; }
 #setup-actions Button { width: auto; margin-right: 1; }
 
 #setup-status { margin-top: 1; }
+
+/* ---------- Run screen (Patch 4) ---------- */
+#run-status { text-style: bold; margin-bottom: 1; }
+
+#run-overall-label { margin-bottom: 1; }
+
+#run-overall {
+    height: 1;
+    margin-bottom: 1;
+}
+#run-overall > .bar { background: #58a6ff; color: #0d1117; }
+
+.run-section {
+    color: #8b949e;
+    text-style: bold;
+    margin-top: 1;
+    margin-bottom: 1;
+}
+
+#run-tasks {
+    height: auto;
+    max-height: 10;
+    border: round #30363d;
+    margin-bottom: 1;
+}
+#run-tasks Static { padding: 0 1; }
+
+#run-log {
+    height: 12;
+    border: round #30363d;
+    margin-bottom: 1;
+}
+
+#run-actions { margin-bottom: 1; }
+#run-actions Button { width: auto; margin-right: 1; }
+
+#run-summary { margin-top: 1; }

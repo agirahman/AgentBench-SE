@@ -212,10 +212,13 @@ class BenchmarkState:
     def run_active(self) -> bool:
         return self._run_active
 
-    def run_started(self) -> None:
+    def run_started(self, tasks: list[str] | None = None) -> None:
+        """Begin a run; ``tasks`` (full id list) is echoed in the event
+        payload so screens can render the whole queue, not just running
+        tasks."""
         self._run_active = True
         self.running_tasks = []
-        self.emit("run.started", {})
+        self.emit("run.started", {"tasks": list(tasks or [])})
 
     def run_finished(self) -> None:
         self._run_active = False
