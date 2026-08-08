@@ -17,6 +17,7 @@ and stop (cooperative flag + task cancellation).
 from __future__ import annotations
 
 import asyncio
+import threading
 
 from agentbench.tui.state import BenchmarkState, TASK_SUCCESS
 
@@ -177,5 +178,228 @@ class SimulatedRunner:
         return True
 
 
-# Alias for the app-level runner slot (Patch 5 swaps this import).
-Runner = SimulatedRunner  # type: ignore[assignment]
+# --------------------------------------------------------------------------- #
+class ExperimentRunner:
+    """Real backend runner (Patch 5): executes the core experiment pipeline
+    in a worker thread and mirrors it into :class:`BenchmarkState`.
+
+    ``run_experiments`` is blocking, so each run lives in a daemon thread.
+    The backend reports a whole ``(issue, strategy)`` in one shot, so each
+    completion maps to one ``task.finished`` + a log line; ``run.started`` /
+    ``run.finished`` bracket the run. Pause/stop use the cooperative hooks
+    ``is_paused`` / ``should_abort`` (polled between issues).
+
+    ``issue_loader`` / ``strategy_factory`` are injectable seams (same idea
+    as ``RunCommand``) so tests can run the full pipeline with fakes —
+    production defaults load SWE-bench issues and the configured provider
+    strategies.
+
+    The SimulatedRunner above remains for demos/tests; this class is what
+    the app actually uses (``Runner`` alias below).
+    """
+
+    def __init__(
+        self,
+        state: BenchmarkState,
+        config: dict,
+        run_params: dict,
+        *,
+        issue_loader=None,
+        strategy_factory=None,
+        strategy: str = "all",
+        rate_limit_seconds: float | None = None,
+        resume: bool = False,
+    ) -> None:
+        self.state = state
+        self.config = config or {}
+        self.tasks: list[str] = []
+        self.failed: list[str] = []
+        self._retry_ids: list[str] | None = None
+        self._stop_flag = threading.Event()
+        self._pause_flag = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._issue_loader = issue_loader
+        self._strategy_factory = strategy_factory
+        self._strategy = strategy
+        self._resume = resume
+        if rate_limit_seconds is None:
+            rate_limit_seconds = float(
+                self.config.get("experiment", {}).get("rate_limit", 1.5)
+            )
+        self._rate_limit = rate_limit_seconds
+        self._run_params = dict(run_params or {})
+        self._output_dir = str(self._run_params.get("output_dir") or "results")
+
+    # -- public control --------------------------------------------------- #
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def paused(self) -> bool:
+        return self._pause_flag.is_set()
+
+    def start(self) -> None:
+        if self.running:
+            return
+        self._thread = threading.Thread(
+            target=self._run, name="agentbench-run", daemon=True
+        )
+        self._thread.start()
+
+    def pause(self) -> None:
+        if self.running and not self.paused:
+            self._pause_flag.set()
+            self.state.log("warn", "paused — finishing current task...")
+
+    def resume(self) -> None:
+        if self.paused:
+            self._pause_flag.clear()
+            self.state.log("info", "resumed")
+
+    def toggle_pause(self) -> bool:
+        """Pause if running, resume if paused. Returns the new paused state."""
+        if self.paused:
+            self.resume()
+            return False
+        self.pause()
+        return True
+
+    def stop(self) -> None:
+        self._stop_flag.set()
+        self.state.log("warn", "stop requested — finishing current task...")
+
+    def retry_failed(self) -> bool:
+        """Re-run only the failed tasks (fresh experiment dir)."""
+        if self.running or not self.failed:
+            return False
+        self._retry_ids = list(self.failed)
+        self.start()
+        return True
+
+    # -- internals -------------------------------------------------------- #
+    def _resolve_repo_specs(self) -> dict[str, int]:
+        """repo -> issue-count for the selected task repos."""
+        from agentbench.core.experiments.experiment_config import DEFAULT_REPOS
+
+        selected = list(self._run_params.get("tasks") or [])
+        repos = self.config.get("dataset", {}) or {}
+        repos = repos.get("repos") or DEFAULT_REPOS
+        if not selected:
+            return dict(repos)
+        return {r: int(repos.get(r, DEFAULT_REPOS.get(r, 1))) for r in selected}
+
+    def _build_strategies(self) -> dict:
+        if self._strategy_factory is not None:
+            return self._strategy_factory()
+        from agentbench.commands.run import RunCommand
+
+        cmd = RunCommand(self.config, interactive=False)
+        _, strategies = cmd._build_strategies(self._strategy)
+        return strategies
+
+    def _load_issues(self) -> list:
+        if self._issue_loader is not None:
+            return self._issue_loader()
+        from agentbench.core.dataset_loader import select_issues
+
+        return select_issues(self._resolve_repo_specs())
+
+    def _run(self) -> None:
+        try:
+            self._execute()
+        except Exception as e:  # noqa: BLE001 - a crashed run must still finish
+            self.state.log("error", f"run crashed: {type(e).__name__}: {e}")
+            try:
+                self.state.run_finished()
+            except Exception:  # noqa: BLE001 - never mask the original error
+                pass
+
+    def _execute(self) -> None:
+        issues = self._load_issues()
+        strategies = self._build_strategies()
+        if self._retry_ids:
+            retry_strats = {t.split("/", 1)[0] for t in self._retry_ids}
+            retry_instances = {t.split("/", 1)[1] for t in self._retry_ids}
+            strategies = {
+                n: s for n, s in strategies.items() if n in retry_strats
+            }
+            issues = [i for i in issues if i.instance_id in retry_instances]
+        if not issues or not strategies:
+            self.state.log("warn", "run skipped: no issues/strategies resolved")
+            return
+        tasks = [
+            f"{name}/{issue.instance_id}"
+            for name in strategies
+            for issue in issues
+        ]
+        self.tasks = tasks
+        self.failed = []
+        self.state.run_started(tasks)
+        self.state.log(
+            "info",
+            f"run started: {len(issues)} issue(s) × {len(strategies)} "
+            f"strategy = {len(tasks)} task(s) → {self._output_dir}",
+        )
+
+        from agentbench.core.experiments.runner import run_experiments
+
+        _df, exp_id = run_experiments(
+            issues,
+            strategies,
+            base_dir=self._output_dir,
+            provider_name=str(
+                self.config.get("provider", {}).get("name", "unknown")
+            ),
+            rate_limit_seconds=self._rate_limit,
+            resume=self._resume,
+            on_issue_complete=self._on_issue_complete,
+            should_abort=self._stop_flag.is_set,
+            is_paused=self._pause_flag.is_set,
+        )
+        self.state.log(
+            "info",
+            f"experiment {exp_id} exported → "
+            f"{self._output_dir}/{exp_id}/results.csv",
+        )
+        self.state.run_finished()
+
+    def _on_issue_complete(
+        self,
+        instance_id: str,
+        strategy: str,
+        elapsed: float,
+        tokens: int,
+        cost_usd: float,
+        success: bool,
+        status: str,
+    ) -> None:
+        """Called from the worker thread → state events (thread-safe: the
+        UI dispatches them onto the Textual loop via ``call_from_thread``)."""
+        task_id = f"{strategy}/{instance_id}"
+        # No granular task.progress: the backend reports a whole
+        # (issue, strategy) in one shot. Calling task_progress from inside
+        # this callback (mid-run_experiments in the worker thread) triggers
+        # a CPython segfault in this environment, so it is intentionally
+        # skipped — started → finished is the full picture.
+        self.state.task_started(task_id)
+        self.state.task_finished(
+            task_id,
+            ok=bool(success),
+            time_s=float(elapsed),
+            cost_usd=float(cost_usd),
+            error=str(status),
+        )
+        mark = "✓" if success else "✗"
+        self.state.log(
+            "info" if success else "error",
+            f"{mark} {task_id} ({elapsed:.1f}s, {tokens} tok, "
+            f"${cost_usd:.4f}) — {status}",
+        )
+        if not success:
+            self.failed.append(task_id)
+
+
+# The app-level runner slot may hold either implementation (simulated for
+# demos/tests, the real backend for production runs).
+Runner = SimulatedRunner | ExperimentRunner

@@ -13,10 +13,10 @@ from agentbench.tui.screens.run_screen import RunScreen
 from agentbench.tui.state import TASK_FAIL, TASK_SUCCESS
 
 
-async def _boot():
+async def _boot(**kwargs):
     from agentbench.tui.app import AgentBenchTUI
 
-    app = AgentBenchTUI()
+    app = AgentBenchTUI(**kwargs)
     async with app.run_test(size=(120, 45)) as pilot:
         await pilot.pause(0.2)
         yield app, pilot
@@ -283,22 +283,34 @@ class TestRunScreenLiveUpdates:
 
 # --------------------------------------------------------------------------- #
 class TestAppWiring:
-    def test_setup_submitted_starts_run_and_navigates(self):
+    def test_setup_submitted_starts_run_and_navigates(self, tmp_path):
         async def run():
-            async for app, pilot in _boot():
+            from test_tui_runner_backend import fake_runner_kwargs
+
+            async for app, pilot in _boot(
+                runner_kwargs=fake_runner_kwargs(n_issues=1, delay=0.01)
+            ):
                 assert app.state.current_screen == "setup"
                 app.state.emit(
                     "setup.submitted",
-                    {"tasks": ["TS001", "TS002"], "concurrency": 2,
-                     "output_dir": "./results/run_x"},
+                    {"tasks": ["django/django"], "concurrency": 1,
+                     "output_dir": str(tmp_path)},
                 )
-                await pilot.pause(0.1)
+                ok = await _wait_for(
+                    pilot,
+                    lambda: app.runner is not None and app.runner.running,
+                )
+                assert ok, "runner did not start"
                 assert app.state.current_screen == "run"
                 assert app.runner is not None
                 assert app.runner.running  # type: ignore[union-attr]
-                assert app.runner.tasks == ["TS001", "TS002"]  # type: ignore[union-attr]
-                app.runner.stop()
-                ok = await _wait_for(pilot, lambda: not app.runner.running, timeout=5)
+                # real backend: task ids are strategy/instance pairs
+                assert app.runner.tasks == ["direct/EXP-001", "review/EXP-001"]  # type: ignore[union-attr]
+                app.runner.stop()  # type: ignore[union-attr]
+                ok = await _wait_for(
+                    pilot,
+                    lambda: app.runner is not None and not app.runner.running,
+                )
                 assert ok
 
         asyncio.run(run())

@@ -11,6 +11,7 @@ Run it with:  ``agentbench tui``.
 from __future__ import annotations
 
 import io
+import threading
 from typing import Any, Callable, ClassVar
 
 from rich.console import Console
@@ -252,7 +253,12 @@ class AgentBenchTUI(App[None]):
     }
     DEFAULT_MODE: ClassVar[str] = "default"
 
-    def __init__(self, config: dict | None = None, log_dir: str | None = None) -> None:
+    def __init__(
+        self,
+        config: dict | None = None,
+        log_dir: str | None = None,
+        runner_kwargs: dict | None = None,
+    ) -> None:
         super().__init__()
         self.config_manager = ConfigManager()
         # Patch 2: observable state owns the config; the app keeps ``self.config``
@@ -260,10 +266,15 @@ class AgentBenchTUI(App[None]):
         self.state = BenchmarkState(config=config).attach(self.config_manager)
         self.config = self.state.config
         self._log_dir = log_dir or "logs"
-        # Patch 4: active experiment runner (simulated until Patch 5 wires
-        # the real backend). Owned by the app so RunScreen and SetupScreen
-        # can start/stop it without knowing the implementation.
-        self.runner = None
+        # Patch 4/5: active experiment runner (real backend in a worker
+        # thread). Owned by the app so RunScreen and SetupScreen can
+        # start/stop it without knowing the implementation.
+        from agentbench.tui.runner import Runner
+
+        self.runner: Runner | None = None
+        # Test seam: extra kwargs forwarded to Runner() (issue_loader,
+        # strategy_factory, rate_limit_seconds, ...).
+        self._runner_kwargs = dict(runner_kwargs or {})
 
     def _load_config(self) -> dict:
         """(Legacy helper) — state owns config; kept for back-compat."""
@@ -281,6 +292,7 @@ class AgentBenchTUI(App[None]):
         screen = self.screen
         screen._push_result_callback(screen, None)  # type: ignore[attr-defined]
         # Patch 4: the Run screen reacts to setup submissions (form Start).
+        self._app_thread_id = threading.get_ident()
         self.state.events.subscribe(self._on_state_event)
 
     def on_unmount(self) -> None:
@@ -288,33 +300,45 @@ class AgentBenchTUI(App[None]):
         self.state.events.unsubscribe(self._on_state_event)
 
     def _on_state_event(self, event) -> None:
-        """App-level state events: start the run when the form submits."""
+        """App-level state events: start the run when the form submits.
+
+        Only the ``setup.submitted`` event matters here, and it is always
+        emitted from the UI thread; worker-thread emissions (task/progress
+        events) are handled by :class:`RunScreen` via its own bridge, so we
+        ignore them (avoids a blocking ``call_from_thread`` per event).
+        """
+        if threading.get_ident() != self._app_thread_id:
+            return
+        # Safety net: a StateEvent *message* (posted to RunScreen) must never
+        # be dispatched here — only EventBus StateEvent objects (with .type).
+        if not hasattr(event, "type"):
+            return
+        self._dispatch_state_event(event)
+
+    def _dispatch_state_event(self, event) -> None:
         if event.type == "setup.submitted":
             self._start_run(event.payload)
 
     def _start_run(self, payload: dict) -> None:
-        """Launch an experiment run from setup-form parameters (Patch 4).
+        """Launch an experiment run from setup-form parameters (Patch 4/5).
 
-        Creates a :class:`SimulatedRunner` (real backend in Patch 5),
-        navigates to the Run screen and starts the run.
+        Creates the real backend runner (:class:`ExperimentRunner`),
+        navigates to the Run screen and starts the run in a worker thread.
         """
-        from agentbench.tui.runner import SimulatedRunner
+        from agentbench.tui.runner import ExperimentRunner, Runner
 
         tasks = list(payload.get("tasks") or [])
-        concurrency = int(payload.get("concurrency") or 1)
         output_dir = str(payload.get("output_dir") or "./results")
         if not tasks:
             self.state.log("warn", "run skipped: no tasks selected")
             return
         self.state.log(
             "info",
-            f"starting run: {len(tasks)} task(s), concurrency {concurrency}, "
-            f"output {output_dir}",
+            f"starting run: {len(tasks)} task(s), output {output_dir}",
         )
-        self.runner = SimulatedRunner(
-            self.state, tasks, concurrency=concurrency
-        )
+        self.runner = ExperimentRunner(self.state, self.config, payload, **self._runner_kwargs)
         self.nav_to("run")
+        assert self.runner is not None
         self.runner.start()
 
     def nav_to(self, key: str) -> None:

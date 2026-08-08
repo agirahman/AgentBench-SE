@@ -14,11 +14,15 @@ the real backend is wired in Patch 5).
 
 from __future__ import annotations
 
+import threading
 import time
+
+from typing import ClassVar
 
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
+from textual.message import Message
 from textual.widgets import Button, ProgressBar, RichLog, Static
 
 from agentbench.tui.state import (
@@ -61,6 +65,23 @@ def _fmt_secs(seconds: float) -> str:
     h, rem = divmod(seconds, 3600)
     m, s = divmod(rem, 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+class StateEvent(Message):
+    """Carries a :class:`BenchmarkEvent` from the worker thread onto the
+    Textual loop (posted via :meth:`MessagePump.post_message`).
+
+    ``bubble = False``: the message is handled by the screen it was posted
+    to; bubbling it up to the app would re-trigger Textual's
+    ``_{handler_name}`` fallback on :class:`AgentBenchTUI` (whose
+    ``_on_state_event`` is an EventBus callback, not a message handler).
+    """
+
+    bubble: ClassVar[bool] = False
+
+    def __init__(self, event) -> None:
+        super().__init__()
+        self.event = event
 
 
 class RunScreen(ShellScreen):
@@ -106,17 +127,41 @@ class RunScreen(ShellScreen):
         self._started_monotonic: float | None = None
         self._stop_requested = False
         self._task_widgets: dict[str, Static] = {}
-        self._state.events.subscribe(self._on_state_event)
+        # Thread guard: the real runner emits from a worker thread; Textual
+        # ``call_from_thread`` refuses to run on the app thread itself.
+        self._app_thread_id = threading.get_ident()
+        self._state.events.subscribe(self._on_benchmark_event)
         self._sync_task_list()
         self._refresh_overall()
         self._replay_log()
 
     def on_unmount(self) -> None:
         # Note: Textual 8.2.8 Screen has no base on_unmount to chain to.
-        self._state.events.unsubscribe(self._on_state_event)
+        self._state.events.unsubscribe(self._on_benchmark_event)
 
-    def _on_state_event(self, event) -> None:
-        """EventBus callback — dispatch state changes to the UI."""
+    def _on_benchmark_event(self, event) -> None:
+        """EventBus callback — dispatch state changes onto the Textual loop.
+
+        ``ExperimentRunner`` emits from a worker thread, so bridge via
+        ``post_message`` (thread-safe, runs the handler on the app loop in
+        the app's own context — ``call_from_thread`` copies the *worker's*
+        context, which breaks Textual's ``active_message_pump`` ContextVar).
+        Events arriving on the app thread (simulated runner, direct test
+        drives) are dispatched inline.
+
+        NOTE: the name deliberately avoids the ``on_*_event`` pattern that
+        Textual uses to resolve message handlers (it would be picked up for
+        :class:`StateEvent` messages via the ``_{handler_name}`` fallback).
+        """
+        if threading.get_ident() == self._app_thread_id:
+            self._dispatch_state_event(event)
+        else:
+            self.post_message(StateEvent(event))
+
+    def on_state_event(self, message: StateEvent) -> None:
+        self._dispatch_state_event(message.event)
+
+    def _dispatch_state_event(self, event) -> None:
         kind = event.type
         if kind == "run.started":
             self._started_monotonic = time.monotonic()
@@ -336,7 +381,7 @@ class RunScreen(ShellScreen):
             f"[dim]total time {_fmt_secs(total_time)}  •  "
             f"total cost ${total_cost:.4f} USD[/dim]"
         )
-        self._set_status("Done", "ok" if failed == 0 else "err")
+        self._set_status("Selesai", "ok" if failed == 0 else "err")
 
     # ------------------------------------------------------------------ #
     # Widget events
@@ -360,4 +405,4 @@ class RunScreen(ShellScreen):
 
 
 # Re-export for typing convenience (used by app.py / tests).
-__all__ = ["RunScreen", "TaskStatus"]
+__all__ = ["RunScreen"]
