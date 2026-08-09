@@ -198,3 +198,41 @@ ResultsDetailModal > VerticalScroll {
 #rd-error { margin-bottom: 1; }
 #rd-patch { margin-bottom: 1; }
 #rd-hint { color: #8b949e; margin-top: 1; text-align: center; }
+
+/* ---------- Logs screen (Patch 7) ---------- */
+#logs-status { margin-bottom: 1; }
+
+#logs-toolbar { height: auto; margin-bottom: 1; align-vertical: middle; }
+.logs-label { color: #8b949e; margin-right: 1; }
+Button.logs-level { width: auto; margin-right: 1; }
+#logs-search { width: 1fr; margin-left: 1; }
+
+#logs-viewer {
+    height: 1fr;
+    border: round #30363d;
+    background: #0d1117;
+}
+
+#logs-actions { margin-top: 1; }
+#logs-actions Button { width: auto; margin-right: 1; }
+
+/* Context menu (Patch 7, SDD §8.4) */
+ContextMenu {
+    align: center middle;
+}
+#ctx-wrap {
+    width: 70;
+    height: auto;
+    background: #0d1117;
+    border: round #58a6ff;
+    padding: 1 2;
+}
+#ctx-title { text-style: bold; margin-bottom: 1; }
+#ctx-preview {
+    color: #8b949e;
+    max-height: 10;
+    border: round #30363d;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+#ctx-wrap Button { margin-bottom: 1; }

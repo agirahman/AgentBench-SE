@@ -166,6 +166,7 @@ class ResultsScreen(ShellScreen):
         Binding("e", "toggle_errors", "Errors only"),
         Binding("c", "export_csv", "CSV"),
         Binding("j", "export_json", "JSON"),
+        Binding("k", "copy_csv", "Copy CSV"),
         Binding("r", "reload", "Reload"),
     ]
 
@@ -382,3 +383,21 @@ class ResultsScreen(ShellScreen):
 
     def action_export_json(self) -> None:
         self._export("json")
+
+    def action_copy_csv(self) -> None:
+        """Copy the current (filtered) view as CSV text to the clipboard."""
+        from agentbench.tui import clipboard
+
+        df = self._current_df()
+        if df.empty:
+            self.notify("No rows to copy.", severity="warning")
+            return
+        buf = df.to_csv(index=False)
+        method, extra = clipboard.copy_text(buf)
+        if method == "tempfile":
+            self.notify(
+                f"Copied {len(df)} rows as CSV → clipboard unavailable, saved to {extra}",
+                severity="warning",
+            )
+        else:
+            self.notify(f"Copied {len(df)} rows as CSV ({method})")

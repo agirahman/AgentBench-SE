@@ -378,3 +378,68 @@ class TestResultsExport:
                 assert not (tmp_path / "export").exists()
 
         asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+class TestResultsCopyCsv:
+    def test_copy_csv_writes_tempfile_fallback(self, tmp_path, monkeypatch):
+        from agentbench.tui import clipboard
+
+        async def run():
+            csv_path = tmp_path / "results.csv"
+            _write_csv(csv_path)
+            async for app, pilot in _boot():
+                screen = await _results_screen(app, pilot, csv_path)
+                # Force the temp-file fallback so the test is hermetic.
+                monkeypatch.setattr(clipboard, "_backends", lambda: [])
+                monkeypatch.setattr(
+                    clipboard, "TEMP_CLIPBOARD", tmp_path / "cb.csv"
+                )
+                screen.action_copy_csv()
+                await pilot.pause(0.05)
+                text = (tmp_path / "cb.csv").read_text(encoding="utf-8")
+                assert "instance_id,strategy" in text
+                assert "django__django-1000" in text
+                assert "seaborn__seaborn-50" in text
+
+        asyncio.run(run())
+
+    def test_copy_csv_respects_filter(self, tmp_path, monkeypatch):
+        from agentbench.tui import clipboard
+
+        async def run():
+            csv_path = tmp_path / "results.csv"
+            _write_csv(csv_path)
+            async for app, pilot in _boot():
+                screen = await _results_screen(app, pilot, csv_path)
+                monkeypatch.setattr(clipboard, "_backends", lambda: [])
+                monkeypatch.setattr(
+                    clipboard, "TEMP_CLIPBOARD", tmp_path / "cb.csv"
+                )
+                # Filter to seaborn rows first.
+                screen.query_one("#results-filter", Input).value = "seaborn"
+                await pilot.pause(0.02)
+                screen.action_copy_csv()
+                await pilot.pause(0.05)
+                text = (tmp_path / "cb.csv").read_text(encoding="utf-8")
+                assert "seaborn__seaborn-50" in text
+                assert "django__django-1000" not in text
+
+        asyncio.run(run())
+
+    def test_copy_csv_empty_view_warns(self, tmp_path, monkeypatch):
+        from agentbench.tui import clipboard
+
+        async def run():
+            async for app, pilot in _boot():
+                missing = tmp_path / "nope.csv"
+                screen = await _results_screen(app, pilot, missing)
+                monkeypatch.setattr(clipboard, "_backends", lambda: [])
+                monkeypatch.setattr(
+                    clipboard, "TEMP_CLIPBOARD", tmp_path / "cb.csv"
+                )
+                screen.action_copy_csv()
+                await pilot.pause(0.05)
+                assert not (tmp_path / "cb.csv").exists()
+
+        asyncio.run(run())
