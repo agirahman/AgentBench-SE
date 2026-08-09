@@ -157,3 +157,44 @@ Input:focus, Select:focus { border: round #58a6ff; }
 #run-actions Button { width: auto; margin-right: 1; }
 
 #run-summary { margin-top: 1; }
+
+/* ---------- Results screen (Patch 6) ---------- */
+#results-status { margin-bottom: 1; }
+
+#results-toolbar { height: auto; margin-bottom: 1; }
+#results-toolbar Input { width: 1fr; margin-right: 1; }
+#results-toolbar Button { width: auto; margin-right: 1; }
+
+#results-table {
+    height: 1fr;
+    border: round #30363d;
+}
+
+#results-table DataTable {
+    background: #0d1117;
+}
+#results-table DataTable > .datatable--header {
+    background: #161b22;
+    color: #8b949e;
+    text-style: bold;
+}
+#results-table DataTable > .datatable--cursor {
+    background: #232d3d;
+}
+
+/* Detail modal */
+ResultsDetailModal {
+    align: center middle;
+}
+ResultsDetailModal > VerticalScroll {
+    width: 80%;
+    height: 70%;
+    background: #0d1117;
+    border: round #58a6ff;
+    padding: 1 2;
+}
+#rd-title { text-style: bold; margin-bottom: 1; }
+#rd-metrics { color: #8b949e; margin-bottom: 1; }
+#rd-error { margin-bottom: 1; }
+#rd-patch { margin-bottom: 1; }
+#rd-hint { color: #8b949e; margin-top: 1; text-align: center; }
