@@ -110,7 +110,14 @@ class RunScreen(ShellScreen):
         yield VerticalScroll(id="run-tasks", classes="run-list")
         yield Static("Live log", classes="run-section")
         yield RichLog(
-            id="run-log", markup=True, highlight=True, wrap=True, auto_scroll=True
+            id="run-log",
+            markup=True,
+            highlight=True,
+            wrap=True,
+            auto_scroll=True,
+            # Bound the live pane: RichLog defaults to unbounded history, which
+            # grows without limit on long runs (Patch 9, SDD §7.8).
+            max_lines=1000,
         )
         with Horizontal(id="run-actions"):
             yield Button("Pause", id="run-pause", classes="small")
