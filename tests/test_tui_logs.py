@@ -237,6 +237,7 @@ class TestLogsScreen:
     def test_auto_scroll_toggle(self, tmp_path):
         async def run():
             async for app, pilot in _boot():
+                app.state.log("INFO", "seed line for status")
                 screen = await _logs_screen(app, pilot)
                 assert screen._viewer.auto_scroll is True
                 screen.action_toggle_scroll()

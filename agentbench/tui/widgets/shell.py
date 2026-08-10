@@ -8,9 +8,10 @@ switches the active screen (PRD §5.2).
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import Any, Iterable, cast
 
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Static
@@ -37,6 +38,18 @@ class ShellScreen(Screen):
 
     nav_key: str = "setup"
     footer_hint: str = ""
+
+    BINDINGS = [
+        Binding("?", "show_action_sheet", "Keys"),
+    ]
+
+    def action_show_action_sheet(self) -> None:
+        """Open the action sheet: global + this screen's shortcuts (Patch 8)."""
+        from agentbench.tui.widgets.action_sheet import ActionSheet
+        from agentbench.tui.widgets.shell import NAV_ITEMS as _NAV
+
+        label = dict(_NAV).get(self.nav_key, self.nav_key.capitalize())
+        self.app.push_screen(ActionSheet(self.nav_key, label))
 
     def compose(self) -> ComposeResult:
         yield Static("", id="sh-header")
@@ -69,13 +82,16 @@ class ShellScreen(Screen):
     def _refresh_shell(self) -> None:
         cfg = getattr(self.app, "config", {}) or {}
         model = str(cfg.get("provider", {}).get("model", "no model"))
-        self.query_one("#sh-header").update(
-            f"[b accent]AgentBench[/b accent]  •  [dim]{model}[/dim]"
+        state = getattr(self.app, "state", None)
+        running = bool(state.run_active) if state is not None else False
+        dot = "[yellow]●[/yellow]" if running else "[green]●[/green]"
+        cast(Static, self.query_one("#sh-header")).update(
+            f"[b accent]AgentBench[/b accent]  •  [dim]{model}[/dim]  {dot}"
         )
-        self.query_one("#sh-footer").update(self.footer_hint)
+        cast(Static, self.query_one("#sh-footer")).update(self.footer_hint)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         key = getattr(event.button, "_nav_key", None)
         if key:
-            self.app.nav_to(key)
+            self.app.nav_to(key)  # type: ignore[attr-defined]
         event.stop()

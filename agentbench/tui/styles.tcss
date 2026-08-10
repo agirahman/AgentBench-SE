@@ -236,3 +236,24 @@ ContextMenu {
     margin-bottom: 1;
 }
 #ctx-wrap Button { margin-bottom: 1; }
+
+/* ---------- Help screen (Patch 8) ---------- */
+#help-content {
+    height: auto;
+    padding: 1 1;
+}
+
+/* ---------- Action sheet (Patch 8) ---------- */
+ActionSheet {
+    align: center middle;
+}
+#as-wrap {
+    width: 76;
+    height: 80%;
+    background: #0d1117;
+    border: round #58a6ff;
+    padding: 1 2;
+}
+#as-title { text-style: bold; margin-bottom: 1; }
+#as-body { margin-bottom: 1; }
+#as-hint { color: #8b949e; text-align: center; }

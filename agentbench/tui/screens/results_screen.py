@@ -204,7 +204,7 @@ class ResultsScreen(ShellScreen):
         table = self.query_one("#results-table", DataTable)
         for label, key in COLUMNS:
             table.add_column(label, key=key)
-        self.reload()
+        self.action_reload()
 
     # ------------------------------------------------------------------ #
     def _resolve_csv(self) -> str:
@@ -215,7 +215,7 @@ class ResultsScreen(ShellScreen):
         )
         return find_latest_results_csv(base) or find_latest_results_csv() or DEFAULT_CSV
 
-    def reload(self) -> None:
+    def action_reload(self) -> None:
         """(Re)load the CSV, rebuild the filtered view and the table."""
         from agentbench.commands.results import load_results
 
@@ -323,7 +323,7 @@ class ResultsScreen(ShellScreen):
         elif btn_id == "results-export-json":
             self.action_export_json()
         elif btn_id == "results-reload":
-            self.reload()
+            self.action_reload()
 
     def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
         key = str(event.column_key.value)

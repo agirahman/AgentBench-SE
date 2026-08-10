@@ -142,12 +142,19 @@ class LogsScreen(ShellScreen):
     def _sync_status(self) -> None:
         v = self._viewer
         status = self.query_one("#logs-status", Static)
-        status.update(
-            f"[bold accent]Logs[/bold accent]  "
-            f"[dim]{v.visible_count}/{v.total_count} lines · "
-            f"level {v.level_filter} · "
-            f"auto-scroll {'ON' if v.auto_scroll else 'OFF'}[/dim]"
-        )
+        if v.total_count == 0:
+            status.update(
+                "[bold accent]Logs[/bold accent]  "
+                "[dim]No log entries yet — run an experiment (Setup → Start) "
+                "or use the Console.[/dim]"
+            )
+        else:
+            status.update(
+                f"[bold accent]Logs[/bold accent]  "
+                f"[dim]{v.visible_count}/{v.total_count} lines · "
+                f"level {v.level_filter} · "
+                f"auto-scroll {'ON' if v.auto_scroll else 'OFF'}[/dim]"
+            )
         self.query_one("#logs-scroll-toggle", Button).label = (
             f"Auto-scroll: {'ON' if v.auto_scroll else 'OFF'}"
         )

@@ -141,7 +141,7 @@ async def _results_screen(app, pilot, csv_path) -> ResultsScreen:
     screen = app.screen
     assert isinstance(screen, ResultsScreen)
     screen.csv_path = str(csv_path)
-    screen.reload()
+    screen.action_reload()
     await pilot.pause(0.05)
     return screen
 
