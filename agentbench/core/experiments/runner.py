@@ -353,7 +353,8 @@ def run_experiments(
     # Log per-strategy counts
     for strat_name in strategies:
         strat_jsonl = str(pred_dir / f"{strat_name}.jsonl")
-        count = sum(1 for _ in open(strat_jsonl, "r", encoding="utf-8") if _.strip())
+        with open(strat_jsonl, "r", encoding="utf-8") as strat_file:
+            count = sum(1 for _ in strat_file if _.strip())
         logger.success(f"Per-strategy predictions: {strat_jsonl} ({count} entries)")
 
     if skipped:

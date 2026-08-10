@@ -15,8 +15,9 @@ import threading
 from typing import Any, Callable, ClassVar
 
 from rich.console import Console
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, ScreenStackError
 from textual.binding import Binding
+from textual.dom import NoScreen
 from textual.screen import Screen
 from textual.widgets import Collapsible, Input, ProgressBar, RichLog, Static
 
@@ -298,6 +299,22 @@ class AgentBenchTUI(App[None]):
     def on_unmount(self) -> None:
         # Note: Textual 8.2.8 Screen has no base on_unmount to chain to.
         self.state.events.unsubscribe(self._on_state_event)
+
+    def clear_selection(self) -> None:
+        """Clear text selection on the active screen (guarded).
+
+        Textual 8.2.8 quirk: ``App.clear_selection`` catches ``NoScreen``
+        but ``self.screen`` raises ``ScreenStackError`` when the first
+        screen (MODES default) is still composing — Input widgets with an
+        initial value fire ``_watch_selection`` before the screen is on
+        the stack. Race depends on platform I/O timing (reproducible on
+        Windows, silent on WSL); guard both so `agentbench tui` boots
+        everywhere.
+        """
+        try:
+            super().clear_selection()
+        except (NoScreen, ScreenStackError):
+            pass
 
     def _on_state_event(self, event) -> None:
         """App-level state events: start the run when the form submits.
