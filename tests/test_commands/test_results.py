@@ -1,5 +1,7 @@
 """Tests for ResultsCommand and ExportCommand."""
 
+from pathlib import Path
+
 import pandas as pd
 import pytest
 from rich.console import Console
@@ -131,7 +133,7 @@ def test_export_json(results_csv, console, tmp_path):
     ExportCommand(CONFIG, console, csv_path=results_csv).execute(f"--format json --output {out}")
     import json
 
-    data = json.loads(open(out).read())
+    data = json.loads(Path(out).read_text(encoding="utf-8"))
     assert data["row_count"] == 4
     assert set(data["strategies"]) == {"direct", "planning", "review"}
 
@@ -139,7 +141,7 @@ def test_export_json(results_csv, console, tmp_path):
 def test_export_markdown(results_csv, console, tmp_path):
     out = str(tmp_path / "out.md")
     ExportCommand(CONFIG, console, csv_path=results_csv).execute(f"--format markdown --output {out}")
-    text = open(out).read()
+    text = Path(out).read_text(encoding="utf-8")
     assert "AgentBench-SE Experiment Results" in text
     assert "| instance_id |" in text
 

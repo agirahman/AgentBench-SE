@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import csv
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from agentbench.commands.base import BaseCommand
@@ -72,7 +72,7 @@ class ExportCommand(BaseCommand):
     def _export_json(self, df, out: Path) -> str:
         out.parent.mkdir(parents=True, exist_ok=True)
         data = {
-            "exported_at": datetime.utcnow().isoformat(),
+            "exported_at": datetime.now(timezone.utc).isoformat(),
             "row_count": int(len(df)),
             "columns": list(df.columns),
             "strategies": sorted(df["strategy"].unique().tolist())
@@ -90,7 +90,7 @@ class ExportCommand(BaseCommand):
         ) if c in df.columns]
 
         lines = ["# AgentBench-SE Experiment Results", ""]
-        lines.append(f"_Exported {datetime.utcnow().isoformat()} — {len(df)} rows_")
+        lines.append(f"_Exported {datetime.now(timezone.utc).isoformat()} — {len(df)} rows_")
         lines.append("")
         lines.append("| " + " | ".join(cols) + " |")
         lines.append("|" + "|".join(["---"] * len(cols)) + "|")

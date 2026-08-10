@@ -18,13 +18,18 @@ DEFAULT_CSV = "results/csv/experiment_results.csv"
 
 
 def find_latest_results_csv(base_dir: str = "results") -> str | None:
-    """Return the newest ``results/EXP-*/results.csv`` (by mtime), else None."""
+    """Return the newest ``results/EXP-*/results.csv`` (by mtime), else None.
+
+    Ties on identical mtimes (common on Windows NTFS where two quick writes
+    share a timestamp) are broken by descending directory name, so the
+    highest ``EXP-*`` number wins deterministically on every platform.
+    """
     root = Path(base_dir)
     if not root.exists():
         return None
     candidates = sorted(
         root.glob("EXP-*/results.csv"),
-        key=lambda p: p.stat().st_mtime,
+        key=lambda p: (p.stat().st_mtime, p.parent.name),
         reverse=True,
     )
     return str(candidates[0]) if candidates else None

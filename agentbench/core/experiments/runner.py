@@ -3,11 +3,18 @@ import os
 import random
 import time
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Protocol
 
 import pandas as pd
+
+# pandas 3.x defaults to PyArrow-backed string arrays (infer_string=True),
+# which segfaults when a DataFrame is built from a worker thread
+# (ArrowStringArray._from_sequence is not thread-safe; observed with
+# pandas 3.0.5 + pyarrow 25 in the TUI runner thread). Fall back to the
+# classic object-dtype strings — CSV/JSON export is unaffected.
+pd.options.future.infer_string = False
 
 from agentbench.core.models.issue import Issue
 from agentbench.core.models.result import (
@@ -95,6 +102,8 @@ def run_experiments(
     resume: bool = False,
     agents: list[dict[str, str]] | None = None,
     on_issue_complete: "Callable[..., None] | None" = None,
+    should_abort: "Callable[[], bool] | None" = None,
+    is_paused: "Callable[[], bool] | None" = None,
 ) -> tuple[pd.DataFrame, str]:
     """Execute experiments and dump results to a per-experiment folder.
 
@@ -110,6 +119,12 @@ def run_experiments(
             on_issue_complete(instance_id, strategy, elapsed, tokens, cost_usd,
                               success, status). Used by the interactive shell
             to update its progress bar.
+        should_abort: Optional predicate polled before each issue; when it
+            returns True the loop stops cooperatively (results so far are
+            still exported). Used by the TUI Stop button.
+        is_paused: Optional predicate polled before each issue; while it
+            returns True the loop sleeps (0.25s) instead of starting the
+            next issue. Used by the TUI Pause button.
 
     Returns:
         (DataFrame, experiment_id) where DataFrame is the flattened results.csv
@@ -146,6 +161,11 @@ def run_experiments(
     skipped = 0
 
     for issue in issues:
+        if should_abort is not None and should_abort():
+            logger.warning("Experiment aborted by user — exporting partial results.")
+            break
+        while is_paused is not None and is_paused():
+            time.sleep(0.25)
         for name, strategy in strategies.items():
             done += 1
 
@@ -166,7 +186,7 @@ def run_experiments(
                 patch, result = strategy.run(issue)
                 result.difficulty = issue.difficulty
                 elapsed = time.time() - t0
-                result.evaluation.timestamp = datetime.utcnow().isoformat()
+                result.evaluation.timestamp = datetime.now(timezone.utc).isoformat()
 
                 # --- Truncated JSON protection ---
                 try:
@@ -333,7 +353,8 @@ def run_experiments(
     # Log per-strategy counts
     for strat_name in strategies:
         strat_jsonl = str(pred_dir / f"{strat_name}.jsonl")
-        count = sum(1 for _ in open(strat_jsonl, "r", encoding="utf-8") if _.strip())
+        with open(strat_jsonl, "r", encoding="utf-8") as strat_file:
+            count = sum(1 for _ in strat_file if _.strip())
         logger.success(f"Per-strategy predictions: {strat_jsonl} ({count} entries)")
 
     if skipped:

@@ -52,9 +52,14 @@ def run_setup() -> None:
     )
 
     # 3. API key (masked)
+    # NOTE: getpass.getpass on Windows reads from the console via msvcrt and
+    # HANGS forever when stdin is a pipe (tests/CI). Only mask when stdin is
+    # an interactive tty; otherwise fall back to a plain readline prompt.
+    import sys as _sys
+
     api_key = Prompt.ask(
         f"[cyan]API key for {provider}[/cyan]",
-        password=True,
+        password=_sys.stdin.isatty(),
         show_default=True,
     )
 

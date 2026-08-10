@@ -1,0 +1,259 @@
+/* AgentBench TUI — global stylesheet (SDD §5.1/5.2). */
+
+Screen {
+    background: #0d1117;
+    color: #c9d1d9;
+}
+
+/* ---------- Shell frame ---------- */
+#sh-header {
+    height: 1;
+    background: #161b22;
+    color: #c9d1d9;
+    padding: 0 1;
+    border-bottom: solid #30363d;
+}
+
+#sh-header .brand { color: #58a6ff; text-style: bold; }
+#sh-header .model { color: #8b949e; }
+#sh-header .status-dot { text-style: bold; }
+
+#sh-body { layout: horizontal; }
+
+/* ---------- Sidebar ---------- */
+#sh-sidebar {
+    width: 20;
+    background: #161b22;
+    border-right: solid #30363d;
+    padding: 1 0;
+}
+
+#sh-sidebar Button.nav-btn {
+    width: 100%;
+    background: transparent;
+    border: none;
+    color: #8b949e;
+    padding: 0 1;
+    text-align: left;
+}
+
+#sh-sidebar Button.nav-btn:hover { background: #1f2630; }
+#sh-sidebar Button.nav-btn:focus,
+#sh-sidebar Button.nav-btn.active { background: #232d3d; color: #c9d1d9; }
+#sh-sidebar Button.nav-btn.active { text-style: bold; }
+
+/* ---------- Main panel ---------- */
+#sh-content {
+    width: 1fr;
+    padding: 1 1;
+}
+
+/* ---------- Footer ---------- */
+#sh-footer {
+    height: 1;
+    background: #161b22;
+    color: #8b949e;
+    padding: 0 1;
+    border-top: solid #30363d;
+}
+
+#sh-footer .foot-accent { color: #58a6ff; }
+
+/* ---------- Generic widgets ---------- */
+Button {
+    background: #21262d;
+    color: #c9d1d9;
+    border: none;
+}
+
+Button:hover, Button:focus {
+    background: #30363d;
+    color: #c9d1d9;
+}
+
+Button.primary { background: #58a6ff; color: #0d1117; text-style: bold; }
+Button.danger { background: #f85149; color: #0d1117; }
+
+Input, Select {
+    border: round #30363d;
+    background: #161b22;
+}
+
+Input:focus, Select:focus { border: round #58a6ff; }
+
+.stale { color: #8b949e; }
+.err { color: #f85149; }
+.ok { color: #3fb950; }
+.warn { color: #d29922; }
+.accent { color: #58a6ff; }
+
+/* ---------- Setup form (Patch 3) ---------- */
+#setup-title { margin-bottom: 1; }
+
+.field-row { height: auto; }
+.field-label {
+    width: 14;
+    color: #8b949e;
+    padding-top: 0;
+}
+
+#setup-form Input, #setup-form Select { width: 36; }
+
+.field-err {
+    color: #f85149;
+    margin: 0 1;
+    display: none;
+}
+.field-err.visible { display: block; }
+
+#setup-tasks {
+    height: 12;
+    border: round #30363d;
+    margin-bottom: 1;
+}
+#setup-tasks Checkbox { padding: 0 1; }
+
+#setup-task-actions { margin-bottom: 1; }
+#setup-task-actions Button.small { width: auto; margin-right: 1; }
+
+#setup-actions { margin-top: 1; }
+#setup-actions Button { width: auto; margin-right: 1; }
+
+#setup-status { margin-top: 1; }
+
+/* ---------- Run screen (Patch 4) ---------- */
+#run-status { text-style: bold; margin-bottom: 1; }
+
+#run-overall-label { margin-bottom: 1; }
+
+#run-overall {
+    height: 1;
+    margin-bottom: 1;
+}
+#run-overall > .bar { background: #58a6ff; color: #0d1117; }
+
+.run-section {
+    color: #8b949e;
+    text-style: bold;
+    margin-top: 1;
+    margin-bottom: 1;
+}
+
+#run-tasks {
+    height: auto;
+    max-height: 10;
+    border: round #30363d;
+    margin-bottom: 1;
+}
+#run-tasks Static { padding: 0 1; }
+
+#run-log {
+    height: 12;
+    border: round #30363d;
+    margin-bottom: 1;
+}
+
+#run-actions { margin-bottom: 1; }
+#run-actions Button { width: auto; margin-right: 1; }
+
+#run-summary { margin-top: 1; }
+
+/* ---------- Results screen (Patch 6) ---------- */
+#results-status { margin-bottom: 1; }
+
+#results-toolbar { height: auto; margin-bottom: 1; }
+#results-toolbar Input { width: 1fr; margin-right: 1; }
+#results-toolbar Button { width: auto; margin-right: 1; }
+
+#results-table {
+    height: 1fr;
+    border: round #30363d;
+}
+
+#results-table DataTable {
+    background: #0d1117;
+}
+#results-table DataTable > .datatable--header {
+    background: #161b22;
+    color: #8b949e;
+    text-style: bold;
+}
+#results-table DataTable > .datatable--cursor {
+    background: #232d3d;
+}
+
+/* Detail modal */
+ResultsDetailModal {
+    align: center middle;
+}
+ResultsDetailModal > VerticalScroll {
+    width: 80%;
+    height: 70%;
+    background: #0d1117;
+    border: round #58a6ff;
+    padding: 1 2;
+}
+#rd-title { text-style: bold; margin-bottom: 1; }
+#rd-metrics { color: #8b949e; margin-bottom: 1; }
+#rd-error { margin-bottom: 1; }
+#rd-patch { margin-bottom: 1; }
+#rd-hint { color: #8b949e; margin-top: 1; text-align: center; }
+
+/* ---------- Logs screen (Patch 7) ---------- */
+#logs-status { margin-bottom: 1; }
+
+#logs-toolbar { height: auto; margin-bottom: 1; align-vertical: middle; }
+.logs-label { color: #8b949e; margin-right: 1; }
+Button.logs-level { width: auto; margin-right: 1; }
+#logs-search { width: 1fr; margin-left: 1; }
+
+#logs-viewer {
+    height: 1fr;
+    border: round #30363d;
+    background: #0d1117;
+}
+
+#logs-actions { margin-top: 1; }
+#logs-actions Button { width: auto; margin-right: 1; }
+
+/* Context menu (Patch 7, SDD §8.4) */
+ContextMenu {
+    align: center middle;
+}
+#ctx-wrap {
+    width: 70;
+    height: auto;
+    background: #0d1117;
+    border: round #58a6ff;
+    padding: 1 2;
+}
+#ctx-title { text-style: bold; margin-bottom: 1; }
+#ctx-preview {
+    color: #8b949e;
+    max-height: 10;
+    border: round #30363d;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+#ctx-wrap Button { margin-bottom: 1; }
+
+/* ---------- Help screen (Patch 8) ---------- */
+#help-content {
+    height: auto;
+    padding: 1 1;
+}
+
+/* ---------- Action sheet (Patch 8) ---------- */
+ActionSheet {
+    align: center middle;
+}
+#as-wrap {
+    width: 76;
+    height: 80%;
+    background: #0d1117;
+    border: round #58a6ff;
+    padding: 1 2;
+}
+#as-title { text-style: bold; margin-bottom: 1; }
+#as-body { margin-bottom: 1; }
+#as-hint { color: #8b949e; text-align: center; }

@@ -88,14 +88,26 @@ class AgentBenchShell(cmd.Cmd):
         from rich.panel import Panel
 
         researcher = self.config.get("researcher", {}) or {}
-        panel = Panel.fit(
-            f"[bold]Framework:[/bold] AgentBench-SE v{__version__}\n"
-            f"[bold]Researcher:[/bold] {researcher.get('name', 'Unknown')}\n"
-            f"[bold]Institution:[/bold] {researcher.get('institution', 'N/A')}\n\n"
-            f"[bold]Paths:[/bold]\n"
-            f"  Config: {self.config_manager.config_path}\n"
-            f"  Results: ./results/\n"
-            f"  Dataset: {self.config_manager.dataset_cache_dir}",
+        # Render path lines via Text so rich wraps long Windows paths on
+        # word boundaries instead of mid-filename (keeps "config.yaml"
+        # intact when the panel is narrower than the path).
+        from rich.text import Text
+
+        def _path(label: str, value: object) -> Text:
+            return Text.assemble(
+                (f"  {label}: ", "bold"), (str(value), "cyan")
+            )
+
+        panel = Panel(
+            Text.assemble(
+                ("Framework: ", "bold"), f"AgentBench-SE v{__version__}", "\n",
+                ("Researcher: ", "bold"), str(researcher.get("name", "Unknown")), "\n",
+                ("Institution: ", "bold"), str(researcher.get("institution", "N/A")), "\n\n",
+                ("Paths:", "bold"), "\n",
+                _path("Config", self.config_manager.config_path), "\n",
+                _path("Results", "./results/"), "\n",
+                _path("Dataset", self.config_manager.dataset_cache_dir),
+            ),
             title="AgentBench-SE Information",
             border_style="cyan",
         )
