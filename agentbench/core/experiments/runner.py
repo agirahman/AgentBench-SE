@@ -3,7 +3,7 @@ import os
 import random
 import time
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Protocol
 
@@ -186,7 +186,7 @@ def run_experiments(
                 patch, result = strategy.run(issue)
                 result.difficulty = issue.difficulty
                 elapsed = time.time() - t0
-                result.evaluation.timestamp = datetime.utcnow().isoformat()
+                result.evaluation.timestamp = datetime.now(timezone.utc).isoformat()
 
                 # --- Truncated JSON protection ---
                 try:

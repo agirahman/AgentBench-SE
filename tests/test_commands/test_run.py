@@ -4,6 +4,8 @@ Uses a mock provider factory + a stubbed issue loader so no real API keys,
 network calls, or dataset downloads are needed.
 """
 
+from pathlib import Path
+
 import pytest
 from rich.console import Console
 
@@ -239,7 +241,7 @@ def test_save_experiment_config_writes_yaml(tmp_path):
 
     import yaml
 
-    data = yaml.safe_load(open(path))
+    data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     assert data["experiment"]["id"] == "EXP-1"
     assert data["experiment"]["researcher"] == "Agi"
     assert data["provider"]["model"] == "tencent/hy3:free"
@@ -255,7 +257,7 @@ def test_save_experiment_config_uses_defaults(tmp_path):
     path = save_experiment_config(str(tmp_path), issue_count=2)
     import yaml
 
-    data = yaml.safe_load(open(path))
+    data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     assert data["experiment"]["researcher"] == "Agi Rahman Setiadi"
     assert data["provider"]["model"] == "unknown"
 
