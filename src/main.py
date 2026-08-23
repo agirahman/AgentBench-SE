@@ -130,7 +130,7 @@ def _save_experiment_config(
             "max_tool_turns": Config.MAX_TOOL_TURNS,
             "repo_dir": Config.TOOLCALL_REPO_DIR,
             "tools": [
-                {"agent": name, "tools": list(T.TOOL_FUNCTIONS.keys())}
+                {"agent": name, "tools": list(T.AGENT_TOOLS.get(name, T.TOOL_FUNCTIONS.keys()))}
                 for name in (agent_team or {})
             ] if Config.TOOLCALL_ENABLED else [],
         },

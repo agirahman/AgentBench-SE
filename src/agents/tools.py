@@ -210,6 +210,22 @@ TOOL_FUNCTIONS = {
     "run_tests": run_tests,
 }
 
+# Per-role tool assignment: tools match each agent's function so the
+# orchestration comparison stays meaningful (planner analyses, executor
+# builds+verifies, reviewer checks with evidence, direct is a cheap one-shot).
+AGENT_TOOLS: dict[str, list[str]] = {
+    "direct": ["read_file", "grep", "list_files"],
+    "planner": ["read_file", "grep", "list_files"],
+    "executor": ["read_file", "grep", "list_files", "run_tests"],
+    "reviewer": ["read_file", "grep", "run_tests"],
+}
+
+
+def get_tools_for_agent(agent_name: str) -> list[dict]:
+    """Return OpenAI-compatible tool schemas for one agent role."""
+    allowed = AGENT_TOOLS.get(agent_name, list(TOOL_FUNCTIONS.keys()))
+    return [s for s in TOOL_SCHEMAS if s["function"]["name"] in allowed]
+
 TOOL_SCHEMAS = [
     {
         "type": "function",

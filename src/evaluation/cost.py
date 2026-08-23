@@ -104,7 +104,7 @@ class PricingTable:
                 "output_per_million": 1.32,
             },
             "currency": "USD",
-            "pricing_version": "2026-08-16-dummy",
+            "pricing_version": "2026-08-16",
         },
         "cmd/poolside/laguna-s-2.1-free": {
             "off_peak": {

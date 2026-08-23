@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from models.inference import InferenceResult
 from agents.messages import AgentMessage
 from agents.blackboard import Blackboard
+from agents.tools import get_tools_for_agent
 from utils.prompt_loader import load_prompt_or_default
 
 
@@ -35,7 +36,10 @@ class BaseAgent(ABC):
 
         if self.use_tools and hasattr(self.provider, "generate_with_tools"):
             inference = self.provider.generate_with_tools(
-                prompt, role=self.name, repo_root=self.repo_root
+                prompt,
+                role=self.name,
+                tools=get_tools_for_agent(self.name),
+                repo_root=self.repo_root,
             )
         else:
             inference = self.provider.generate(prompt, role=self.name)
