@@ -134,6 +134,7 @@ def _save_experiment_config(
                 for name in (agent_team or {})
             ] if Config.TOOLCALL_ENABLED else [],
         },
+        "source_context_enabled": Config.SOURCE_CONTEXT_ENABLED,
         "dataset": {
             "name": "SWE-bench/SWE-bench_Lite",
             "repos": repos or {},
@@ -268,6 +269,7 @@ def main():
         rate_limit_seconds=args.rate_limit,
         resume=args.resume,
         agents=agents,
+        model=provider.model,
     )
 
     # Save experiment.yaml to per-experiment folder

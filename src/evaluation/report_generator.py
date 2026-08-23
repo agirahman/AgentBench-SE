@@ -7,10 +7,19 @@ Usage:
 """
 
 import json
+import os
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+
+# Keep IDR figures consistent with the rest of the pipeline (Config.USD_IDR_RATE).
+# This module is runnable standalone (`python -m src.evaluation.report_generator`),
+# so resolve the rate from the environment instead of importing src.config.
+from dotenv import load_dotenv  # noqa: E402
+
+load_dotenv()
+USD_IDR_RATE = float(os.getenv("USD_IDR_RATE", "16500"))
 
 
 def load_experiment_data(exp_dir: Path) -> pd.DataFrame:
@@ -142,7 +151,7 @@ def generate_reports(df: pd.DataFrame, exp_dir: Path) -> Path:
         tradeoff["total_cost_usd"] / tradeoff["resolved_count"].replace(0, float("nan"))
     ).round(6)
     tradeoff["cost_per_success_idr"] = (
-        tradeoff["cost_per_success_usd"] * 17914.0
+        tradeoff["cost_per_success_usd"] * USD_IDR_RATE
     ).round(2)
     tradeoff.to_csv(eval_dir / "tradeoff_summary.csv", index=False)
 

@@ -39,6 +39,25 @@ def set_repo_root(path: str | Path | None) -> None:
     _CURRENT_REPO_ROOT = p.resolve()
 
 
+def ensure_repo_root(repo: str, base_commit: str) -> Path | None:
+    """Preferred repo-root resolution for tool-calling agents.
+
+    1. source_context.get_repo_at_commit — authoritative: shallow-fetches the
+       exact base_commit into cache if missing (works even with
+       SOURCE_CONTEXT_ENABLED=false), verifies HEAD == base_commit.
+    2. Fallback to the heuristic resolve_repo_root if that fails.
+    """
+    try:
+        from source_context import get_repo_at_commit
+
+        path = get_repo_at_commit(repo, base_commit)
+        if path is not None:
+            return Path(path).resolve()
+    except Exception:  # noqa: BLE001
+        pass
+    return resolve_repo_root(repo, base_commit)
+
+
 def resolve_repo_root(repo: str, base_commit: str) -> Path | None:
     """Find the on-disk repo root for an instance.
 

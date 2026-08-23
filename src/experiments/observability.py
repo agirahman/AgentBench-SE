@@ -103,7 +103,12 @@ def build_experiment_manifest(
             "patch_generated_count": status_counts["PATCH_GENERATED"],
             "empty_patch_count": status_counts["EMPTY_PATCH"],
             "timeout_count": status_counts["TIMEOUT"],
-            "execution_status": "COMPLETED",
+            # Honest status: a run with timeouts/errors is not plain COMPLETED.
+            "execution_status": (
+                "COMPLETED_WITH_ERRORS"
+                if status_counts["TIMEOUT"] > 0
+                else "COMPLETED"
+            ),
         },
         "results": result_entries,
     }

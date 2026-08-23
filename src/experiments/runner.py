@@ -130,6 +130,7 @@ def run_experiments(
     rate_limit_seconds: float = 1.5,
     resume: bool = False,
     agents: list[dict[str, str]] | None = None,
+    model: str = "",
 ) -> tuple[pd.DataFrame, str]:
     """Execute experiments and dump results to a per-experiment folder.
 
@@ -140,10 +141,14 @@ def run_experiments(
         provider_name: Name of provider (gemini/groq/deepseek)
         rate_limit_seconds: Delay between strategies (for API rate limiting)
         resume: If True, skip issues already completed in existing jsonl files
+        model: Actual configured model id (e.g. cmd/deepseek/deepseek-v4-flash).
+            Used for resume keys and error rows so records never carry a
+            provider name in place of a model id.
 
     Returns:
         (DataFrame, experiment_id) where DataFrame is the flattened results.csv
     """
+    effective_model = model or provider_name
     exp_id = generate_experiment_id()
     exp_dir = create_experiment_dir(base_dir, exp_id)
     Path(f"{exp_dir}/patches").mkdir(parents=True, exist_ok=True)
@@ -182,7 +187,7 @@ def run_experiments(
             # Resume skip — composite key (instance_id|model|thinking) so a
             # different config in the same experiment folder is not wrongly skipped.
             expected_key = _resume_key(
-                issue.instance_id, Config.DEEPSEEK_MODEL, Config.DEEPSEEK_THINKING
+                issue.instance_id, effective_model, Config.DEEPSEEK_THINKING
             )
             if expected_key in done_ids[name]:
                 skipped += 1
@@ -193,8 +198,8 @@ def run_experiments(
                 f"[{done}/{total}] Running {name} on {issue.instance_id} ({issue.difficulty})..."
             )
             logger.info(f"  → Issue loaded: {len(issue.problem_statement)} chars")
+            t0 = time.time()
             try:
-                t0 = time.time()
                 logger.info(f"  → Strategy initialized: {name}")
                 logger.info(f"  → API call to {provider_name}...")
                 patch, result = strategy.run(issue)
@@ -306,6 +311,7 @@ def run_experiments(
 
             except Exception as e:
                 error_detail = str(e)
+                elapsed_err = time.time() - t0
                 logger.error(
                     f"  ❌ FAILED: {issue.instance_id} ({name}, {issue.difficulty}) — {type(e).__name__}: {error_detail[:400]}"
                 )
@@ -313,7 +319,7 @@ def run_experiments(
                 error_entry = {
                     "instance_id": issue.instance_id,
                     "model_patch": "",
-                    "model_name_or_path": provider_name,
+                    "model_name_or_path": effective_model,
                     "strategy": name,
                     "patch_status": "TIMEOUT",
                     "error_type": type(e).__name__,
@@ -333,13 +339,26 @@ def run_experiments(
                 all_results.append(ExperimentResult(
                     instance_id=issue.instance_id,
                     strategy=name,
-                    model=provider_name,
+                    model=effective_model,
                     difficulty=issue.difficulty,
                     execution=empty_exec,
                     cost=empty_cost,
                     evaluation=empty_eval,
                     patch_status="TIMEOUT",
                 ))
+
+                # Persist an issue-level summary even on failure so manifest
+                # artifact references never dangle.
+                write_issue_run_summary(
+                    output_dir=str(exp_dir),
+                    issue=issue,
+                    strategy_name=name,
+                    patch_status="TIMEOUT",
+                    elapsed_seconds=elapsed_err,
+                    total_tokens=0,
+                    success=False,
+                    error=f"{type(e).__name__}: {error_detail[:400]}",
+                )
 
     # --- Final exports ---
     rows = [flatten_for_csv(r) for r in all_results]

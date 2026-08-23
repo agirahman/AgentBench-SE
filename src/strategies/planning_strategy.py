@@ -5,7 +5,7 @@ from models.inference import InferenceRun
 from agents.messages import AgentMessage
 from agents.blackboard import Blackboard
 from agents.registry import build_agent_team
-from agents.tools import resolve_repo_root
+from agents.tools import ensure_repo_root
 from evaluation.cost import CostCalculator
 
 
@@ -22,7 +22,7 @@ class PlanningStrategy:
         if hasattr(self.provider, "user_id"):
             self.provider.user_id = f"{self.strategy_name}_{issue.instance_id.replace('__', '-')}"
         # Point tool-calling agents at this instance's checked-out repo.
-        repo_root = resolve_repo_root(issue.repo, issue.base_commit)
+        repo_root = ensure_repo_root(issue.repo, issue.base_commit)
         for agent in self.team.values():
             agent.repo_root = str(repo_root) if repo_root else None
         bb = Blackboard(issue=issue)

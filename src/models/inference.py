@@ -24,6 +24,10 @@ class InferenceResult:
     reasoning_content: str = ""
     timestamp: str = ""
     tool_calls: list = field(default_factory=list)
+    # Number of HTTP API calls this result spans. Single-shot providers = 1;
+    # tool-loop results report the real turn count so token/turn metrics are
+    # not understated.
+    api_turns: int = 1
 
     def __post_init__(self):
         if not self.timestamp:

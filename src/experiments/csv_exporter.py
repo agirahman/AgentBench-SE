@@ -3,13 +3,17 @@ from models.result import ExperimentResult
 
 def flatten_for_csv(result: ExperimentResult) -> dict:
     """Flatten nested ExperimentResult → flat dict for CSV export."""
+    # Real API-turn count: each agent invocation may span multiple HTTP turns
+    # when tool-calling is active (default 1 per inference for single-shot).
+    inferences = result.execution.inferences
+    total_turns = sum(getattr(inf, "api_turns", 1) for inf in inferences) if inferences else 0
     return {
         "instance_id": result.instance_id,
         "strategy": result.strategy,
         "model": result.model,
         "difficulty": result.difficulty,
         "inference_count": result.execution.inference_count,
-        "total_turns": result.execution.inference_count,
+        "total_turns": total_turns,
         "execution_time": result.execution.execution_time,
         "prompt_tokens": result.execution.prompt_tokens,
         "cached_input_tokens": result.cost.cached_input_tokens,

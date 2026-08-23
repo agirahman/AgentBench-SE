@@ -25,7 +25,7 @@ from config import Config
 from utils.logger import logger
 from models.inference import InferenceResult
 from evaluation.retry import with_retry
-from providers.response_utils import build_openai_inference_result
+from providers.response_utils import build_openai_inference_result, _extract_cached_tokens
 from agents.tools import TOOL_SCHEMAS, execute_tool, set_repo_root
 
 
@@ -155,8 +155,11 @@ class CommandCodeProvider:
         max_tool_turns = max_tool_turns or Config.MAX_TOOL_TURNS
         t0 = time.perf_counter()
 
+        # Always sync the tool sandbox to THIS instance's repo root. Passing
+        # None resets it to the global sandbox base — never reuse a previous
+        # instance's root silently.
+        set_repo_root(repo_root)
         if repo_root:
-            set_repo_root(repo_root)
             system_content = (
                 "You are a software engineering agent. "
                 f"All file paths are RELATIVE TO the repository root: {repo_root}\n"
@@ -177,6 +180,42 @@ class CommandCodeProvider:
             {"role": "user", "content": prompt},
         ]
         recorded_calls: list[dict] = []
+        # Cumulative usage across ALL API turns: each turn re-sends the growing
+        # conversation, so summing is required or token/cost metrics undercount
+        # by 3-10x on tool-heavy runs.
+        usage_totals = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cached_tokens": 0,
+        }
+        api_turns = 0
+
+        def _accumulate_usage(resp) -> None:
+            nonlocal api_turns
+            api_turns += 1
+            u = getattr(resp, "usage", None)
+            if u is None:
+                return
+            pt = getattr(u, "prompt_tokens", 0) or 0
+            ct = getattr(u, "completion_tokens", 0) or 0
+            tt = getattr(u, "total_tokens", 0) or (pt + ct)
+            ca = _extract_cached_tokens(u)
+            usage_totals["prompt_tokens"] += pt
+            usage_totals["completion_tokens"] += ct
+            usage_totals["total_tokens"] += tt
+            usage_totals["cached_tokens"] += ca
+
+        def _finalize(resp) -> InferenceResult:
+            elapsed = time.perf_counter() - t0
+            result = build_openai_inference_result(
+                resp, role=role, model=self.model, elapsed=elapsed
+            )
+            # Override per-call usage with cumulative loop totals.
+            result.usage = dict(usage_totals)
+            result.tool_calls = recorded_calls
+            result.api_turns = max(1, api_turns)
+            return result
 
         try:
             for _ in range(max_tool_turns):
@@ -193,18 +232,14 @@ class CommandCodeProvider:
                 if extra:
                     kwargs["extra_body"] = extra
                 response = self.client.chat.completions.create(**kwargs)
+                _accumulate_usage(response)
                 choice = response.choices[0]
                 msg = choice.message
                 finish = getattr(choice, "finish_reason", "")
 
                 # No tool call -> this is the final answer.
                 if not getattr(msg, "tool_calls", None):
-                    elapsed = time.perf_counter() - t0
-                    result = build_openai_inference_result(
-                        response, role=role, model=self.model, elapsed=elapsed
-                    )
-                    result.tool_calls = recorded_calls
-                    return result
+                    return _finalize(response)
 
                 # Append assistant message (with tool_calls) to history.
                 messages.append(
@@ -255,12 +290,8 @@ class CommandCodeProvider:
                 "max_tokens": Config.MAX_TOKENS,
             }
             response = self.client.chat.completions.create(**kwargs_final)
-            elapsed = time.perf_counter() - t0
-            result = build_openai_inference_result(
-                response, role=role, model=self.model, elapsed=elapsed
-            )
-            result.tool_calls = recorded_calls
-            return result
+            _accumulate_usage(response)
+            return _finalize(response)
         except Exception as e:
             logger.error(f"CommandCode Tool Generate Error: {e}")
             raise
