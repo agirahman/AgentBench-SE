@@ -23,6 +23,7 @@ class InferenceResult:
     model: str = ""
     reasoning_content: str = ""
     timestamp: str = ""
+    tool_calls: list = field(default_factory=list)
 
     def __post_init__(self):
         if not self.timestamp:

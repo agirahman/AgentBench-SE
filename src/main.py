@@ -10,6 +10,7 @@ from providers.groq_provider import GroqProvider
 from providers.opencode_provider import OpenCodeProvider
 from providers.openrouter_provider import OpenRouterProvider
 from providers.deepseek_provider import DeepSeekProvider
+from providers.commandcode_provider import CommandCodeProvider
 from agents.registry import build_agent_team
 from strategies.direct_strategy import DirectStrategy
 from strategies.planning_strategy import PlanningStrategy
@@ -29,6 +30,7 @@ _PROVIDER_MODEL_MAP = {
     "openrouter": Config.OPENROUTER_MODEL,
     "opencode": Config.OPENCODE_MODEL,
     "deepseek": Config.DEEPSEEK_MODEL,
+    "commandcode": Config.COMMANDCODE_MODEL,
 }
 
 
@@ -42,7 +44,7 @@ def parse_args():
     parser.add_argument(
         "--provider",
         default="gemini",
-        choices=["gemini", "groq", "opencode", "openrouter", "deepseek"],
+        choices=["gemini", "groq", "opencode", "openrouter", "deepseek", "commandcode"],
         help="Provider AI (default: gemini)",
     )
     parser.add_argument(
@@ -221,13 +223,19 @@ def main():
         Provider = OpenRouterProvider
     elif args.provider == "deepseek":
         Provider = DeepSeekProvider
+    elif args.provider == "commandcode":
+        Provider = CommandCodeProvider
     else:
         Provider = OpenCodeProvider
 
     provider = Provider()
-    if not provider.health_check():
-        logger.error("Health check failed — aborting")
-        return
+    if hasattr(provider, "health_check"):
+        try:
+            if not provider.health_check():
+                logger.error("Health check failed — aborting")
+                return
+        except Exception as e:
+            logger.warning(f"Health check skipped/unavailable: {e}")
 
     from dataset_loader import DEFAULT_REPO_SPECS
     repo_specs = _parse_repo_specs(args.repo_spec) if args.repo_spec else DEFAULT_REPO_SPECS

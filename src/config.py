@@ -72,6 +72,13 @@ class Config:
     DEEPSEEK_THINKING = _get_env("DEEPSEEK_THINKING", "false").lower() in ("1", "true", "yes")
     DEEPSEEK_REASONING_EFFORT = _get_env("DEEPSEEK_REASONING_EFFORT", "low")
 
+    COMMANDCODE_API_KEY = _get_env("COMMANDCODE_API_KEY")
+    COMMANDCODE_BASE_URL = _get_env("COMMANDCODE_BASE_URL", "http://localhost:20128/v1")
+    COMMANDCODE_MODEL = _get_env("COMMANDCODE_MODEL", "cmd/deepseek/deepseek-v4-flash")
+    TOOLCALL_ENABLED = _get_env("TOOLCALL_ENABLED", "false").lower() in ("1", "true", "yes")
+    MAX_TOOL_TURNS = _get_int_env("MAX_TOOL_TURNS", 8)
+    TOOLCALL_REPO_DIR = _get_env("TOOLCALL_REPO_DIR", "datasets/repos")
+
     SOURCE_CONTEXT_ENABLED = _get_env("SOURCE_CONTEXT_ENABLED", "true").lower() in ("1", "true", "yes")
     SOURCE_CONTEXT_MAX_CHARS = _get_int_env("SOURCE_CONTEXT_MAX_CHARS", 40000)
     SOURCE_CONTEXT_MAX_FILES = _get_int_env("SOURCE_CONTEXT_MAX_FILES", 12)

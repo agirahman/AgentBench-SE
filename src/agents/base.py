@@ -21,19 +21,28 @@ class BaseAgent(ABC):
     def __init__(self, provider):
         self.provider = provider
         self.template = load_prompt_or_default(self.prompt_file, self.default_template)
+        # Tool calling is opt-in per agent; only the commandcode provider
+        # actually exercises it. Other providers ignore use_tools.
+        self.use_tools = False
 
     def act(self, task: AgentMessage, context: Blackboard) -> AgentResponse:
         context.bb_ops = []
         prompt = self._render(task, context)
         ops = list(context.bb_ops)
         context.bb_ops = []
-        inference = self.provider.generate(prompt, role=self.name)
+
+        if self.use_tools and hasattr(self.provider, "generate_with_tools"):
+            inference = self.provider.generate_with_tools(prompt, role=self.name)
+        else:
+            inference = self.provider.generate(prompt, role=self.name)
+
         response = AgentMessage(
             sender=self.name,
             receiver=task.sender,
             content=inference.response,
             kind="result",
             bb_ops=ops,
+            tool_calls=inference.tool_calls,
         )
         context.log(response)
         return AgentResponse(message=response, inference=inference)

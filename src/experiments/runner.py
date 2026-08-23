@@ -60,6 +60,26 @@ def _save_artifacts(
             for msg in messages:
                 f.write(json.dumps(msg.to_dict(), ensure_ascii=False) + "\n")
 
+    # Per-agent tool-call log: which tool, how many times, by which agent.
+    # Each inference carries tool_calls (empty for non-tool agents).
+    tool_lines = []
+    for inf in inferences:
+        if not inf.role:
+            continue
+        for call in getattr(inf, "tool_calls", []) or []:
+            tool_lines.append(
+                {
+                    "agent": inf.role,
+                    "tool": call.get("name"),
+                    "arguments": call.get("arguments"),
+                    "result_preview": (call.get("result") or "")[:2000],
+                }
+            )
+    if tool_lines:
+        with (art_dir / "tool_calls.jsonl").open("w", encoding="utf-8") as f:
+            for line in tool_lines:
+                f.write(json.dumps(line, ensure_ascii=False) + "\n")
+
 
 def _resume_key(instance_id: str, model: str, thinking: bool) -> str:
     """Composite key so resume is safe across configs (model/thinking).
