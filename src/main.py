@@ -49,6 +49,13 @@ def parse_args():
         help="Provider AI (default: gemini)",
     )
     parser.add_argument(
+        "--strategies",
+        nargs="+",
+        choices=["direct", "planning", "review"],
+        default=["direct", "planning", "review"],
+        help="Strategi yang dijalankan (default: semua 3)",
+    )
+    parser.add_argument(
         "--rate-limit",
         type=float,
         default=1.5,
@@ -252,12 +259,15 @@ def main():
         for name, agent in agent_team.items()
     ]
 
-    strategies = {
+    all_strategies = {
         "direct": DirectStrategy(provider),
         "planning": PlanningStrategy(provider),
         "review": ReviewStrategy(provider),
     }
+    # Only instantiate/run the strategies selected via --strategies.
+    strategies = {name: all_strategies[name] for name in args.strategies}
     strategy_names = list(strategies.keys())
+    logger.info(f"Strategies selected: {strategy_names}")
 
     Path(args.output).mkdir(parents=True, exist_ok=True)
 
