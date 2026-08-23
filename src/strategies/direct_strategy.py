@@ -10,14 +10,19 @@ from evaluation.cost import CostCalculator
 
 class DirectStrategy:
 
+    strategy_name = "direct"
+
     def __init__(self, provider):
         self.provider = provider
         self.team = build_agent_team(provider)
         self.calculator = CostCalculator()
 
     def run(self, issue: Issue) -> tuple[Patch, ExperimentResult]:
+        if hasattr(self.provider, "user_id"):
+            self.provider.user_id = f"{self.strategy_name}_{issue.instance_id.replace('__', '-')}"
         bb = Blackboard(issue=issue)
-        task = AgentMessage(sender="orchestrator", receiver="direct", content=issue.to_prompt())
+        task = AgentMessage(sender="orchestrator", receiver="direct", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_issue"])
+        bb.log(task)
         resp = self.team["direct"].act(task, bb)
 
         run = InferenceRun(

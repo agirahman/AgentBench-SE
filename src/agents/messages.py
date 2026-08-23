@@ -8,6 +8,7 @@ class AgentMessage:
     receiver: str
     content: str
     kind: str = "task"
+    bb_ops: list[str] = field(default_factory=list)
     timestamp: str = ""
 
     def __post_init__(self):
@@ -20,5 +21,6 @@ class AgentMessage:
             "receiver": self.receiver,
             "kind": self.kind,
             "content": self.content,
+            "bb_ops": self.bb_ops,
             "timestamp": self.timestamp,
         }

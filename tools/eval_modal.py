@@ -4,15 +4,29 @@ Modal Cloud evaluation wrapper untuk SWE-bench predictions.
 
 Usage:
     python tools/eval_modal.py results/EXP-20260717-009/predictions/direct.jsonl
+    python tools/eval_modal.py results/EXP-20260717-009/predictions/direct.jsonl --force
+
+run_id dihasilkan otomatis: modal-<strategy>-<EXP-YYYYMMDD-NNN> (taut ke hasil phase 1).
+Gunakan --force untuk mengevaluasi ulang (default: skip jika *_results.json sudah ada).
 """
+
+import os
+import sys
+
+# Windows: re-exec in UTF-8 mode so swebench's log writes (cp1252 default) don't crash
+# on unicode test output (e.g. box-drawing chars from pytest). PEP 540.
+if __name__ == "__main__" and sys.platform == "win32" and os.environ.get("PYTHONUTF8") != "1":
+    os.environ["PYTHONUTF8"] = "1"
+    os.execv(sys.executable, [sys.executable, *sys.argv])
 
 import io
 import json
-import sys
 from pathlib import Path
+from typing import Optional
 
-# Fix Windows console encoding for Unicode (Modal rich output)
-if sys.platform == "win32":
+# Fix Windows console encoding for Unicode (Modal rich output).
+# Only applied when running as a script so imports (e.g. from tests) are side-effect free.
+if sys.platform == "win32" and __name__ == "__main__":
     import types
     resource = types.ModuleType("resource")
     setattr(resource, "getrlimit", lambda *_: (0, 0))
@@ -27,15 +41,124 @@ from swebench.harness.utils import get_predictions_from_file, load_swebench_data
 from swebench.harness.constants import KEY_INSTANCE_ID, KEY_MODEL
 
 
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python tools/eval_modal.py <predictions_jsonl_path>")
-        sys.exit(1)
+def build_run_id(predictions_path: Path, exp_id: Optional[str] = None) -> str:
+    """Build a unique Modal run_id linking phase 2 (eval) to phase 1 (experiment).
 
-    predictions_path = Path(sys.argv[1])
+    Format: ``modal-<strategy>-<EXP-YYYYMMDD-NNN>`` (e.g. modal-direct-EXP-20260819-002)
+    so eval results and phase-1 experiment results share the same EXP id.
+
+    The experiment id is derived from the predictions folder layout
+    ``results/<EXP-ID>/predictions/<strategy>.jsonl``. ``exp_id`` overrides it.
+    """
+    strategy = predictions_path.stem
+    if exp_id is None:
+        exp_dir = predictions_path.parent.parent.name
+        exp_id = exp_dir if exp_dir.startswith("EXP-") else ""
+    if exp_id:
+        return f"modal-{strategy}-{exp_id}"
+    return f"modal-{strategy}"
+
+
+def extract_failure_reason(log_path: Path) -> Optional[str]:
+    """Extract a human-readable failure reason from a run_instance.log."""
+    if not Path(log_path).exists():
+        return None
+
+    text = Path(log_path).read_text(encoding="utf-8", errors="replace")
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if "Patch Apply Failed" in line:
+            detail_lines = []
+            for candidate in lines[i + 1:i + 6]:
+                candidate = candidate.strip()
+                if not candidate or "Traceback" in candidate:
+                    continue
+                if candidate.startswith(("File ", "swebench.")):
+                    continue
+                detail_lines.append(candidate)
+            detail = " | ".join(detail_lines) if detail_lines else "unknown"
+            return f"APPLY_PATCH_FAIL: {detail}"
+        if "Test runtime" in line and ("timeout" in line.lower() or ">" in line):
+            return "TESTS_TIMEOUT"
+    return None
+
+
+def load_instance_report(log_dir: Path, inst_id: str) -> dict:
+    """Read report.json for one instance, keyed by instance_id."""
+    report_path = Path(log_dir) / inst_id / "report.json"
+    if not report_path.exists():
+        return {}
+    try:
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data.get(inst_id, {})
+
+
+def enrich_instance_result(inst_id: str, resolved: bool, log_dir: Optional[Path]) -> dict:
+    """Build a result dict with patch_applied and failure_reason."""
+    report = load_instance_report(log_dir, inst_id) if log_dir else {}
+    patch_applied = bool(report.get("patch_successfully_applied", resolved))
+    failure_reason = None
+    if not resolved:
+        if log_dir:
+            failure_reason = extract_failure_reason(Path(log_dir) / inst_id / "run_instance.log")
+        if failure_reason is None:
+            if not report:
+                failure_reason = "no report"
+            elif not report.get("patch_successfully_applied", False):
+                failure_reason = "APPLY_PATCH_FAIL"
+            else:
+                tests_status = report.get("tests_status") or {}
+                failed = [
+                    test
+                    for key in ("FAIL_TO_PASS", "PASS_TO_PASS")
+                    for test in (tests_status.get(key) or {}).get("failure", [])
+                ]
+                if failed:
+                    failure_reason = "TESTS_ERROR"
+                else:
+                    failure_reason = "unresolved"
+    return {
+        "instance_id": inst_id,
+        "resolved": bool(resolved),
+        "patch_applied": patch_applied,
+        "failure_reason": failure_reason,
+    }
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Modal Cloud evaluation wrapper untuk SWE-bench predictions."
+    )
+    parser.add_argument("predictions", type=Path, help="Path ke predictions/<strategy>.jsonl")
+    parser.add_argument(
+        "--exp-id",
+        default=None,
+        help="Override eksperimen id pada run_id (default: dari nama folder EXP-* parent predictions).",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Timpa <strategy>_results.json yang sudah ada (default: skip jika sudah ada).",
+    )
+    args = parser.parse_args()
+
+    predictions_path = args.predictions
     if not predictions_path.exists():
         print(f"Error: {predictions_path} not found")
         sys.exit(1)
+
+    run_id = build_run_id(predictions_path, exp_id=args.exp_id)
+
+    output_file = predictions_path.parent / f"{predictions_path.stem}_results.json"
+    if output_file.exists() and not args.force:
+        print(
+            f"[SKIP] {output_file} sudah ada — jalankan ulang dengan --force "
+            f"jika ingin mengevaluasi ulang (run_id: {run_id})."
+        )
+        sys.exit(0)
 
     # Validate Modal credentials
     try:
@@ -49,7 +172,7 @@ def main():
     print(f"Loading predictions from {predictions_path}...")
     predictions_list = get_predictions_from_file(
         str(predictions_path),
-        dataset_name="princeton-nlp/SWE-bench_Lite",
+        dataset_name="SWE-bench/SWE-bench_Lite",
         split="test",
     )
     print(f"Loaded {len(predictions_list)} predictions")
@@ -63,7 +186,7 @@ def main():
     # Load full dataset
     print("Loading SWE-bench Lite dataset...")
     full_dataset = load_swebench_dataset(
-        name="princeton-nlp/SWE-bench_Lite",
+        name="SWE-bench/SWE-bench_Lite",
         split="test",
     )
 
@@ -73,9 +196,6 @@ def main():
     # Filter dataset for our instances
     instances = [inst for inst in full_dataset if inst[KEY_INSTANCE_ID] in instance_ids]
     print(f"Matched {len(instances)} instances from dataset")
-
-    # Generate run ID
-    run_id = f"modal-{predictions_path.stem}"
 
     # Run evaluation
     print(f"Running Modal evaluation ({len(instances)} instances)...")
@@ -91,15 +211,13 @@ def main():
     # Parse results from Modal summary report file
     # Modal writes "{model_name}.{run_id}.json" in CWD
     model_name = predictions_list[0].get(KEY_MODEL, "model").replace("/", "__").replace(":", "_")
-    run_id_for_glob = f"modal-{predictions_path.stem}"
-    summary_files = list(Path(".").glob(f"{model_name}.{run_id_for_glob}.json"))
-    if not summary_files:
-        summary_files = list(Path(".").glob(f"{model_name}.modal-*.json"))
-    if not summary_files:
-        summary_files = list(Path(".").glob("*.modal-*.json"))
+    summary_files = list(Path(".").glob(f"{model_name}.{run_id}.json"))
 
     resolved_count = 0
     results = []
+    from swebench.harness.constants import RUN_EVALUATION_LOG_DIR
+    log_dir = Path(RUN_EVALUATION_LOG_DIR) / run_id / model_name
+
     if summary_files:
         summary_file = summary_files[-1]
         print(f"Reading summary from {summary_file}")
@@ -112,31 +230,23 @@ def main():
         for pred in predictions_list:
             inst_id = pred[KEY_INSTANCE_ID]
             if inst_id in resolved_ids:
-                results.append({"instance_id": inst_id, "resolved": True})
+                results.append(enrich_instance_result(inst_id, True, log_dir))
                 resolved_count += 1
             elif inst_id in error_ids:
-                results.append({"instance_id": inst_id, "resolved": False, "error": "eval error"})
+                results.append(enrich_instance_result(inst_id, False, log_dir))
             else:
-                results.append({"instance_id": inst_id, "resolved": False})
+                results.append(enrich_instance_result(inst_id, False, log_dir))
     else:
         # Fallback: look for report.json in local logs (if Modal synced them)
-        from swebench.harness.constants import RUN_EVALUATION_LOG_DIR
-        model_name = predictions_list[0].get("model_name_or_path", "None").replace("/", "__")
-        log_dir = Path(RUN_EVALUATION_LOG_DIR) / run_id / model_name
-
         total_count = 0
         for pred in predictions_list:
             inst_id = pred[KEY_INSTANCE_ID]
             total_count += 1
-            report_path = log_dir / inst_id / "report.json"
-            if report_path.exists():
-                report = json.loads(report_path.read_text())
-                resolved = report.get(inst_id, {}).get("resolved", False)
-                results.append({"instance_id": inst_id, "resolved": resolved})
-                if resolved:
-                    resolved_count += 1
-            else:
-                results.append({"instance_id": inst_id, "resolved": False, "error": "report not found"})
+            report = load_instance_report(log_dir, inst_id)
+            resolved = bool(report.get("resolved", False))
+            results.append(enrich_instance_result(inst_id, resolved, log_dir))
+            if resolved:
+                resolved_count += 1
 
     success_rate = (resolved_count / total_count * 100) if total_count > 0 else 0
 
@@ -151,7 +261,6 @@ def main():
     print("=" * 60)
 
     # Save results
-    output_file = predictions_path.parent / f"{predictions_path.stem}_results.json"
     with open(output_file, "w") as f:
         json.dump({
             "predictions_file": str(predictions_path),

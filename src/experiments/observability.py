@@ -1,8 +1,19 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from config import Config
 from models.issue import Issue
+from models.result import ExperimentResult
+
+
+def _result_status(result: ExperimentResult) -> str:
+    if result.patch_status == "TIMEOUT":
+        return "TIMEOUT"
+    if result.patch_status in ("VALID", "NORMALIZE") and result.execution.patch.strip():
+        return "PATCH_GENERATED"
+    return "EMPTY_PATCH"
 
 
 def build_experiment_manifest(
@@ -12,9 +23,15 @@ def build_experiment_manifest(
     provider_name: str,
     experiment_id: str,
     output_dir: str,
+    results: list[ExperimentResult],
     agents: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """Build a structured manifest describing the experiment dataset and execution setup."""
+    """Build a machine-readable execution manifest (shipping receipt).
+
+    Mencatat metadata hasil eksekusi: ringkasan, hasil per-issue, dan lokasi
+    artefak. Config input (blueprint) ada di ``experiment.yaml`` — tidak
+    diduplikasi di sini.
+    """
     difficulty_counts = {"easy": 0, "medium": 0, "hard": 0, "unknown": 0}
     repo_counts: dict[str, int] = {}
 
@@ -23,22 +40,72 @@ def build_experiment_manifest(
         difficulty_counts[difficulty] = difficulty_counts.get(difficulty, 0) + 1
         repo_counts[issue.repo] = repo_counts.get(issue.repo, 0) + 1
 
+    status_counts = {"PATCH_GENERATED": 0, "EMPTY_PATCH": 0, "TIMEOUT": 0}
+    for r in results:
+        status_counts[_result_status(r)] += 1
+
+    model = results[0].model if results else provider_name
+
+    result_entries = []
+    for r in results:
+        status = _result_status(r)
+        result_entries.append(
+            {
+                "instance_id": r.instance_id,
+                "strategy": r.strategy,
+                "model": r.model,
+                "status": status,
+                "difficulty": r.difficulty,
+                "tokens": {
+                    "prompt": r.execution.prompt_tokens,
+                    "cached_input": r.cost.cached_input_tokens,
+                    "regular_input": r.cost.regular_input_tokens,
+                    "completion": r.execution.completion_tokens,
+                    "total": r.execution.total_tokens,
+                },
+                "execution_time_seconds": round(r.execution.execution_time, 3),
+                "cost": {
+                    "total_usd": round(r.cost.total_cost_usd, 6),
+                    "total_idr": round(r.cost.total_cost_idr, 2),
+                    "total_usd_off_peak": round(r.cost.total_cost_usd, 6),
+                    "total_usd_peak": round(r.cost.peak_total_cost_usd, 6),
+                },
+                "artifacts": {
+                    "generated_patch_path": (
+                        f"patches/{r.instance_id}_{r.strategy}.txt"
+                        if status == "PATCH_GENERATED"
+                        else ""
+                    ),
+                    "summary_path": (
+                        f"artifacts/{r.instance_id}/{r.strategy}/summary.json"
+                    ),
+                },
+            }
+        )
+
     manifest = {
-        "experiment": {
-            "id": experiment_id,
-            "output_dir": output_dir,
-        },
+        "experiment_id": experiment_id,
+        "execution_timestamp": datetime.now(timezone.utc).isoformat(),
         "provider": {
             "name": provider_name,
+            "model": model,
         },
         "dataset": {
-            "name": "princeton-nlp/SWE-bench_Lite",
+            "name": "SWE-bench/SWE-bench_Lite",
             "n_issues": len(issues),
             "repo_counts": repo_counts,
             "difficulty_counts": {k: v for k, v in difficulty_counts.items() if v > 0},
         },
         "strategies": strategies,
         "agents": agents or [],
+        "summary": {
+            "total_issues_processed": len(results),
+            "patch_generated_count": status_counts["PATCH_GENERATED"],
+            "empty_patch_count": status_counts["EMPTY_PATCH"],
+            "timeout_count": status_counts["TIMEOUT"],
+            "execution_status": "COMPLETED",
+        },
+        "results": result_entries,
     }
     return manifest
 

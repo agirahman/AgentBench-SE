@@ -26,14 +26,20 @@ class OpenRouterProvider:
     def generate(self, prompt: str, role: str = "") -> InferenceResult:
         t0 = time.perf_counter()
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=Config.TEMPERATURE,
-                timeout=60,
-                max_tokens=8192,
-                # max_tokens=4096,
-            )
+            kwargs: dict = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": Config.TEMPERATURE,
+                "timeout": Config.API_TIMEOUT,
+                "max_tokens": Config.MAX_TOKENS,
+            }
+            if Config.OPENROUTER_REASONING:
+                kwargs["extra_body"] = {
+                    "reasoning": {"effort": Config.OPENROUTER_REASONING_EFFORT}
+                }
+            else:
+                kwargs["extra_body"] = {"reasoning": {"enabled": False}}
+            response = self.client.chat.completions.create(**kwargs)
 
             elapsed = time.perf_counter() - t0
             result = build_openai_inference_result(

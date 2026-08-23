@@ -10,24 +10,32 @@ from evaluation.cost import CostCalculator
 
 class PlanningStrategy:
 
+    strategy_name = "planning"
+
     def __init__(self, provider):
         self.provider = provider
         self.team = build_agent_team(provider)
         self.calculator = CostCalculator()
 
     def run(self, issue: Issue) -> tuple[Patch, ExperimentResult]:
+        if hasattr(self.provider, "user_id"):
+            self.provider.user_id = f"{self.strategy_name}_{issue.instance_id.replace('__', '-')}"
         bb = Blackboard(issue=issue)
         inferences = []
 
-        plan_task = AgentMessage(sender="orchestrator", receiver="planner", content=issue.to_prompt())
+        plan_task = AgentMessage(sender="orchestrator", receiver="planner", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_issue"])
+        bb.log(plan_task)
         plan_resp = self.team["planner"].act(plan_task, bb)
         bb.plan = plan_resp.inference.response
         inferences.append(plan_resp.inference)
+        bb.log(AgentMessage(sender="orchestrator", receiver="planner", kind="task", content="", bb_ops=["save_plan"]))
 
-        exec_task = AgentMessage(sender="planner", receiver="executor", content=issue.to_prompt())
+        exec_task = AgentMessage(sender="orchestrator", receiver="executor", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_plan"])
+        bb.log(exec_task)
         exec_resp = self.team["executor"].act(exec_task, bb)
         bb.patch = exec_resp.inference.response
         inferences.append(exec_resp.inference)
+        bb.log(AgentMessage(sender="orchestrator", receiver="executor", kind="task", content="", bb_ops=["save_patch"]))
 
         run = InferenceRun(
             patch=exec_resp.inference.response,

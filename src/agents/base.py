@@ -23,13 +23,17 @@ class BaseAgent(ABC):
         self.template = load_prompt_or_default(self.prompt_file, self.default_template)
 
     def act(self, task: AgentMessage, context: Blackboard) -> AgentResponse:
+        context.bb_ops = []
         prompt = self._render(task, context)
+        ops = list(context.bb_ops)
+        context.bb_ops = []
         inference = self.provider.generate(prompt, role=self.name)
         response = AgentMessage(
             sender=self.name,
             receiver=task.sender,
             content=inference.response,
             kind="result",
+            bb_ops=ops,
         )
         context.log(response)
         return AgentResponse(message=response, inference=inference)

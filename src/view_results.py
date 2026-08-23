@@ -6,9 +6,11 @@ import pandas as pd
 from evaluation.statistics import (
     compute_avg_time_per_inference,
     compute_cost_per_success,
+    compute_resolution_rate,
     compute_success_rate,
     compute_summary,
 )
+from evaluation.significance import cmd_significance
 
 
 DEFAULT_CSV = "results/csv/experiment_results.csv"
@@ -16,7 +18,13 @@ DEFAULT_CSV = "results/csv/experiment_results.csv"
 
 def load_data(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
-    df["error"] = df["error"].fillna("")
+    # Eval-phase CSVs (results/EXP-*/eval/results.csv) have no "error"
+    # column; they use "resolved"/"failure_reason" instead. Tolerize so the
+    # same tool works on both generation and eval schemas.
+    if "error" in df.columns:
+        df["error"] = df["error"].fillna("")
+    else:
+        df["error"] = ""
     return df
 
 
@@ -31,7 +39,7 @@ def build_strategy_difficulty_summary(df: pd.DataFrame) -> pd.DataFrame:
             execution_time=("execution_time", "mean"),
             total_tokens=("total_tokens", "sum"),
             cost_usd=("cost_usd", "sum"),
-            success_rate=("success", "mean"),
+            success_rate=("generated", "mean"),
         )
         .reset_index()
     )
@@ -48,8 +56,12 @@ def cmd_summary(df: pd.DataFrame):
     print(summary.to_string())
     
     sr = compute_success_rate(df)
-    print("\n=== Success Rate ===")
+    print("\n=== Patch Generation Success Rate (patch produced, NOT resolved) ===")
     print(sr.to_string())
+
+    rr = compute_resolution_rate(df)
+    print("\n=== Resolution Rate (actual SWE-bench resolved, from Modal eval) ===")
+    print(rr.to_string())
     
     ati = compute_avg_time_per_inference(df)
     print("\n=== Avg Time per Inference ===")
@@ -131,6 +143,11 @@ def main():
         help="Show aggregated metrics by strategy and difficulty",
     )
 
+    sub.add_parser(
+        "significance",
+        help="Paired McNemar tests + Wilson 95% CI (needs 'resolved' column)",
+    )
+
     patch_p = sub.add_parser("patch", help="Show patch preview for an issue")
     patch_p.add_argument("patch_id", help="Instance ID (e.g. django__django-10914)")
     patch_p.add_argument("--strategy", default=None, help="Filter by strategy")
@@ -152,6 +169,10 @@ def main():
         cmd_cost_per_success(df)
     elif args.command == "strategy_difficulty":
         cmd_strategy_difficulty(df)
+    elif args.command == "significance":
+        cmd_significance(df)
+    elif args.command == "significance":
+        cmd_significance(df)
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ def test_load_existing_ids_skips_invalid_json_lines(tmp_path):
 
     result = _load_existing_ids(str(jsonl_path))
 
-    assert result == {"A", "B"}
+    assert result == {"A||False", "B||False"}
 
 
 def test_append_jsonl_writes_json_lines(tmp_path):

@@ -9,4 +9,5 @@ class DirectAgent(BaseAgent):
     default_template = "{{issue}}\n"
 
     def _render(self, task: AgentMessage, context: Blackboard) -> str:
+        context.bb_ops.append("get_issue")
         return self.template.replace("{{issue}}", task.content)

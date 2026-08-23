@@ -6,12 +6,16 @@ Your task is to fix the following bug.
 
 Analyze the root cause and provide a fix.
 
+If source code is provided below under "SOURCE CODE (base commit)", base your fix on those exact files and line numbers. Use the exact file paths shown in the file tree and the line numbers shown in the selected files when writing your patch hunk headers. Do NOT guess file paths or line numbers — only reference files and lines that are actually present in the provided source code.
+
 Output ONLY valid JSON. Do NOT wrap in markdown code blocks. Do NOT add any text before or after. Use this exact format:
 {
   "root_cause": "<one paragraph explanation>",
   "fix_strategy": "<one paragraph approach>",
   "patch": "diff --git a/file.py b/file.py\n--- a/file.py\n+++ b/file.py\n@@ -N,M +P,Q @@\n context_line\n+added_line\n-removed_line"
 }
+
+Keep "root_cause", "fix_strategy", and any other non-patch fields SHORT (1-2 sentences each) so that the "patch" field has room to be complete. The patch must never be truncated.
 
 CRITICAL RULES FOR THE PATCH FIELD:
 1. Every hunk header @@ -N,M +P,Q @@ MUST match the EXACT count of lines below it.

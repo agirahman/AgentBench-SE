@@ -140,10 +140,9 @@ Aggregation di akhir run:
 
 ## 10. Evaluasi SWE-bench
 
-Downstream — di luar codebase ini:
-- `tools/EVAL_INSTRUCTIONS.md`: panduan WSL2.
-- `tools/setup_and_eval.sh`: setup venv + Docker + eval otomatis.
-- `tools/run_eval.sh`: eval 3 strategi sekaligus.
+Downstream:
+- `tools/eval_modal.py`: eval predictions via Modal Cloud (run_id `modal-<strategi>-<EXP-ID>`).
+- `src/evaluation/report_generator.py`: gabung hasil phase 1 (`results.csv`) + `predictions/*_results.json` → laporan `eval/`.
 
 ## 11. Test Suite
 

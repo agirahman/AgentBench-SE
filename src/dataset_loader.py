@@ -24,7 +24,7 @@ def normalize_repo_specs(repo_specs: Iterable[tuple[str, int]] | dict[str, int] 
 
 
 def load_swe_bench_lite() -> list[dict]:
-    ds = load_dataset("princeton-nlp/SWE-bench_Lite", split="test")
+    ds = load_dataset("SWE-bench/SWE-bench_Lite", split="test")
     return [dict(row) for row in ds]
 
 

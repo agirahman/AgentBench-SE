@@ -1,5 +1,7 @@
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+testpaths = ["tests"]
+norecursedirs = ["datasets", "results", ".venv", "node_modules", ".git", "docs"]
 
 [tool.pyright]
 extraPaths = ["src"]

@@ -11,6 +11,7 @@ class Blackboard:
     patch: str = ""
     feedback: str = ""
     revision: int = 0
+    bb_ops: list[str] = field(default_factory=list)
     history: list[AgentMessage] = field(default_factory=list)
 
     def log(self, message: AgentMessage) -> None:

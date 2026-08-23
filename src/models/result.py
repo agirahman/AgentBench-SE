@@ -51,6 +51,14 @@ class CostSummary:
     total_cost_usd: float
     total_cost_idr: float
     pricing_version: str = ""
+    cached_input_tokens: int = 0
+    regular_input_tokens: int = 0
+    cached_input_cost_usd: float = 0.0
+    regular_input_cost_usd: float = 0.0
+    peak_total_cost_usd: float = 0.0
+    peak_total_cost_idr: float = 0.0
+    actual_cost_usd: float = 0.0
+    actual_cost_idr: float = 0.0
 
 
 @dataclass
@@ -82,3 +90,5 @@ class ExperimentResult:
     evaluation: EvaluationResult
     difficulty: str = ""
     patch_status: str = "VALID"
+    thinking: bool = False
+    max_tokens: int = 0

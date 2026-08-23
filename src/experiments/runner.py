@@ -3,7 +3,7 @@ import os
 import random
 import time
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
@@ -61,8 +61,20 @@ def _save_artifacts(
                 f.write(json.dumps(msg.to_dict(), ensure_ascii=False) + "\n")
 
 
+def _resume_key(instance_id: str, model: str, thinking: bool) -> str:
+    """Composite key so resume is safe across configs (model/thinking).
+
+    Item 8c: a bare ``instance_id`` match would wrongly skip an issue when the
+    SAME experiment folder is reused with a different model or thinking flag.
+    """
+    return f"{instance_id}|{model}|{thinking}"
+
+
 def _load_existing_ids(jsonl_path: str) -> set[str]:
-    """Baca file jsonl yang sudah ada, return set instance_id yang sudah done."""
+    """Baca file jsonl yang sudah ada, return set composite resume keys.
+
+    Each key is ``instance_id|model|thinking`` (see ``_resume_key``).
+    """
     ids = set()
     if not os.path.exists(jsonl_path):
         return ids
@@ -73,8 +85,12 @@ def _load_existing_ids(jsonl_path: str) -> set[str]:
                 continue
             try:
                 entry = json.loads(line)
-                if "instance_id" in entry:
-                    ids.add(entry["instance_id"])
+                iid = entry.get("instance_id")
+                if iid is None:
+                    continue
+                model = entry.get("model_name_or_path", "")
+                thinking = entry.get("thinking", False)
+                ids.add(_resume_key(iid, model, thinking))
             except json.JSONDecodeError:
                 continue
     return ids
@@ -143,8 +159,12 @@ def run_experiments(
         for name, strategy in strategies.items():
             done += 1
 
-            # Resume skip1
-            if issue.instance_id in done_ids[name]:
+            # Resume skip — composite key (instance_id|model|thinking) so a
+            # different config in the same experiment folder is not wrongly skipped.
+            expected_key = _resume_key(
+                issue.instance_id, Config.DEEPSEEK_MODEL, Config.DEEPSEEK_THINKING
+            )
+            if expected_key in done_ids[name]:
                 skipped += 1
                 logger.info(f"[{done}/{total}] SKIP (resume) {name} on {issue.instance_id}")
                 continue
@@ -159,10 +179,13 @@ def run_experiments(
                 logger.info(f"  → API call to {provider_name}...")
                 patch, result = strategy.run(issue)
                 result.difficulty = issue.difficulty
+                result.thinking = Config.DEEPSEEK_THINKING
+                result.max_tokens = Config.MAX_TOKENS
                 elapsed = time.time() - t0
-                result.evaluation.timestamp = datetime.utcnow().isoformat()
+                result.evaluation.timestamp = datetime.now(timezone.utc).isoformat()
 
                 # --- Truncated JSON protection ---
+                last_finish = ""
                 try:
                     last_finish = (
                         result.execution.inferences[-1].finish_reason
@@ -178,13 +201,32 @@ def run_experiments(
                 result.patch_status = patch_status
                 all_results.append(result)
 
+                if last_finish == "length":
+                    logger.warning(
+                        f"  ⚠ Response truncated (finish_reason='length') for {issue.instance_id} ({name}) "
+                        f"— patch_status={patch_status}, patch_len={len(diff)}, "
+                        f"response_len={len(patch.response)}"
+                    )
+
                 # --- Savepoint append: per-strategy .jsonl ---
+                # Last-resort fallback (Item 8a): if extract_diff failed but the
+                # raw response still contains a unified diff, ship the raw text
+                # so a valid patch is not silently dropped as "no report".
+                model_patch = diff if diff.strip() else ""
+                if not model_patch and "diff --git" in patch.response:
+                    logger.warning(
+                        f"  ⚠ extract_diff failed but raw response has a diff for "
+                        f"{issue.instance_id} ({name}) — using raw response as patch"
+                    )
+                    model_patch = patch.response
                 pred_entry = {
                     "instance_id": issue.instance_id,
-                    "model_patch": diff if diff.strip() else "",
+                    "model_patch": model_patch,
                     "model_name_or_path": result.model,
                     "strategy": name,
                     "patch_status": patch_status,
+                    "thinking": result.thinking,
+                    "max_tokens": result.max_tokens,
                 }
                 strategy_jsonl = str(pred_dir / f"{name}.jsonl")
                 _append_jsonl(strategy_jsonl, pred_entry)
@@ -194,14 +236,16 @@ def run_experiments(
                 agg_jsonl = str(pred_dir / "predictions.jsonl")
                 _append_jsonl(agg_jsonl, pred_entry)
 
-                if not diff.strip():
+                if not model_patch.strip():
                     logger.warning(
                         f"  ⚠ Patch empty/invalid for {issue.instance_id} ({name}) — "
                         f"recorded as empty ({patch_status})"
                     )
                 else:
+                    # Persist exactly what is sent to the Modal evaluator,
+                    # not the raw (possibly JSON-wrapped) response.
                     Path(f"{exp_dir}/patches/{issue.instance_id}_{name}.txt").write_text(
-                        patch.response, encoding="utf-8"
+                        model_patch, encoding="utf-8"
                     )
                     _save_artifacts(
                         str(exp_dir),
@@ -286,9 +330,12 @@ def run_experiments(
     export_statistics_json(df, stats_path, pricing=pricing, usd_idr_rate=Config.USD_IDR_RATE)
     logger.success(f"Statistics exported: {stats_path}")
 
-    summary_path = f"{exp_dir}/summary.md"
+    # NOTE: this is the PRE-EVAL generation report (patch generation only),
+    # NOT the resolved rate. The authoritative resolved rate is eval/summary.md
+    # produced by report_generator from Modal results. See PLAN.md Item 5.
+    summary_path = f"{exp_dir}/generation_report.md"
     generate_summary_md(df, summary_path, pricing=pricing, usd_idr_rate=Config.USD_IDR_RATE)
-    logger.success(f"Summary markdown exported: {summary_path}")
+    logger.success(f"Generation report (PRE-EVAL) exported: {summary_path}")
 
     manifest = build_experiment_manifest(
         issues=issues,
@@ -296,6 +343,7 @@ def run_experiments(
         provider_name=provider_name,
         experiment_id=exp_id,
         output_dir=str(exp_dir),
+        results=all_results,
         agents=agents,
     )
     manifest_path = f"{exp_dir}/manifest.json"

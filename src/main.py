@@ -1,4 +1,7 @@
 import argparse
+import json
+import sys
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -6,6 +9,7 @@ from providers.gemini_provider import GeminiProvider
 from providers.groq_provider import GroqProvider
 from providers.opencode_provider import OpenCodeProvider
 from providers.openrouter_provider import OpenRouterProvider
+from providers.deepseek_provider import DeepSeekProvider
 from agents.registry import build_agent_team
 from strategies.direct_strategy import DirectStrategy
 from strategies.planning_strategy import PlanningStrategy
@@ -15,6 +19,17 @@ from dataset_loader import select_issues
 from utils.logger import logger
 from config import Config
 from evaluation.cost import PricingTable
+
+# Map CLI --provider flag -> corresponding Config model attribute.
+# Any provider not listed here triggers an explicit exit (no silent fallback),
+# so experiment.yaml never gets a wrong model name like a previous bug did.
+_PROVIDER_MODEL_MAP = {
+    "gemini": Config.GEMINI_MODEL,
+    "groq": Config.GROQ_MODEL,
+    "openrouter": Config.OPENROUTER_MODEL,
+    "opencode": Config.OPENCODE_MODEL,
+    "deepseek": Config.DEEPSEEK_MODEL,
+}
 
 
 def parse_args():
@@ -27,7 +42,7 @@ def parse_args():
     parser.add_argument(
         "--provider",
         default="gemini",
-        choices=["gemini", "groq", "opencode", "openrouter"],
+        choices=["gemini", "groq", "opencode", "openrouter", "deepseek"],
         help="Provider AI (default: gemini)",
     )
     parser.add_argument(
@@ -63,39 +78,65 @@ def _save_experiment_config(
     strategy_names: list[str],
     experiment_id: str = "",
     agents: list[dict[str, str]] | None = None,
+    repos: dict[str, int] | None = None,
 ) -> None:
     """Simpan experiment.yaml untuk reproducibility (Kritik #8)."""
-    model_name = (
-        Config.GEMINI_MODEL if args.provider == "gemini"
-        else Config.GROQ_MODEL if args.provider == "groq"
-        else Config.OPENROUTER_MODEL if args.provider == "openrouter"
-        else Config.OPENCODE_MODEL
-    )
+    model_name = _PROVIDER_MODEL_MAP.get(args.provider)
+    if not model_name:
+        logger.error(
+            f"Model for provider '{args.provider}' not set yet — "
+            f"check Config / .env (DEEPSEEK_MODEL, GEMINI_MODEL, etc.)"
+        )
+        sys.exit(1)
     pricing = PricingTable.get(model_name) or {}
+    off_peak = PricingTable.rates_for(model_name, "off_peak")
+    peak = PricingTable.rates_for(model_name, "peak")
     config = {
-        "experiment": {
-            "name": "AgentBench-SE Experiment",
-            "id": experiment_id,
-            "date": datetime.now(timezone.utc).isoformat(),
-            "researcher": "Agi Rahman Setiadi",
-            "institution": "Universitas Negeri Jakarta",
+        "experiment_meta": {
+            "project": "Skripsi AI Agent SWE-bench Lite",
+            "institution": {
+                "university": "Universitas Negeri Jakarta",
+                "faculty": "Fakultas Teknik",
+                "department": "Sistem dan Teknologi Informasi",
+            },
+            "researcher": {
+                "name": "Agi Rahman Setiadi",
+                "nim": "1519622032",
+                "email_academic": "agi_1519622032@mhs.unj.ac.id",
+                "email_personal": "agi.rahman.s@gmail.com",
+            },
+            "experiment_id": experiment_id,
+            "date_created": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         },
         "provider": {
             "name": args.provider,
             "model": model_name,
             "temperature": Config.TEMPERATURE,
             "max_retries": Config.MAX_RETRIES,
+            "max_tokens": Config.MAX_TOKENS,
+            "api_timeout": Config.API_TIMEOUT,
+        },
+        "reasoning": {
+            "deepseek_thinking": Config.DEEPSEEK_THINKING,
+            "deepseek_reasoning_effort": Config.DEEPSEEK_REASONING_EFFORT,
+        },
+        "kv_cache_isolation": {
+            "enabled": True,
+            "user_id_pattern": "{strategy}_{instance_id}",
+        },
+        "review_loop": {
+            "max_revision_turns": Config.MAX_REVISION_TURNS,
+        },
+        "source_context": {
+            "enabled": Config.SOURCE_CONTEXT_ENABLED,
+            "max_chars": Config.SOURCE_CONTEXT_MAX_CHARS,
+            "max_files": Config.SOURCE_CONTEXT_MAX_FILES,
+            "max_file_lines": Config.SOURCE_CONTEXT_MAX_FILE_LINES,
+            "repo_cache_dir": Config.REPO_CACHE_DIR,
         },
         "dataset": {
-            "name": "princeton-nlp/SWE-bench_Lite",
-            "repos": {
-                "django/django": 10,
-                "sympy/sympy": 10,
-                "scikit-learn/scikit-learn": 10,
-                "matplotlib/matplotlib": 10,
-                "psf/requests": 6,
-                "mwaskom/seaborn": 4,
-            },
+            "name": "SWE-bench/SWE-bench_Lite",
+            "repos": repos or {},
             "n_issues": issue_count,
         },
         "strategies": strategy_names,
@@ -103,10 +144,18 @@ def _save_experiment_config(
         "pricing": {
             "provider": args.provider,
             "model": model_name,
-            "pricing_source": pricing.get("pricing_version", "?"),
-            "input_cost_per_1m_tokens": pricing.get("input_per_million", 0),
-            "output_cost_per_1m_tokens": pricing.get("output_per_million", 0),
+            "pricing_source": "https://api-docs.deepseek.com/quick_start/pricing",
             "currency": "USD",
+            "off_peak_per_1m_tokens": {
+                "input_regular": off_peak["input_per_million"],
+                "input_cache_hit": off_peak["cached_input_per_million"],
+                "output": off_peak["output_per_million"],
+            },
+            "peak_per_1m_tokens": {
+                "input_regular": peak["input_per_million"],
+                "input_cache_hit": peak["cached_input_per_million"],
+                "output": peak["output_per_million"],
+            },
             "exchange_rate": {
                 "from": "USD",
                 "to": "IDR",
@@ -127,6 +176,15 @@ def _save_experiment_config(
     logger.info(f"Experiment config saved: {output_dir}/experiment.yaml")
 
 
+def _yaml_scalar(value):
+    """Quote scalar strings that YAML would misread (flow indicators, ': ')."""
+    if isinstance(value, str) and (
+        value.startswith(("{", "[")) or ": " in value or value.strip() != value
+    ):
+        return json.dumps(value)
+    return value
+
+
 def _to_yaml(data, indent: int = 0) -> str:
     """Serializer YAML sederhana (tanpa dependency)."""
     lines = []
@@ -138,9 +196,9 @@ def _to_yaml(data, indent: int = 0) -> str:
         elif isinstance(value, list):
             lines.append(f"{pad}{key}:")
             for item in value:
-                lines.append(f"{pad}  - {item}")
+                lines.append(f"{pad}  - {_yaml_scalar(item)}")
         else:
-            lines.append(f"{pad}{key}: {value}")
+            lines.append(f"{pad}{key}: {_yaml_scalar(value)}")
     return "\n".join(lines) + "\n"
 
 
@@ -161,6 +219,8 @@ def main():
         Provider = GroqProvider
     elif args.provider == "openrouter":
         Provider = OpenRouterProvider
+    elif args.provider == "deepseek":
+        Provider = DeepSeekProvider
     else:
         Provider = OpenCodeProvider
 
@@ -206,7 +266,8 @@ def main():
 
     # Save experiment.yaml to per-experiment folder
     exp_dir = f"{args.output}/{exp_id}"
-    _save_experiment_config(exp_dir, args, len(issues), strategy_names, exp_id, agents)
+    repos_actual = dict(Counter(issue.repo for issue in issues))
+    _save_experiment_config(exp_dir, args, len(issues), strategy_names, exp_id, agents, repos_actual)
 
     manifest_path = Path(exp_dir) / "manifest.json"
     if manifest_path.exists():

@@ -30,8 +30,11 @@ class GroqProvider:
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=Config.TEMPERATURE,
-                timeout=60,
-                max_tokens=4096,
+                timeout=Config.API_TIMEOUT,
+                max_tokens=Config.MAX_TOKENS,
+                # extra_body={
+                #     "reasoning": {"effort": "none"}
+                # }
             )
 
             elapsed = time.perf_counter() - t0

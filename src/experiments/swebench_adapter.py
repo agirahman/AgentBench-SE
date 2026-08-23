@@ -224,6 +224,18 @@ def _clean_patch(text: str) -> PatchResult:
     return PatchResult(patch="", status=failure_fixed)
 
 
+def _handle_truncated(result: PatchResult, finish_reason: str) -> PatchResult:
+    """Saat response ke-trim (finish_reason='length'), patch yang valid tetap dipertahankan.
+
+    Patch yang berhasil terekstrak & lolos validasi dianggap lengkap walau sisa
+    response terpotong. Hanya bila patch-nya sendiri tidak lengkap (tidak ada/
+    tidak lolos validasi) maka status diturunkan ke TRUNCATED.
+    """
+    if finish_reason == "length" and result.status not in ("VALID", "NORMALIZE"):
+        return PatchResult(patch="", status="TRUNCATED")
+    return result
+
+
 def extract_diff(response: str, finish_reason: str = "") -> PatchResult:
     """Ambil diff/patch dari response LLM.
 
@@ -237,8 +249,6 @@ def extract_diff(response: str, finish_reason: str = "") -> PatchResult:
     """
     if not response:
         return PatchResult(patch="", status="EMPTY")
-    if finish_reason == "length":
-        return PatchResult(patch="", status="TRUNCATED")
 
     # 1. Markdown code block (toleran label apa pun, mis. python/diff/patch/json)
     m = re.search(r"```(?:[A-Za-z0-9_-]+)?\s*\n(.*?)```", response, re.DOTALL)
@@ -248,19 +258,22 @@ def extract_diff(response: str, finish_reason: str = "") -> PatchResult:
             try:
                 data = json.loads(content)
                 if isinstance(data, dict) and "patch" in data:
-                    return _clean_patch(str(data["patch"]))
+                    result = _clean_patch(str(data["patch"]))
+                    return _handle_truncated(result, finish_reason)
             except json.JSONDecodeError:
                 logger.warning("Markdown block looks like JSON but failed to parse")
+                if finish_reason == "length":
+                    return PatchResult(patch="", status="TRUNCATED")
                 return PatchResult(patch="", status="PARSE_ERROR")
-        return _clean_patch(content)
+        return _handle_truncated(_clean_patch(content), finish_reason)
 
     # 2. JSON di seluruh response (tanpa markdown)
     try:
         data = json.loads(response)
         if isinstance(data, dict) and "patch" in data:
-            return _clean_patch(str(data["patch"]))
+            return _handle_truncated(_clean_patch(str(data["patch"])), finish_reason)
     except (json.JSONDecodeError, ValueError):
         pass
 
     # 3. Last resort: raw text
-    return _clean_patch(response.strip())
+    return _handle_truncated(_clean_patch(response.strip()), finish_reason)

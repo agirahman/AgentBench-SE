@@ -14,8 +14,11 @@ class DummyInference:
         self.finish_reason = "STOP"
         self.model = "demo-model"
         self.prompt_tokens = 0
+        self.cached_tokens = 0
+        self.regular_input_tokens = 0
         self.completion_tokens = 0
         self.total_tokens = 0
+        self.timestamp = ""
 
 
 class DummyProvider:

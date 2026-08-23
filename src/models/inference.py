@@ -21,6 +21,7 @@ class InferenceResult:
     execution_time: float = 0.0
     finish_reason: str = ""
     model: str = ""
+    reasoning_content: str = ""
     timestamp: str = ""
 
     def __post_init__(self):
@@ -30,6 +31,14 @@ class InferenceResult:
     @property
     def prompt_tokens(self) -> int:
         return (self.usage or {}).get("prompt_tokens", 0)
+
+    @property
+    def cached_tokens(self) -> int:
+        return (self.usage or {}).get("cached_tokens", 0) or 0
+
+    @property
+    def regular_input_tokens(self) -> int:
+        return max(0, self.prompt_tokens - self.cached_tokens)
 
     @property
     def completion_tokens(self) -> int:
@@ -59,6 +68,14 @@ class InferenceRun:
     @property
     def total_prompt_tokens(self) -> int:
         return sum(inf.prompt_tokens for inf in self.inferences)
+
+    @property
+    def total_cached_tokens(self) -> int:
+        return sum(inf.cached_tokens for inf in self.inferences)
+
+    @property
+    def total_regular_input_tokens(self) -> int:
+        return sum(inf.regular_input_tokens for inf in self.inferences)
 
     @property
     def total_completion_tokens(self) -> int:

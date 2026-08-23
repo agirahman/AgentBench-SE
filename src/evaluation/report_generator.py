@@ -37,25 +37,50 @@ def load_eval_results(exp_dir: Path) -> dict:
 
 
 def merge_data(exp_df: pd.DataFrame, eval_results: dict) -> pd.DataFrame:
-    """Merge evaluation results (resolved) into experiment DataFrame."""
+    """Merge evaluation results (resolved, patch_applied, failure_reason) into experiment DataFrame."""
     df = exp_df.copy()
 
-    # Create resolved column from eval results
+    # Create resolved/patch_applied/failure_reason columns from eval results
     resolved_map = {}
+    patch_applied_map = {}
+    failure_reason_map = {}
     for strategy, data in eval_results.items():
         for result in data.get("results", []):
             if isinstance(result, dict):
                 instance_id = result.get("instance_id")
-                resolved = result.get("resolved", False)
-                resolved_map[(instance_id, strategy)] = resolved
+                resolved_map[(instance_id, strategy)] = result.get("resolved", False)
+                patch_applied_map[(instance_id, strategy)] = result.get("patch_applied", False)
+                failure_reason_map[(instance_id, strategy)] = result.get("failure_reason")
 
-    # Add resolved column
-    def get_resolved(row):
-        key = (row["instance_id"], row["strategy"])
-        return resolved_map.get(key, False)
+    def get_mapped(mapping, default):
+        def _get(row):
+            return mapping.get((row["instance_id"], row["strategy"]), default)
+        return _get
 
-    df["resolved"] = df.apply(get_resolved, axis=1)
+    df["resolved"] = df.apply(get_mapped(resolved_map, False), axis=1)
+    df["patch_applied"] = df.apply(get_mapped(patch_applied_map, False), axis=1)
+    df["failure_reason"] = df.apply(get_mapped(failure_reason_map, None), axis=1)
     return df
+
+
+def _build_failure_breakdown(df: pd.DataFrame) -> pd.DataFrame:
+    """Build per-strategy counts of resolved vs failure reasons."""
+    def categorize(row):
+        if row.get("resolved", False):
+            return "resolved"
+        if row.get("failure_reason"):
+            return str(row["failure_reason"])
+        return "no report"
+
+    if "failure_reason" in df.columns:
+        df = df.copy()
+        df["_category"] = df.apply(categorize, axis=1)
+        breakdown = df.groupby(["strategy", "_category"]).size().unstack(fill_value=0)
+    else:
+        df = df.copy()
+        df["_category"] = df["resolved"].map(lambda v: "resolved" if v else "no report")
+        breakdown = df.groupby(["strategy", "_category"]).size().unstack(fill_value=0)
+    return breakdown.reset_index().rename(columns={"_category": "reason"})
 
 
 def generate_reports(df: pd.DataFrame, exp_dir: Path) -> Path:
@@ -65,7 +90,8 @@ def generate_reports(df: pd.DataFrame, exp_dir: Path) -> Path:
 
     # 1. results.csv — raw per instance
     raw_cols = [
-        "instance_id", "strategy", "difficulty", "resolved",
+        "instance_id", "strategy", "model", "difficulty", "resolved",
+        "patch_applied", "failure_reason",
         "inference_count", "execution_time",
         "prompt_tokens", "completion_tokens", "total_tokens",
         "cost_usd", "cost_idr", "patch_preview",
@@ -73,6 +99,10 @@ def generate_reports(df: pd.DataFrame, exp_dir: Path) -> Path:
     raw_cols = [c for c in raw_cols if c in df.columns]
     results_df = df[raw_cols].copy()
     results_df.to_csv(eval_dir / "results.csv", index=False)
+
+    # 2. failure_breakdown.csv — failure reason counts per strategy
+    failure_breakdown = _build_failure_breakdown(df)
+    failure_breakdown.to_csv(eval_dir / "failure_breakdown.csv", index=False)
 
     # 2. repository_summary.csv — per repo × strategy
     if "repo" in df.columns:
@@ -109,7 +139,7 @@ def generate_reports(df: pd.DataFrame, exp_dir: Path) -> Path:
     ).reset_index()
     tradeoff["effectiveness_pct"] = (tradeoff["effectiveness_pct"] * 100).round(1)
     tradeoff["cost_per_success_usd"] = (
-        tradeoff["total_cost_usd"] / tradeoff["resolved_count"].replace(0, pd.NA)
+        tradeoff["total_cost_usd"] / tradeoff["resolved_count"].replace(0, float("nan"))
     ).round(6)
     tradeoff["cost_per_success_idr"] = (
         tradeoff["cost_per_success_usd"] * 17914.0
@@ -123,6 +153,7 @@ def generate_reports(df: pd.DataFrame, exp_dir: Path) -> Path:
     stats = {
         "strategy_summary": strategy_summary.to_dict(orient="index"),
         "tradeoff_summary": tradeoff.to_dict(orient="index"),
+        "failure_breakdown": failure_breakdown.set_index("strategy").to_dict(orient="index"),
         "total_instances": len(df),
         "total_resolved": int(df["resolved"].sum()),
         "overall_success_rate": round(df["resolved"].mean() * 100, 1),
@@ -164,18 +195,57 @@ def _generate_summary_md(df: pd.DataFrame, out_path: Path) -> None:
             )
         f.write("\n")
 
-        # RQ3 — Cost Tradeoff
+        # RQ3 — Cost Tradeoff (window-aware: actual_cost_usd reflects the
+        # real WIB peak/off-peak rate per inference timestamp)
         f.write("## RQ3 — Cost Tradeoff\n\n")
-        strat_cost = df.groupby("strategy")["cost_usd"].sum()
+        cost_col = "actual_cost_usd" if "actual_cost_usd" in df.columns else "cost_usd"
+        strat_cost = df.groupby("strategy")[cost_col].sum()
         strat_resolved = df.groupby("strategy")["resolved"].sum()
+        if "peak_total_cost_usd" in df.columns:
+            strat_peak = df.groupby("strategy")["peak_total_cost_usd"].sum()
+        else:
+            strat_peak = pd.Series(0.0, index=strat_cost.index)
+        if "off_peak_total_cost_usd" in df.columns:
+            strat_off = df.groupby("strategy")["off_peak_total_cost_usd"].sum()
+        else:
+            strat_off = strat_cost
         for strategy in strat_cost.index:
             resolved = strat_resolved[strategy]
             cost_per_fix = (strat_cost[strategy] / resolved) if resolved > 0 else float("nan")
             f.write(
-                f"- **{strategy}**: ${strat_cost[strategy]:.4f} total, "
+                f"- **{strategy}**: ${strat_cost[strategy]:.4f} actual "
+                f"(off-peak ${strat_off[strategy]:.4f} / peak ${strat_peak[strategy]:.4f}), "
                 f"${cost_per_fix:.4f} per successful fix\n"
             )
         f.write("\n")
+
+        # Failure Analysis — patch_applied & failure reason breakdown
+        f.write("## Failure Analysis (patch_applied & reasons)\n\n")
+        if "patch_applied" in df.columns:
+            f.write("### Patch Application Rate\n\n")
+            applied = df.groupby("strategy")["patch_applied"].agg(["sum", "count", "mean"])
+            for strategy, row in applied.iterrows():
+                f.write(
+                    f"- **{strategy}**: {int(row['sum'])}/{int(row['count'])} "
+                    f"patches applied ({row['mean'] * 100:.1f}%)\n"
+                )
+            f.write("\n")
+
+        if "failure_reason" in df.columns:
+            f.write("### Failure Reason Breakdown\n\n")
+            breakdown = (
+                df[df["resolved"] == False]
+                .groupby(["strategy", "failure_reason"])
+                .size()
+                .unstack(fill_value=0)
+            )
+            for strategy, row in breakdown.iterrows():
+                reasons = {k: int(v) for k, v in row.items() if v > 0}
+                if reasons:
+                    f.write(f"- **{strategy}**: " + ", ".join(
+                        f"{k}={v}" for k, v in sorted(reasons.items(), key=lambda kv: -kv[1])
+                    ) + "\n")
+            f.write("\n")
 
 
 def _generate_figures(df: pd.DataFrame, fig_dir: Path) -> None:

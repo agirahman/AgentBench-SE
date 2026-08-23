@@ -31,8 +31,11 @@ class OpenCodeProvider:
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=Config.TEMPERATURE,
-                timeout=60,
-                max_tokens=8192,
+                timeout=Config.API_TIMEOUT,
+                max_tokens=Config.MAX_TOKENS,
+                extra_body={
+                    "reasoning": {"effort": "none"}
+                }
                 # response_format={"type": "json_object"},
             )
 

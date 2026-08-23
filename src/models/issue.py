@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+from config import Config
+
 
 DIFFICULTY_MAP = {
     "django/django": "hard",
@@ -28,3 +30,14 @@ class Issue:
             f"Instance ID: {self.instance_id}\n\n"
             f"Problem Statement:\n{self.problem_statement}"
         )
+
+    def to_agent_prompt(self) -> str:
+        base = self.to_prompt()
+        if not Config.SOURCE_CONTEXT_ENABLED:
+            return base
+        from source_context import build_source_context
+
+        context = build_source_context(self)
+        if not context:
+            return base
+        return f"{base}\n\n===== SOURCE CODE (base commit) =====\n{context}"

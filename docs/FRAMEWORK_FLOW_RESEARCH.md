@@ -30,7 +30,7 @@ flowchart LR
     G --> H[ExperimentResult]
     H --> I[CSV + predictions.jsonl]
     H --> J[artifacts per-strategi]
-    I --> K[SWE-bench Harness Docker]
+    I --> K[SWE-bench Harness (Modal Cloud)]
     K --> L[Build Success + Test Pass]
 ```
 
@@ -118,11 +118,12 @@ Shared state per-issue: `issue`, `plan`, `patch`, `feedback`, `revision`, `histo
 
 ## 5. Evaluasi SWE-bench
 
-Lokasi downstream: `tools/EVAL_INSTRUCTIONS.md`, `tools/setup_and_eval.sh`, `tools/run_eval.sh`.
+Lokasi downstream: `tools/eval_modal.py` (Modal Cloud) → `src/evaluation/report_generator.py`.
 
-1. Copy `results/<EXP>/predictions/` ke mesin dengan WSL2/Ubuntu (perlu Docker, 4GB+ RAM).
-2. `python -m swebench.harness.run_evaluation --predictions_path results/<EXP>/predictions/predictions.jsonl --max_workers 1 --run_id <RUN_ID>`.
-3. Output: `logs/run_evaluation/<RUN_ID>/` + JSON ringkasan (resolved/unresolved).
+1. Untuk tiap strategi: `python tools/eval_modal.py results/<EXP>/predictions/<strategi>.jsonl`.
+   - run_id otomatis `modal-<strategi>-<EXP-YYYYMMDD-NNN>` (tertaut ke hasil phase 1); `--force` untuk mengevaluasi ulang.
+2. Output: `predictions/<strategi>_results.json` berisi `resolved`, `patch_applied`, `failure_reason`.
+3. `python -m src.evaluation.report_generator results/<EXP>` → gabung `results.csv` + `predictions/*_results.json` → laporan `eval/`.
 4. Build Success Rate + Test Pass Rate → jawaban RQ1.
 
 ## 6. Kontribusi Multi-Agent ke Riset

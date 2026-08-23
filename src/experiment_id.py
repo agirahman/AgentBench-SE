@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -28,7 +28,9 @@ def generate_experiment_id(index_file: Path = INDEX_FILE) -> str:
     The counter increments per calendar day and is persisted to
     ``index_file`` so multiple runs in the same day produce distinct IDs.
     """
-    today = datetime.now().strftime("%Y%m%d")
+    # Use UTC for the date component so experiment IDs are timezone-stable
+    # (a run started just before local midnight still belongs to the same UTC day).
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
     index = _load_index(index_file)
     counter = int(index.get(today, 0)) + 1
     index[today] = counter
