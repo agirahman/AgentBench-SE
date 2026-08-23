@@ -57,15 +57,38 @@ class CommandCodeProvider:
         }
 
     # ------------------------------------------------------------------
-    # Health check (lightweight; does not consume a generation).
+    # Health check: endpoint reachable AND the configured model responds.
     # ------------------------------------------------------------------
     def health_check(self) -> bool:
+        # 1) Endpoint/key reachable via models list (cheap, no generation).
         try:
-            # List models to confirm the endpoint/key are reachable.
             self.client.models.list()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"CommandCode health check failed (endpoint): {e}")
+            return False
+
+        # 2) The configured model must actually answer a tiny prompt.
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": "Reply with only: OK"}],
+                max_tokens=16,
+                timeout=30,
+            )
+            content = ""
+            choices = getattr(response, "choices", None) or []
+            if choices:
+                msg = getattr(choices[0], "message", None)
+                content = (getattr(msg, "content", "") or "") if msg else ""
+            if not content.strip():
+                logger.warning(
+                    f"CommandCode health check: model {self.model} returned empty content"
+                )
+                return False
+            logger.success(f"CommandCode Health Check Passed (model={self.model})")
             return True
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"CommandCode health check failed: {e}")
+            logger.warning(f"CommandCode health check failed (model={self.model}): {e}")
             return False
 
     # ------------------------------------------------------------------
