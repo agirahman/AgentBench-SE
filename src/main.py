@@ -11,6 +11,7 @@ from providers.opencode_provider import OpenCodeProvider
 from providers.openrouter_provider import OpenRouterProvider
 from providers.deepseek_provider import DeepSeekProvider
 from providers.commandcode_provider import CommandCodeProvider
+from agents import tools as T
 from agents.registry import build_agent_team
 from strategies.direct_strategy import DirectStrategy
 from strategies.planning_strategy import PlanningStrategy
@@ -75,12 +76,13 @@ def parse_args():
 
 def _save_experiment_config(
     output_dir: str,
-    args,
+    args: argparse.Namespace,
     issue_count: int,
     strategy_names: list[str],
-    experiment_id: str = "",
-    agents: list[dict[str, str]] | None = None,
+    experiment_id: str,
+    agents: list[dict[str, str]],
     repos: dict[str, int] | None = None,
+    agent_team: dict | None = None,
 ) -> None:
     """Simpan experiment.yaml untuk reproducibility (Kritik #8)."""
     model_name = _PROVIDER_MODEL_MAP.get(args.provider)
@@ -118,23 +120,19 @@ def _save_experiment_config(
             "max_tokens": Config.MAX_TOKENS,
             "api_timeout": Config.API_TIMEOUT,
         },
-        "reasoning": {
-            "deepseek_thinking": Config.DEEPSEEK_THINKING,
-            "deepseek_reasoning_effort": Config.DEEPSEEK_REASONING_EFFORT,
-        },
-        "kv_cache_isolation": {
-            "enabled": True,
-            "user_id_pattern": "{strategy}_{instance_id}",
-        },
+        "model_thinking": Config.DEEPSEEK_THINKING,
+        "model_reasoning_effort": Config.DEEPSEEK_REASONING_EFFORT,
         "review_loop": {
             "max_revision_turns": Config.MAX_REVISION_TURNS,
         },
-        "source_context": {
-            "enabled": Config.SOURCE_CONTEXT_ENABLED,
-            "max_chars": Config.SOURCE_CONTEXT_MAX_CHARS,
-            "max_files": Config.SOURCE_CONTEXT_MAX_FILES,
-            "max_file_lines": Config.SOURCE_CONTEXT_MAX_FILE_LINES,
-            "repo_cache_dir": Config.REPO_CACHE_DIR,
+        "tool_calling": {
+            "enabled": Config.TOOLCALL_ENABLED,
+            "max_tool_turns": Config.MAX_TOOL_TURNS,
+            "repo_dir": Config.TOOLCALL_REPO_DIR,
+            "tools": [
+                {"agent": name, "tools": list(T.TOOL_FUNCTIONS.keys())}
+                for name in (agent_team or {})
+            ] if Config.TOOLCALL_ENABLED else [],
         },
         "dataset": {
             "name": "SWE-bench/SWE-bench_Lite",
@@ -275,7 +273,7 @@ def main():
     # Save experiment.yaml to per-experiment folder
     exp_dir = f"{args.output}/{exp_id}"
     repos_actual = dict(Counter(issue.repo for issue in issues))
-    _save_experiment_config(exp_dir, args, len(issues), strategy_names, exp_id, agents, repos_actual)
+    _save_experiment_config(exp_dir, args, len(issues), strategy_names, exp_id, agents, repos_actual, agent_team)
 
     manifest_path = Path(exp_dir) / "manifest.json"
     if manifest_path.exists():

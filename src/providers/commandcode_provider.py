@@ -43,6 +43,19 @@ class CommandCodeProvider:
         self.user_id = ""
         logger.info(f"CommandCode model : {self.model} (base {Config.COMMANDCODE_BASE_URL})")
 
+    def _extra_body(self) -> dict:
+        """Reasoning/thinking passthrough, mirroring DeepSeek provider.
+
+        Only attached when DEEPSEEK_THINKING is enabled so that the
+        thinking-vs-nothinking comparison is real at the API level.
+        """
+        if not Config.DEEPSEEK_THINKING:
+            return {}
+        return {
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": Config.DEEPSEEK_REASONING_EFFORT,
+        }
+
     # ------------------------------------------------------------------
     # Health check (lightweight; does not consume a generation).
     # ------------------------------------------------------------------
@@ -77,6 +90,9 @@ class CommandCodeProvider:
                 "max_tokens": Config.MAX_TOKENS,
                 "response_format": {"type": "json_object"},
             }
+            extra = self._extra_body()
+            if extra:
+                kwargs["extra_body"] = extra
             response = self.client.chat.completions.create(**kwargs)
             elapsed = time.perf_counter() - t0
             result = build_openai_inference_result(
@@ -132,6 +148,9 @@ class CommandCodeProvider:
                     "tools": tools,
                     "tool_choice": "auto",
                 }
+                extra = self._extra_body()
+                if extra:
+                    kwargs["extra_body"] = extra
                 response = self.client.chat.completions.create(**kwargs)
                 choice = response.choices[0]
                 msg = choice.message
