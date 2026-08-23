@@ -11,11 +11,11 @@ from providers.response_utils import build_openai_inference_result
 
 class OpenCodeProvider:
     def __init__(self):
-        if not Config.OPENCODE_API_KEY:
-            raise ValueError("OPENCODE_API_KEY tidak ditemukan pada file .env")
+        if not Config.COMMANDCODE_API_KEY:
+            raise ValueError("COMMANDCODE_API_KEY tidak ditemukan pada file .env")
 
         self.client = OpenAI(
-            api_key=Config.OPENCODE_API_KEY,
+            api_key=Config.COMMANDCODE_API_KEY,
             # base_url="https://opencode.ai/zen/v1",
             base_url="http://localhost:20128/v1",
         )

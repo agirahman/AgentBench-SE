@@ -267,15 +267,19 @@ def run_experiments(
                     Path(f"{exp_dir}/patches/{issue.instance_id}_{name}.txt").write_text(
                         model_patch, encoding="utf-8"
                     )
-                    _save_artifacts(
-                        str(exp_dir),
-                        issue.instance_id,
-                        name,
-                        result.execution.inferences,
-                        patch.response,
-                        result.execution.run.messages,
-                    )
                     logger.info(f"  → Patch saved: {issue.instance_id}_{name}.txt")
+
+                # Always persist artifacts (messages, per-role responses,
+                # tool_calls) — even when the patch is empty/invalid — so the
+                # tool-call trail stays available for debugging and analysis.
+                _save_artifacts(
+                    str(exp_dir),
+                    issue.instance_id,
+                    name,
+                    result.execution.inferences,
+                    patch.response,
+                    result.execution.run.messages,
+                )
 
                 logger.success(
                     f"  ✅ {elapsed:.1f}s | {result.execution.total_tokens} tokens "

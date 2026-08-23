@@ -5,6 +5,7 @@ from models.inference import InferenceRun
 from agents.messages import AgentMessage
 from agents.blackboard import Blackboard
 from agents.registry import build_agent_team
+from agents.tools import resolve_repo_root
 from evaluation.cost import CostCalculator
 
 
@@ -20,6 +21,9 @@ class DirectStrategy:
     def run(self, issue: Issue) -> tuple[Patch, ExperimentResult]:
         if hasattr(self.provider, "user_id"):
             self.provider.user_id = f"{self.strategy_name}_{issue.instance_id.replace('__', '-')}"
+        repo_root = resolve_repo_root(issue.repo, issue.base_commit)
+        for agent in self.team.values():
+            agent.repo_root = str(repo_root) if repo_root else None
         bb = Blackboard(issue=issue)
         task = AgentMessage(sender="orchestrator", receiver="direct", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_issue"])
         bb.log(task)

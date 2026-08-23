@@ -26,7 +26,7 @@ from utils.logger import logger
 from models.inference import InferenceResult
 from evaluation.retry import with_retry
 from providers.response_utils import build_openai_inference_result
-from agents.tools import TOOL_SCHEMAS, execute_tool
+from agents.tools import TOOL_SCHEMAS, execute_tool, set_repo_root
 
 
 class CommandCodeProvider:
@@ -117,22 +117,40 @@ class CommandCodeProvider:
         role: str = "",
         tools: Optional[list] = None,
         max_tool_turns: Optional[int] = None,
+        repo_root: Optional[str] = None,
     ) -> InferenceResult:
         """Run a tool-calling conversation and return the final answer.
 
         The final InferenceResult.response is the LAST assistant text (tool
         messages excluded). All tool calls are recorded in result.tool_calls as
         a list of {"name", "arguments", "result"} dicts for logging.
+
+        If ``repo_root`` is given, tools explore that checked-out instance repo
+        (e.g. datasets/repos/psf/requests/<hash>) so agents never guess paths.
         """
         tools = tools or TOOL_SCHEMAS
         max_tool_turns = max_tool_turns or Config.MAX_TOOL_TURNS
         t0 = time.perf_counter()
 
+        if repo_root:
+            set_repo_root(repo_root)
+            system_content = (
+                "You are a software engineering agent. "
+                f"All file paths are RELATIVE TO the repository root: {repo_root}\n"
+                "Use the provided tools to explore that repository and gather evidence "
+                "before producing your final answer. When you have enough information, "
+                "respond with your final answer (no tool call)."
+            )
+        else:
+            system_content = (
+                "You are a software engineering agent. "
+                "Use the provided tools to explore the repository and gather evidence "
+                "before producing your final answer. When you have enough information, "
+                "respond with your final answer (no tool call)."
+            )
+
         messages = [
-            {"role": "system", "content": "You are a software engineering agent. "
-             "Use the provided tools to explore the repository and gather evidence "
-             "before producing your final answer. When you have enough information, "
-             "respond with your final answer (no tool call)."},
+            {"role": "system", "content": system_content},
             {"role": "user", "content": prompt},
         ]
         recorded_calls: list[dict] = []

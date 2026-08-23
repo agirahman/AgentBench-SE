@@ -22,9 +22,62 @@ from pathlib import Path
 
 from config import Config
 
+# Current repo root for the active issue (set per strategy run). When None,
+# tools fall back to the global TOOLCALL_REPO_DIR (still sandboxed).
+_CURRENT_REPO_ROOT: Path | None = None
+
+
+def set_repo_root(path: str | Path | None) -> None:
+    """Set the active instance's repo root (e.g. datasets/repos/psf/requests/<hash>)."""
+    global _CURRENT_REPO_ROOT
+    if path is None:
+        _CURRENT_REPO_ROOT = None
+        return
+    p = Path(path)
+    if not p.is_absolute():
+        p = Path(os.getcwd()) / p
+    _CURRENT_REPO_ROOT = p.resolve()
+
+
+def resolve_repo_root(repo: str, base_commit: str) -> Path | None:
+    """Find the on-disk repo root for an instance.
+
+    Layouts observed in datasets/repos:
+      * psf/requests  -> datasets/repos/psf/requests/<hash>
+      * django/django -> datasets/repos/django/<hash>
+    Heuristic, then recursive fallback to a folder named <base_commit>.
+    Returns None if not found.
+    """
+    base = Path(Config.TOOLCALL_REPO_DIR)
+    if not base.is_absolute():
+        base = Path(os.getcwd()) / base
+    owner, _, name = repo.partition("/")
+
+    candidates = [
+        base / owner / name / base_commit,
+        base / owner / base_commit,
+    ]
+    for c in candidates:
+        if c.is_dir():
+            return c.resolve()
+    # Recursive fallback: find a directory named exactly base_commit.
+    try:
+        for root, dirs, _files in os.walk(base / owner):
+            if base_commit in dirs:
+                return (Path(root) / base_commit).resolve()
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
 
 def _repo_root() -> Path:
-    """Resolve the sandbox root for tool operations."""
+    """Resolve the sandbox root for tool operations.
+
+    Prefers the active instance repo root (set per run) so agents explore the
+    correct checked-out repo; falls back to the global TOOLCALL_REPO_DIR.
+    """
+    if _CURRENT_REPO_ROOT is not None:
+        return _CURRENT_REPO_ROOT
     root = Path(Config.TOOLCALL_REPO_DIR)
     if not root.is_absolute():
         root = Path(os.getcwd()) / root

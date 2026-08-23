@@ -24,6 +24,8 @@ class BaseAgent(ABC):
         # Tool calling is opt-in per agent; only the commandcode provider
         # actually exercises it. Other providers ignore use_tools.
         self.use_tools = False
+        # Active instance repo root for tool exploration (set per strategy run).
+        self.repo_root: str | None = None
 
     def act(self, task: AgentMessage, context: Blackboard) -> AgentResponse:
         context.bb_ops = []
@@ -32,7 +34,9 @@ class BaseAgent(ABC):
         context.bb_ops = []
 
         if self.use_tools and hasattr(self.provider, "generate_with_tools"):
-            inference = self.provider.generate_with_tools(prompt, role=self.name)
+            inference = self.provider.generate_with_tools(
+                prompt, role=self.name, repo_root=self.repo_root
+            )
         else:
             inference = self.provider.generate(prompt, role=self.name)
 
