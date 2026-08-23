@@ -89,6 +89,37 @@ class PricingTable:
             "currency": "USD",
             "pricing_version": "2026-08-16",
         },
+        # CommandCode-routed models. Same underlying DeepSeek model, different
+        # provider route, so the official DeepSeek rate card is applied as a
+        # DUMMY pricing (non-zero) so cost metrics are never $0 in reports.
+        "cmd/deepseek/deepseek-v4-flash": {
+            "off_peak": {
+                "input_per_million": 0.22,
+                "cached_input_per_million": 0.007,
+                "output_per_million": 0.66,
+            },
+            "peak": {
+                "input_per_million": 0.44,
+                "cached_input_per_million": 0.014,
+                "output_per_million": 1.32,
+            },
+            "currency": "USD",
+            "pricing_version": "2026-08-16-dummy",
+        },
+        "cmd/poolside/laguna-s-2.1-free": {
+            "off_peak": {
+                "input_per_million": 0.22,
+                "cached_input_per_million": 0.007,
+                "output_per_million": 0.66,
+            },
+            "peak": {
+                "input_per_million": 0.44,
+                "cached_input_per_million": 0.014,
+                "output_per_million": 1.32,
+            },
+            "currency": "USD",
+            "pricing_version": "2026-08-16-dummy",
+        },
         "tencent/hy3:free": {
             "input_per_million": 0.0,
             "output_per_million": 0.0,
