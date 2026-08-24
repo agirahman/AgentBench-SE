@@ -52,6 +52,12 @@ def _save_artifacts(
         if not inf.role:
             continue
         (art_dir / f"{inf.role}.md").write_text(inf.response, encoding="utf-8")
+        # Persist the model's reasoning channel separately (thinking mode).
+        # Critical for diagnosing premature-stop failures where content holds
+        # only a preamble while the actual reasoning lives here.
+        reasoning = getattr(inf, "reasoning_content", "") or ""
+        if reasoning.strip():
+            (art_dir / f"{inf.role}_reasoning.md").write_text(reasoning, encoding="utf-8")
 
     (art_dir / "patch.txt").write_text(final_patch, encoding="utf-8")
 
