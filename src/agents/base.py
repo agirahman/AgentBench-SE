@@ -50,7 +50,7 @@ class BaseAgent(ABC):
             content=inference.response,
             kind="result",
             bb_ops=ops,
-            tool_calls=inference.tool_calls,
+            tool_calls=getattr(inference, "tool_calls", []),
         )
         context.log(response)
         return AgentResponse(message=response, inference=inference)

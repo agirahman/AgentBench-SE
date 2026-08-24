@@ -328,6 +328,9 @@ def run_experiments(
                     "model_name_or_path": effective_model,
                     "strategy": name,
                     "patch_status": "TIMEOUT",
+                    # Keep resume keys symmetric with success rows; otherwise
+                    # --resume under thinking mode re-runs every errored instance.
+                    "thinking": Config.DEEPSEEK_THINKING,
                     "error_type": type(e).__name__,
                     "error_message": error_detail,
                 }

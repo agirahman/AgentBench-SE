@@ -86,6 +86,16 @@ def resolve_repo_root(repo: str, base_commit: str) -> Path | None:
                 return (Path(root) / base_commit).resolve()
     except Exception:  # noqa: BLE001
         pass
+    # Loud, greppable marker: without a resolved root, tool calls would fall
+    # back to the shared sandbox base and agents could read the WRONG
+    # instance's files. Surface it so contaminated runs are identifiable.
+    from utils.logger import logger
+
+    logger.warning(
+        f"[repo_root] FAILED to resolve repo root for {repo}@{base_commit} — "
+        f"tool calls will operate on the shared sandbox base "
+        f"({_repo_root()}). Run tools/prepare_repos.py and re-run this instance."
+    )
     return None
 
 

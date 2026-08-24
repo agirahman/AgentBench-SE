@@ -39,12 +39,14 @@ def test_provider_model_map_covers_all_providers():
         "openrouter",
         "opencode",
         "deepseek",
+        "commandcode",
     }
     assert _PROVIDER_MODEL_MAP["gemini"] == Config.GEMINI_MODEL
     assert _PROVIDER_MODEL_MAP["groq"] == Config.GROQ_MODEL
     assert _PROVIDER_MODEL_MAP["openrouter"] == Config.OPENROUTER_MODEL
     assert _PROVIDER_MODEL_MAP["opencode"] == Config.OPENCODE_MODEL
     assert _PROVIDER_MODEL_MAP["deepseek"] == Config.DEEPSEEK_MODEL
+    assert _PROVIDER_MODEL_MAP["commandcode"] == Config.COMMANDCODE_MODEL
     assert all(_PROVIDER_MODEL_MAP.values())
 
 
@@ -78,8 +80,8 @@ def test_save_experiment_config_deepseek_model_and_pricing(tmp_path):
         "input_cache_hit": peak["cached_input_per_million"],
         "output": peak["output_per_million"],
     }
-    assert cfg["reasoning"]["deepseek_thinking"] == Config.DEEPSEEK_THINKING
-    assert cfg["reasoning"]["deepseek_reasoning_effort"] == Config.DEEPSEEK_REASONING_EFFORT
+    assert cfg["model_thinking"] == Config.DEEPSEEK_THINKING
+    assert cfg["model_reasoning_effort"] == Config.DEEPSEEK_REASONING_EFFORT
 
 
 def test_save_experiment_config_unknown_provider_exits(tmp_path):
@@ -91,5 +93,6 @@ def test_save_experiment_config_unknown_provider_exits(tmp_path):
             issue_count=1,
             strategy_names=[],
             experiment_id="EXP-x",
+            agents=[],
         )
     assert exc.value.code == 1
