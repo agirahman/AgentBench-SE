@@ -46,9 +46,16 @@ def build_experiment_manifest(
 
     model = results[0].model if results else provider_name
 
+    api_requests_by_strategy: dict[str, int] = {}
     result_entries = []
     for r in results:
         status = _result_status(r)
+        api_turns = sum(
+            getattr(inf, "api_turns", 1) for inf in r.execution.inferences
+        )
+        api_requests_by_strategy[r.strategy] = (
+            api_requests_by_strategy.get(r.strategy, 0) + api_turns
+        )
         result_entries.append(
             {
                 "instance_id": r.instance_id,
@@ -56,6 +63,7 @@ def build_experiment_manifest(
                 "model": r.model,
                 "status": status,
                 "difficulty": r.difficulty,
+                "api_turns": api_turns,
                 "tokens": {
                     "prompt": r.execution.prompt_tokens,
                     "cached_input": r.cost.cached_input_tokens,
@@ -109,6 +117,7 @@ def build_experiment_manifest(
                 if status_counts["TIMEOUT"] > 0
                 else "COMPLETED"
             ),
+            "api_requests_by_strategy": api_requests_by_strategy,
         },
         "results": result_entries,
     }

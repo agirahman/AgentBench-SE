@@ -108,7 +108,7 @@ def main() -> None:
         type=Path,
         help="EXP directories or a parent group directory containing them.",
     )
-    parser.add_argument("--csv", default="results.csv", help="CSV filename to aggregate (default: results.csv)")
+    parser.add_argument("--csv", default="generation_result.csv", help="CSV filename to aggregate (default: generation_result.csv)")
     parser.add_argument(
         "--metrics",
         nargs="*",

@@ -370,13 +370,15 @@ def run_experiments(
                 )
 
     # --- Final exports ---
+    # "generation_" prefix disambiguates phase-1 outputs from the eval-phase
+    # files that report_generator writes under eval/ (results.csv, statistics.json).
     rows = [flatten_for_csv(r) for r in all_results]
     df = pd.DataFrame(rows)
-    csv_path = f"{exp_dir}/results.csv"
+    csv_path = f"{exp_dir}/generation_result.csv"
     df.to_csv(csv_path, index=False)
     logger.success(f"CSV exported: {csv_path}")
 
-    stats_path = f"{exp_dir}/statistics.json"
+    stats_path = f"{exp_dir}/generation_statistics.json"
     model_name = df["model"].iloc[0] if len(df) else provider_name
     pricing = PricingTable.get(model_name) if model_name else None
     export_statistics_json(df, stats_path, pricing=pricing, usd_idr_rate=Config.USD_IDR_RATE)

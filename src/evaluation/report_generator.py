@@ -23,10 +23,21 @@ USD_IDR_RATE = float(os.getenv("USD_IDR_RATE", "16500"))
 
 
 def load_experiment_data(exp_dir: Path) -> pd.DataFrame:
-    """Load results.csv from experiment dir."""
-    csv_path = exp_dir / "results.csv"
+    """Load the generation-phase CSV from an experiment dir.
+
+    Prefers ``generation_result.csv`` (current naming, disambiguated from
+    eval-phase outputs); falls back to legacy ``results.csv`` so older
+    experiment folders remain processable.
+    """
+    csv_path = exp_dir / "generation_result.csv"
     if not csv_path.exists():
-        raise FileNotFoundError(f"results.csv not found in {exp_dir}")
+        legacy = exp_dir / "results.csv"
+        if legacy.exists():
+            csv_path = legacy
+        else:
+            raise FileNotFoundError(
+                f"generation_result.csv (or legacy results.csv) not found in {exp_dir}"
+            )
     return pd.read_csv(csv_path)
 
 

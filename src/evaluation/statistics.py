@@ -204,6 +204,19 @@ def summarize_run_failure(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def compute_api_requests(df: pd.DataFrame) -> pd.Series:
+    """Total real API requests (HTTP turns) per strategy.
+
+    Uses the ``total_turns`` column emitted by the CSV exporter, which sums
+    each inference's ``api_turns`` (1 for single-shot calls; the full loop
+    turn count when tool-calling is active).
+    """
+    df = _ensure_strategy_column(df)
+    if df.empty or "total_turns" not in df.columns:
+        return pd.Series(dtype="float64")
+    return df.groupby("strategy")["total_turns"].sum()
+
+
 def export_statistics_json(df: pd.DataFrame, out_path: str, pricing: dict | None = None, usd_idr_rate: float = 16500.0) -> None:
     """Serialize computed metrics to a statistics.json file."""
     df = _ensure_strategy_column(df)
@@ -218,6 +231,7 @@ def export_statistics_json(df: pd.DataFrame, out_path: str, pricing: dict | None
         "patch_validity_rate": compute_patch_validity_rate(df).to_dict(),
         "patch_quality": compute_patch_quality(df).to_dict(),
         "failure_breakdown": summarize_run_failure(df).to_dict(),
+        "api_requests": compute_api_requests(df).to_dict(),
         "pricing": {
             "model": model_name,
             "pricing_version": ver,
@@ -293,4 +307,7 @@ def generate_summary_md(df: pd.DataFrame, out_path: str, pricing: dict | None = 
 
         f.write("\n\n## Failure Breakdown (per patch_status)\n\n")
         f.write(fb.to_string())
+
+        f.write("\n\n## API Requests (real HTTP turns per strategy)\n\n")
+        f.write(compute_api_requests(df).to_frame(name="api_requests").to_string())
         f.write("\n")
