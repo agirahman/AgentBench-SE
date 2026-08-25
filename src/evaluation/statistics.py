@@ -245,8 +245,30 @@ def export_statistics_json(df: pd.DataFrame, out_path: str, pricing: dict | None
         json.dump(data, f, indent=2, default=str)
 
 
+def _df_to_md_table(df: pd.DataFrame) -> str:
+    """Render a DataFrame as a GitHub-flavored markdown table (no deps)."""
+    df = df.reset_index()
+    headers = [str(c) for c in df.columns]
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+    ]
+    for _, row in df.iterrows():
+        cells = [str(row[c]) for c in df.columns]
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
+def _usd(x) -> str:
+    return f"${float(x):.6f}"
+
+
+def _idr(x) -> str:
+    return f"Rp{float(x):,.0f}"
+
+
 def generate_summary_md(df: pd.DataFrame, out_path: str, pricing: dict | None = None, usd_idr_rate: float = 16500.0) -> None:
-    """Write a Markdown RQ1/RQ2/RQ3 summary to *out_path*."""
+    """Write a Markdown summary (tables) to *out_path*."""
     df = _ensure_strategy_column(df)
     sr = compute_success_rate(df)
     ati = compute_avg_time_per_inference(df)
@@ -275,39 +297,58 @@ def generate_summary_md(df: pd.DataFrame, out_path: str, pricing: dict | None = 
         f.write(f"- Output: ${out_rate:.2f}/1M tokens\n")
         f.write(f"- Exchange Rate: 1 USD = Rp{usd_idr_rate:,.0f}\n\n")
 
-        f.write("## RQ1 — Success Rate\n\n")
-        f.write(sr.to_frame(name="success_rate").to_string())
+        f.write("## Success Rate (Patch Generation)\n\n")
+        f.write(_df_to_md_table(sr.to_frame(name="success_rate")))
 
-        f.write("\n\n## RQ2 — Avg Time per Inference\n\n")
-        f.write(ati.to_frame(name="avg_time_per_inference").to_string())
+        f.write("\n\n## Avg Time per Inference (seconds)\n\n")
+        f.write(_df_to_md_table(ati.to_frame(name="avg_time_per_inference")))
 
-        f.write("\n\n## RQ3 — Cost per Successful Fix\n\n")
+        f.write("\n\n## Cost per Successful Fix\n\n")
+        f.write("> `Total Spend` = sum of actual cost across **all** issues in the "
+                "strategy. `Avg per Success` = Total Spend ÷ success_count, where "
+                "success = an issue that produced a non-empty patch (**not** the "
+                "Modal-resolved rate). Off-peak/peak columns are reference "
+                "extremes, not the actual charged rate.\n\n")
         cps_out = cps.copy()
         if not cps_out.empty:
-            if "cost_usd_per_success" in cps_out.columns:
-                cps_out["cost_usd_per_success"] = cps_out["cost_usd_per_success"].apply(lambda x: f"${x:.6f}")
-            if "cost_idr_per_success" in cps_out.columns:
-                cps_out["cost_idr_per_success"] = cps_out["cost_idr_per_success"].apply(lambda x: f"Rp{x:,.0f}")
-            total_usd = cps_out["total_cost_usd"].sum()
-            total_idr = cps_out["total_cost_idr"].sum()
+            fmt_cols = {
+                "total_cost_usd": _usd,
+                "total_cost_idr": _idr,
+                "off_peak_total_cost_usd": _usd,
+                "peak_total_cost_usd": _usd,
+                "peak_total_cost_idr": _idr,
+                "cost_usd_per_success": _usd,
+                "cost_idr_per_success": _idr,
+            }
+            for col, fn in fmt_cols.items():
+                if col in cps_out.columns:
+                    cps_out[col] = cps_out[col].apply(fn)
+            cps_out = cps_out.rename(columns={
+                "total_cost_usd": "total_spend_usd",
+                "total_cost_idr": "total_spend_idr",
+                "cost_usd_per_success": "avg_usd_per_success",
+                "cost_idr_per_success": "avg_idr_per_success",
+            })
+            total_usd = cps["total_cost_usd"].sum()
+            total_idr = cps["total_cost_idr"].sum()
         else:
             total_usd = 0.0
             total_idr = 0.0
-        f.write(cps_out.to_string())
-        f.write(f"\n\n**Total Cost: ${total_usd:.6f} (Rp{total_idr:,.0f})**\n")
+        f.write(_df_to_md_table(cps_out))
+        f.write(f"\n\n**Total Spend: ${total_usd:.6f} (Rp{total_idr:,.0f})**\n")
 
         f.write("\n\n## Cache Hit Rate\n\n")
-        f.write(chr_.to_frame(name="cache_hit_rate").to_string())
+        f.write(_df_to_md_table(chr_.to_frame(name="cache_hit_rate")))
 
         f.write("\n\n## Patch Validity Rate\n\n")
-        f.write(pvr.to_frame(name="patch_validity_rate").to_string())
+        f.write(_df_to_md_table(pvr.to_frame(name="patch_validity_rate")))
 
         f.write("\n\n## Patch Quality\n\n")
-        f.write(pq.to_string())
+        f.write(_df_to_md_table(pq))
 
         f.write("\n\n## Failure Breakdown (per patch_status)\n\n")
-        f.write(fb.to_string())
+        f.write(_df_to_md_table(fb))
 
         f.write("\n\n## API Requests (real HTTP turns per strategy)\n\n")
-        f.write(compute_api_requests(df).to_frame(name="api_requests").to_string())
+        f.write(_df_to_md_table(compute_api_requests(df).to_frame(name="api_requests")))
         f.write("\n")

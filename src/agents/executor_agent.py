@@ -12,12 +12,12 @@ class ExecutorAgent(BaseAgent):
         context.bb_ops.append("get_issue")
         if context.plan:
             context.bb_ops.append("get_plan")
-        prompt = self.template.replace("{{issue}}", task.content)
-        prompt = prompt.replace("{{plan}}", context.plan)
+        dynamic = self.template.replace("{{issue}}", task.content)
+        dynamic = dynamic.replace("{{plan}}", context.plan)
         if context.feedback:
             context.bb_ops.append("get_feedback")
             if "{{feedback}}" in self.template:
-                prompt = prompt.replace("{{feedback}}", context.feedback)
+                dynamic = dynamic.replace("{{feedback}}", context.feedback)
             else:
-                prompt = prompt + f"\n\nReviewer Feedback:\n{context.feedback}"
-        return prompt
+                dynamic = dynamic + f"\n\nReviewer Feedback:\n{context.feedback}"
+        return self._wrap(dynamic)

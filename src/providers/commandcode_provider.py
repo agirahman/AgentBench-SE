@@ -105,9 +105,20 @@ class CommandCodeProvider:
         try:
             if "json" not in prompt.lower():
                 prompt = f"{prompt}\n\nRespond in valid JSON."
+            # Identical system prompt to generate_with_tools so both paths share
+            # the same cacheable prefix (stable across instances).
+            system_content = (
+                "You are a software engineering agent. "
+                "Use the provided tools to explore the repository and gather evidence "
+                "before producing your final answer. When you have enough information, "
+                "respond with your final answer (no tool call)."
+            )
             kwargs: dict = {
                 "model": self.model,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": [
+                    {"role": "system", "content": system_content},
+                    {"role": "user", "content": prompt},
+                ],
                 "temperature": Config.TEMPERATURE,
                 "timeout": Config.API_TIMEOUT,
                 "max_tokens": Config.MAX_TOKENS,
@@ -119,7 +130,11 @@ class CommandCodeProvider:
             response = self.client.chat.completions.create(**kwargs)
             elapsed = time.perf_counter() - t0
             result = build_openai_inference_result(
-                response, role=role, model=self.model, elapsed=elapsed
+                response,
+                role=role,
+                model=self.model,
+                elapsed=elapsed,
+                response_headers=getattr(response, "response_headers", None),
             )
             if result.finish_reason == "length":
                 logger.warning(f"CommandCode response truncated (length). Role: {role}")
@@ -159,21 +174,19 @@ class CommandCodeProvider:
         # None resets it to the global sandbox base — never reuse a previous
         # instance's root silently.
         set_repo_root(repo_root)
-        if repo_root:
-            system_content = (
-                "You are a software engineering agent. "
-                f"All file paths are RELATIVE TO the repository root: {repo_root}\n"
-                "Use the provided tools to explore that repository and gather evidence "
-                "before producing your final answer. When you have enough information, "
-                "respond with your final answer (no tool call)."
-            )
-        else:
-            system_content = (
-                "You are a software engineering agent. "
-                "Use the provided tools to explore the repository and gather evidence "
-                "before producing your final answer. When you have enough information, "
-                "respond with your final answer (no tool call)."
-            )
+
+        # Cache-friendly system prompt: identical across ALL instances so the
+        # top of every request is byte-for-byte stable (enables automatic prefix
+        # caching). The per-instance repo_root is NOT embedded here — it is only
+        # used by the tool sandbox at execution time. When PROMPT_CACHE_LAYOUT is
+        # off we keep the legacy behavior (repo_root still omitted from the static
+        # prefix anyway, so both paths share the same stable system string).
+        system_content = (
+            "You are a software engineering agent. "
+            "Use the provided tools to explore the repository and gather evidence "
+            "before producing your final answer. When you have enough information, "
+            "respond with your final answer (no tool call)."
+        )
 
         messages = [
             {"role": "system", "content": system_content},
@@ -209,7 +222,11 @@ class CommandCodeProvider:
         def _finalize(resp) -> InferenceResult:
             elapsed = time.perf_counter() - t0
             result = build_openai_inference_result(
-                resp, role=role, model=self.model, elapsed=elapsed
+                resp,
+                role=role,
+                model=self.model,
+                elapsed=elapsed,
+                response_headers=getattr(resp, "response_headers", None),
             )
             # Override per-call usage with cumulative loop totals.
             result.usage = dict(usage_totals)

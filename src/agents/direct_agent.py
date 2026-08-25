@@ -10,4 +10,5 @@ class DirectAgent(BaseAgent):
 
     def _render(self, task: AgentMessage, context: Blackboard) -> str:
         context.bb_ops.append("get_issue")
-        return self.template.replace("{{issue}}", task.content)
+        dynamic = self.template.replace("{{issue}}", task.content)
+        return self._wrap(dynamic)

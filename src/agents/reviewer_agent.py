@@ -14,7 +14,7 @@ class ReviewerAgent(BaseAgent):
             context.bb_ops.append("get_plan")
         if context.patch:
             context.bb_ops.append("get_patch")
-        prompt = self.template.replace("{{issue}}", task.content)
-        prompt = prompt.replace("{{plan}}", context.plan)
-        prompt = prompt.replace("{{patch}}", context.patch)
-        return prompt
+        dynamic = self.template.replace("{{issue}}", task.content)
+        dynamic = dynamic.replace("{{plan}}", context.plan)
+        dynamic = dynamic.replace("{{patch}}", context.patch)
+        return self._wrap(dynamic)

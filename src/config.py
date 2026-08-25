@@ -79,6 +79,11 @@ class Config:
     MAX_TOOL_TURNS = _get_int_env("MAX_TOOL_TURNS", 8)
     TOOLCALL_REPO_DIR = _get_env("TOOLCALL_REPO_DIR", "datasets/repos")
 
+    # When true, prompts are reordered so a long, identical static header sits at
+    # the top (enabling automatic prefix caching within a strategy). When false,
+    # the legacy layout is used so existing runs stay reproducible.
+    PROMPT_CACHE_LAYOUT = _get_env("PROMPT_CACHE_LAYOUT", "false").lower() in ("1", "true", "yes")
+
     SOURCE_CONTEXT_ENABLED = _get_env("SOURCE_CONTEXT_ENABLED", "true").lower() in ("1", "true", "yes")
     SOURCE_CONTEXT_MAX_CHARS = _get_int_env("SOURCE_CONTEXT_MAX_CHARS", 40000)
     SOURCE_CONTEXT_MAX_FILES = _get_int_env("SOURCE_CONTEXT_MAX_FILES", 12)
