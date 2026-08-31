@@ -110,17 +110,17 @@ def compute_avg_time_per_inference(df: pd.DataFrame) -> pd.Series:
 def compute_cost_per_success(df: pd.DataFrame) -> pd.DataFrame:
     """Total cost divided by success count per strategy.
 
-    Uses the window-aware ``actual_cost_usd`` (real rate per WIB peak/off-peak),
+    Uses the window-aware ``cost_usd_actual`` (real rate per WIB peak/off-peak),
     while still surfacing the off-peak and peak extremes for reference.
     """
     df = _ensure_strategy_column(_ensure_error_column(df))
     if df.empty:
         return pd.DataFrame()
-    total_cost_usd = df.groupby("strategy")["actual_cost_usd"].sum() if "actual_cost_usd" in df.columns else df.groupby("strategy")["cost_usd"].sum()
-    total_cost_idr = df.groupby("strategy")["actual_cost_idr"].sum() if "actual_cost_idr" in df.columns else df.groupby("strategy")["cost_idr"].sum()
-    peak_cost_usd = df.groupby("strategy")["peak_total_cost_usd"].sum() if "peak_total_cost_usd" in df.columns else pd.Series(0.0, index=total_cost_usd.index)
-    peak_cost_idr = df.groupby("strategy")["peak_total_cost_idr"].sum() if "peak_total_cost_idr" in df.columns else pd.Series(0.0, index=total_cost_idr.index)
-    off_cost_usd = df.groupby("strategy")["cost_usd"].sum()
+    total_cost_usd = df.groupby("strategy")["cost_usd_actual"].sum() if "cost_usd_actual" in df.columns else df.groupby("strategy")["cost_usd_offpeak"].sum()
+    total_cost_idr = df.groupby("strategy")["cost_idr_actual"].sum() if "cost_idr_actual" in df.columns else df.groupby("strategy")["cost_idr_offpeak"].sum()
+    peak_cost_usd = df.groupby("strategy")["cost_usd_peak"].sum() if "cost_usd_peak" in df.columns else pd.Series(0.0, index=total_cost_usd.index)
+    peak_cost_idr = df.groupby("strategy")["cost_idr_peak"].sum() if "cost_idr_peak" in df.columns else pd.Series(0.0, index=total_cost_idr.index)
+    off_cost_usd = df.groupby("strategy")["cost_usd_offpeak"].sum()
     if "resolved" in df.columns:
         success_cnt = df.groupby("strategy")["resolved"].sum()
     else:
@@ -149,11 +149,12 @@ def compute_cache_hit_rate(df: pd.DataFrame) -> pd.Series:
     df = _ensure_strategy_column(df)
     if df.empty:
         return pd.Series(dtype="float64")
-    cached_col = "cached_input_tokens" if "cached_input_tokens" in df.columns else None
+    cached_col = "input_tokens_cached" if "input_tokens_cached" in df.columns else ("cached_input_tokens" if "cached_input_tokens" in df.columns else None)
+    regular_col = "input_tokens_regular" if "input_tokens_regular" in df.columns else ("regular_input_tokens" if "regular_input_tokens" in df.columns else None)
     if cached_col is None:
         return pd.Series(0.0, index=df["strategy"].unique())
-    cached = df.groupby("strategy")["cached_input_tokens"].sum()
-    regular = df.groupby("strategy")["regular_input_tokens"].sum()
+    cached = df.groupby("strategy")[cached_col].sum()
+    regular = df.groupby("strategy")[regular_col].sum() if regular_col else pd.Series(0, index=cached.index)
     total = cached + regular
     return cached / total.replace(0, pd.NA)
 

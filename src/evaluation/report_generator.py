@@ -113,8 +113,8 @@ def generate_reports(df: pd.DataFrame, exp_dir: Path) -> Path:
         "instance_id", "strategy", "model", "difficulty", "resolved",
         "patch_applied", "failure_reason",
         "inference_count", "execution_time",
-        "prompt_tokens", "completion_tokens", "total_tokens",
-        "cost_usd", "cost_idr", "patch_preview",
+        "input_tokens_total", "output_tokens", "total_tokens",
+        "cost_usd_offpeak", "cost_idr_offpeak", "patch_preview",
     ]
     raw_cols = [c for c in raw_cols if c in df.columns]
     results_df = df[raw_cols].copy()
@@ -132,7 +132,7 @@ def generate_reports(df: pd.DataFrame, exp_dir: Path) -> Path:
             success_rate=("resolved", "mean"),
             avg_time=("execution_time", "mean"),
             avg_tokens=("total_tokens", "mean"),
-            avg_cost=("cost_usd", "mean"),
+            avg_cost=("cost_usd_offpeak", "mean"),
         ).reset_index()
         repo_summary["success_rate"] = (repo_summary["success_rate"] * 100).round(1)
         repo_summary.to_csv(eval_dir / "repository_summary.csv", index=False)
@@ -144,7 +144,7 @@ def generate_reports(df: pd.DataFrame, exp_dir: Path) -> Path:
         success_rate=("resolved", "mean"),
         avg_time=("execution_time", "mean"),
         avg_tokens=("total_tokens", "mean"),
-        avg_cost=("cost_usd", "mean"),
+        avg_cost=("cost_usd_offpeak", "mean"),
     ).reset_index()
     strategy_summary["success_rate"] = (strategy_summary["success_rate"] * 100).round(1)
     strategy_summary.to_csv(eval_dir / "strategy_summary.csv", index=False)
@@ -154,7 +154,7 @@ def generate_reports(df: pd.DataFrame, exp_dir: Path) -> Path:
         effectiveness_pct=("resolved", "mean"),
         avg_time_s=("execution_time", "mean"),
         avg_tokens=("total_tokens", "mean"),
-        total_cost_usd=("cost_usd", "sum"),
+        total_cost_usd=("cost_usd_offpeak", "sum"),
         resolved_count=("resolved", "sum"),
     ).reset_index()
     tradeoff["effectiveness_pct"] = (tradeoff["effectiveness_pct"] * 100).round(1)

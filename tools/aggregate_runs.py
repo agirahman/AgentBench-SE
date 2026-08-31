@@ -80,7 +80,7 @@ def aggregate(runs: list[pd.DataFrame], metrics: list[str]) -> pd.DataFrame:
                 elif metric == "generation_success_rate":
                     values.append((sub["error"].fillna("").str.len() == 0).mean())
                 elif metric in sub.columns and pd.api.types.is_numeric_dtype(sub[metric]):
-                    values.append(sub[metric].sum() if metric in ("cost_usd", "cost_idr", "execution_time", "total_tokens") else sub[metric].mean())
+                    values.append(sub[metric].sum() if metric in ("cost_usd_offpeak", "cost_usd_actual", "cost_idr_offpeak", "cost_idr_actual", "execution_time", "total_tokens") else sub[metric].mean())
                 else:
                     continue
             if not values:
@@ -112,7 +112,7 @@ def main() -> None:
     parser.add_argument(
         "--metrics",
         nargs="*",
-        default=["resolution_rate", "cost_usd", "execution_time", "total_tokens"],
+        default=["resolution_rate", "cost_usd_actual", "cost_usd_offpeak", "execution_time", "total_tokens"],
         help="Metrics to aggregate. 'resolution_rate' uses resolved if present.",
     )
     parser.add_argument("--out", default=None, help="Optional path to write the aggregated CSV.")
