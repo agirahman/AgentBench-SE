@@ -305,6 +305,29 @@ def run_experiments(
                                     "edited tests, so it will not resolve."
                                 )
 
+                # Re-derive status from the patch we ACTUALLY submit. Both checks
+                # above ran on the raw captured diff, before test-file stripping,
+                # so their verdicts could describe a patch that is never sent.
+                # Observed on EXP-20260927-008 (django-10914 review): the raw diff
+                # was HUNK_MISMATCH/NORMALIZE because the agent's edit to a gold
+                # test file left that hunk one line short, while the submitted
+                # patch (that hunk removed) was clean and applied with rc=0.
+                # Reporting the raw verdict would have libelled a good patch.
+                if model_patch.strip() and model_patch != diff:
+                    patch_status = extract_diff(model_patch).status
+                    result.patch_status = patch_status
+                    if Config.APPLY_CHECK_ENABLED:
+                        try:
+                            result.apply_status = validate_applicability(
+                                model_patch, ensure_repo_root(issue.repo, issue.base_commit)
+                            )
+                        except Exception as exc:  # noqa: BLE001 - never fail a run
+                            logger.warning(
+                                f"  ⚠ apply check failed for {issue.instance_id} "
+                                f"({name}): {type(exc).__name__}: {exc}"
+                            )
+                            result.apply_status = "UNKNOWN"
+
                 pred_entry = {
                     "instance_id": issue.instance_id,
                     "model_patch": model_patch,

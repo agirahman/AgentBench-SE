@@ -75,12 +75,17 @@ class ReviewStrategy:
         # working patch (EXP-20260927-007, django-10924 review: the unverified
         # revision was the one evaluated, and it failed, while planning's single
         # patch on the same issue resolved).
-        initial_patch = initial_diff.strip()
+        # NOTE: never `.strip()` a diff. A hunk's last line may legitimately be a
+        # whitespace-only context line (" "), and stripping removes it, leaving a
+        # body one line shorter than its @@ header declares. The result is a
+        # corrupt patch (git: "corrupt patch at line N") that patch_status then
+        # mislabels NORMALIZE. Keep the diff byte-exact; strip only for emptiness.
+        initial_patch = initial_diff
         approved = _extract_verdict(review_resp.inference.response) == "APPROVED"
         candidates: list[tuple[str, bool]] = [(initial_patch, approved)]
 
         initial_truncated = initial_resp.inference.finish_reason == "length"
-        if not approved and initial_patch and not initial_truncated:
+        if not approved and initial_patch.strip() and not initial_truncated:
             bb.feedback = review_resp.inference.response
             bb.log(AgentMessage(sender="orchestrator", receiver="reviewer", kind="task", content="", bb_ops=["save_feedback"]))
             while not approved and bb.revision < Config.MAX_REVISION_TURNS:
@@ -94,8 +99,8 @@ class ReviewStrategy:
                 bb.revision += 1
                 bb.log(AgentMessage(sender="orchestrator", receiver="executor", kind="task", content="", bb_ops=["save_patch"]))
 
-                revised_patch = bb.patch.strip()
-                if not revised_patch:
+                revised_patch = bb.patch
+                if not revised_patch.strip():
                     break
 
                 # Re-review the revision. A revision nobody checked is not an
