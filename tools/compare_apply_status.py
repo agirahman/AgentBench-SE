@@ -24,6 +24,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 REPO_BASE = ROOT / "datasets" / "repos"
 
+# Buffer output and write it ourselves as UTF-8. PowerShell's `>` redirect emits
+# UTF-16LE, which a later UTF-8 read turns into NUL-interleaved garbage.
+_OUT = Path(sys.argv[2]) if len(sys.argv) > 2 else None
+_buf: list[str] = []
+
+
+def emit(line: str = "") -> None:
+    _buf.append(line)
+
+
+def flush() -> None:
+    text = "\n".join(_buf) + "\n"
+    if _OUT is not None:
+        _OUT.write_text(text, encoding="utf-8")
+    else:
+        sys.stdout.write(text)
+
 
 def load_dataset_meta() -> dict[str, dict]:
     sys.path.insert(0, str(ROOT / "src"))
@@ -80,11 +97,11 @@ def main() -> int:
         for row in csv.DictReader(f):
             rows.append(row)
 
-    print(f"experiment: {exp.name}   rows: {len(rows)}")
-    print()
+    emit(f"experiment: {exp.name}   rows: {len(rows)}")
+    emit()
     hdr = f"{'instance':24s} {'strat':9s} {'pipeline':13s} {'ground truth':13s} {'match':7s}"
-    print(hdr)
-    print("-" * len(hdr))
+    emit(hdr)
+    emit("-" * len(hdr))
 
     agree = disagree = 0
     for r in rows:
@@ -92,14 +109,14 @@ def main() -> int:
         pipeline = r.get("apply_status", "?")
         pf = exp / "patches" / f"{iid}_{strat}.txt"
         if not pf.exists():
-            print(f"{iid:24s} {strat:9s} {pipeline:13s} {'NO_PATCH':13s} {'-':7s}")
+            emit(f"{iid:24s} {strat:9s} {pipeline:13s} {'NO_PATCH':13s} {'-':7s}")
             continue
 
         info = meta.get(iid, {})
         repo, base = info.get("repo", ""), info.get("base_commit", "")
         co = find_checkout(repo, base) if (repo and base) else None
         if co is None:
-            print(f"{iid:24s} {strat:9s} {pipeline:13s} {'NO_CHECKOUT':13s} {'-':7s}")
+            emit(f"{iid:24s} {strat:9s} {pipeline:13s} {'NO_CHECKOUT':13s} {'-':7s}")
             continue
 
         gt, detail = ground_truth(pf.read_text(encoding="utf-8"), co, base)
@@ -108,17 +125,18 @@ def main() -> int:
             agree += 1
         else:
             disagree += 1
-        print(f"{iid:24s} {strat:9s} {pipeline:13s} {gt:13s} {same:7s}")
+        emit(f"{iid:24s} {strat:9s} {pipeline:13s} {gt:13s} {same:7s}")
         if detail:
-            print(f"{'':24s} {'':9s} ^ {detail}")
+            emit(f"{'':24s} {'':9s} ^ {detail}")
         rows[rows.index(r)]["ground_truth"] = gt
 
-    print()
-    print(f"agreement: {agree}/{agree + disagree}   mismatch: {disagree}")
+    emit()
+    emit(f"agreement: {agree}/{agree + disagree}   mismatch: {disagree}")
 
     out = exp / "apply_status_comparison.json"
     out.write_text(json.dumps(rows, indent=2), encoding="utf-8")
-    print(f"written: {out}")
+    emit(f"written: {out}")
+    flush()
     return 0
 
 
