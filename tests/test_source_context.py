@@ -112,18 +112,38 @@ def test_build_source_context_contains_line_numbers_and_tree(fake_repo):
     assert "File tree" in context
 
 
-def test_to_agent_prompt_includes_source_when_available(fake_repo):
+def test_to_agent_prompt_has_no_source_snapshot(fake_repo):
+    """The agent prompt must NOT carry a pre-selected source snapshot.
+
+    Tool calling is the mechanism for gathering evidence: the agent explores the
+    checkout with read_file/grep/list_files. Injecting a snapshot as well would
+    hand it the answer while also claiming it found the answer itself.
+    """
     repo_dir, commit = fake_repo
-    issue = _make_issue("django/django", commit)
+    issue = _make_issue("django/django", commit, "format_number in utils/formatter.py")
     prompt = issue.to_agent_prompt()
-    assert "SOURCE CODE (base commit)" in prompt
-    assert "formatter.py" in prompt
+    assert prompt == issue.to_prompt()
+    assert "SOURCE CODE (base commit)" not in prompt
+    assert "File tree" not in prompt
 
 
-def test_to_agent_prompt_falls_back_without_network(monkeypatch, tmp_path):
-    monkeypatch.setattr(Config, "REPO_CACHE_DIR", str(tmp_path / "repos"))
-    issue = _make_issue("django/django", "abc123")
-    assert issue.to_agent_prompt() == issue.to_prompt()
+def test_to_agent_prompt_does_not_touch_the_repo(fake_repo, monkeypatch):
+    """Building the prompt must not read the repo at all (no hidden I/O)."""
+    repo_dir, commit = fake_repo
+    calls = {"n": 0}
+
+    import source_context as sc
+
+    real = sc.build_source_context
+
+    def spy(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(sc, "build_source_context", spy)
+    issue = _make_issue("django/django", commit)
+    issue.to_agent_prompt()
+    assert calls["n"] == 0
 
 
 def test_extract_diff_keeps_complete_patch_when_truncated():

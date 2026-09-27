@@ -101,6 +101,15 @@ class PricingTable:
             "currency": "USD",
             "pricing_version": "2026-07",
         },
+        # 9router (OpenCode route) free testing model. Genuinely $0, not a dummy
+        # rate: it is only used to validate the pipeline before the final
+        # DeepSeek run, so a zero cost card is accurate.
+        "oc/space-bunny-free": {
+            "input_per_million": 0.0,
+            "output_per_million": 0.0,
+            "currency": "USD",
+            "pricing_version": "2026-09-free",
+        },
         "deepseek-v4-flash": {
             "off_peak": {
                 "input_per_million": 0.22,

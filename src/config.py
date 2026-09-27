@@ -120,6 +120,10 @@ class Config:
         "OPENCODE_MODEL",
         "deepseek-v4-flash",
     )
+    # 9router fronts many upstream providers behind one OpenAI-compatible
+    # endpoint, so the opencode and commandcode routes share this base URL. The
+    # model prefix selects the upstream (oc/... vs cmd/...).
+    OPENCODE_BASE_URL = _get_env("OPENCODE_BASE_URL", "http://localhost:20128/v1")
 
     OPENROUTER_API_KEY = _get_env("OPENROUTER_API_KEY")
     OPENROUTER_MODEL = _get_env(
@@ -184,3 +188,29 @@ class Config:
     REPO_CACHE_DIR = _get_env("REPO_CACHE_DIR", "datasets/repos")
 
     USD_IDR_RATE = _get_float_env("USD_IDR_RATE", 16500.0)
+
+
+def _warn_if_source_context_enabled() -> None:
+    """Warn that SOURCE_CONTEXT_ENABLED no longer changes the agent prompt.
+
+    Issue.to_agent_prompt() now always returns the bare problem statement: the
+    agent gathers evidence with tools, and a pre-injected snapshot would be a
+    confound. The flag is kept only so an ablation baseline can be built on top
+    of source_context.build_source_context. Leaving it silently ignored would let
+    a researcher believe they had enabled (or disabled) passive context when the
+    prompt was identical either way.
+    """
+    if not Config.SOURCE_CONTEXT_ENABLED:
+        return
+    try:
+        from utils.logger import logger
+    except Exception:  # noqa: BLE001
+        return
+    logger.warning(
+        "SOURCE_CONTEXT_ENABLED=true has NO EFFECT: agents now gather evidence with "
+        "tools, and Issue.to_agent_prompt() never injects a source snapshot. Set it "
+        "to false to avoid confusion, or build the ablation explicitly."
+    )
+
+
+_warn_if_source_context_enabled()

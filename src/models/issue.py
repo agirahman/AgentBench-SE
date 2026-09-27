@@ -37,23 +37,21 @@ class Issue:
         )
 
     def to_agent_prompt(self) -> str:
-        base = self.to_prompt()
+        """The prompt handed to an agent: the problem statement, nothing else.
 
-        # Source context and tool calling are two ways to give the agent the same
-        # information: one passive (a pre-selected snapshot), one active (the agent
-        # explores). Injecting both is a confound — the agent is handed a 41 KB
-        # snapshot *and* told to explore, so "the agent found it itself" is no
-        # longer true, and the snapshot is often irrelevant (for django-10914,
-        # about FILE_UPLOAD_PERMISSIONS, it injected tests/admin_views/tests.py).
-        # When tools are on, tools win.
-        if Config.TOOLCALL_ENABLED:
-            return base
+        Deliberately carries NO pre-selected source snapshot. The agent is
+        expected to explore the checked-out repo itself with read_file / grep /
+        list_files, which is the whole point of tool calling.
 
-        if not Config.SOURCE_CONTEXT_ENABLED:
-            return base
-        from source_context import build_source_context
+        Injecting a snapshot as well is a confound, not a convenience: the agent
+        would be handed the evidence *and* told to go find it, so the claim
+        "the agent located the bug itself" would no longer be true. Measured on
+        EXP-20260924-005 the injected block was also frequently irrelevant — for
+        django-10914 (about FILE_UPLOAD_PERMISSIONS) it injected
+        tests/admin_views/tests.py — while costing ~41 KB of context on every
+        single agent call.
 
-        context = build_source_context(self)
-        if not context:
-            return base
-        return f"{base}\n\n===== SOURCE CODE (base commit) =====\n{context}"
+        ``source_context.build_source_context`` is retained as an ablation path
+        (passive context vs active exploration); it is simply not used here.
+        """
+        return self.to_prompt()
