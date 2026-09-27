@@ -25,6 +25,26 @@ def _ensure_patch_status_column(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _first_col(df: pd.DataFrame, *names: str) -> str | None:
+    """Return the first of ``names`` present in ``df``, else None.
+
+    Cost columns were renamed across schema generations
+    (``cost_usd`` → ``cost_usd_offpeak`` → ``cost_usd_actual``). Consumers must
+    accept every generation so that older experiment CSVs keep working; a plain
+    subscript raises ``KeyError`` on any CSV that predates the rename.
+    """
+    return next((n for n in names if n in df.columns), None)
+
+
+def _cost_col(df: pd.DataFrame, *names: str) -> pd.Series:
+    """Group-sum the first of ``names`` present, else an all-zero Series."""
+    index = df.groupby("strategy").size().index
+    col = _first_col(df, *names)
+    if col is None:
+        return pd.Series(0.0, index=index)
+    return df.groupby("strategy")[col].sum()
+
+
 def _pricing_rates(pricing: dict | None) -> tuple:
     """Return (input, cached_input, output, version) rates from pricing dict.
 
@@ -110,17 +130,28 @@ def compute_avg_time_per_inference(df: pd.DataFrame) -> pd.Series:
 def compute_cost_per_success(df: pd.DataFrame) -> pd.DataFrame:
     """Total cost divided by success count per strategy.
 
-    Uses the window-aware ``cost_usd_actual`` (real rate per WIB peak/off-peak),
+    Uses the window-aware ``cost_usd_actual`` (real rate per WIB peak/off-peak)
     while still surfacing the off-peak and peak extremes for reference.
+
+    Accepts every cost-column generation so that CSVs written before the
+    ``cost_usd`` → ``cost_usd_offpeak`` rename remain readable.
     """
     df = _ensure_strategy_column(_ensure_error_column(df))
     if df.empty:
         return pd.DataFrame()
-    total_cost_usd = df.groupby("strategy")["cost_usd_actual"].sum() if "cost_usd_actual" in df.columns else df.groupby("strategy")["cost_usd_offpeak"].sum()
-    total_cost_idr = df.groupby("strategy")["cost_idr_actual"].sum() if "cost_idr_actual" in df.columns else df.groupby("strategy")["cost_idr_offpeak"].sum()
-    peak_cost_usd = df.groupby("strategy")["cost_usd_peak"].sum() if "cost_usd_peak" in df.columns else pd.Series(0.0, index=total_cost_usd.index)
-    peak_cost_idr = df.groupby("strategy")["cost_idr_peak"].sum() if "cost_idr_peak" in df.columns else pd.Series(0.0, index=total_cost_idr.index)
-    off_cost_usd = df.groupby("strategy")["cost_usd_offpeak"].sum()
+    total_cost_usd = _cost_col(
+        df, "cost_usd_actual", "actual_cost_usd", "cost_usd_offpeak", "cost_usd"
+    )
+    total_cost_idr = _cost_col(
+        df, "cost_idr_actual", "actual_cost_idr", "cost_idr_offpeak", "cost_idr"
+    )
+    peak_cost_usd = _cost_col(
+        df, "cost_usd_peak", "cost_usd_peak_total", "peak_total_cost_usd"
+    )
+    peak_cost_idr = _cost_col(
+        df, "cost_idr_peak", "cost_idr_peak_total", "peak_total_cost_idr"
+    )
+    off_cost_usd = _cost_col(df, "cost_usd_offpeak", "cost_usd")
     if "resolved" in df.columns:
         success_cnt = df.groupby("strategy")["resolved"].sum()
     else:

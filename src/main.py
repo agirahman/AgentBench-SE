@@ -307,8 +307,18 @@ def main():
     )
 
     # Total metrics keseluruhan
+    # Cost columns were renamed across schema generations
+    # (``cost_usd`` → ``cost_usd_offpeak`` → ``cost_usd_actual``); accept all.
+    cost_col = next(
+        (
+            c
+            for c in ("cost_usd_actual", "actual_cost_usd", "cost_usd_offpeak", "cost_usd")
+            if c in df.columns
+        ),
+        None,
+    )
     total_tokens = df['total_tokens'].sum()
-    total_cost = df['cost_usd'].sum()
+    total_cost = df[cost_col].sum() if cost_col else 0.0
     avg_time = df['execution_time'].mean()
     logger.info(
         f"Total tokens: {total_tokens:,.0f} | "
@@ -319,23 +329,23 @@ def main():
     print(f"\n=== Experiment {exp_id} completed ===")
     print(f"Output directory: {exp_dir}/")
 
-    strategy_summary = df.groupby("strategy")[
-        ["execution_time", "inference_count", "total_tokens", "cost_usd"]
-    ].mean()
+    summary_cols = ["execution_time", "inference_count", "total_tokens"]
+    if cost_col:
+        summary_cols.append(cost_col)
+    strategy_summary = df.groupby("strategy")[summary_cols].mean()
     print("\n=== STRATEGY SUMMARY ===")
     print(strategy_summary.to_string())
     
     if "difficulty" in df.columns:
-        diff_summary = df.groupby("difficulty")[
-            ["execution_time", "total_tokens", "cost_usd"]
-        ].mean()
+        diff_summary = df.groupby("difficulty")[summary_cols].mean()
         print("\n=== DIFFICULTY SUMMARY ===")
         print(diff_summary.to_string())
 
         # Cost by strategy × difficulty
-        cross = df.groupby(["strategy", "difficulty"])["cost_usd"].sum().unstack(fill_value=0)
-        print("\n=== COST BY STRATEGY × DIFFICULTY ===")
-        print(cross.to_string())
+        if cost_col:
+            cross = df.groupby(["strategy", "difficulty"])[cost_col].sum().unstack(fill_value=0)
+            print("\n=== COST BY STRATEGY × DIFFICULTY ===")
+            print(cross.to_string())
 
 
 if __name__ == "__main__":

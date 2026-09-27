@@ -33,16 +33,29 @@ def build_strategy_difficulty_summary(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=["execution_time", "total_tokens", "cost_usd", "success_rate"])
 
-    grouped = (
-        df.groupby(["strategy", "difficulty"])
-        .agg(
-            execution_time=("execution_time", "mean"),
-            total_tokens=("total_tokens", "sum"),
-            cost_usd=("cost_usd", "sum"),
-            success_rate=("generated", "mean"),
-        )
-        .reset_index()
+    # Cost columns were renamed across schema generations
+    # (``cost_usd`` → ``cost_usd_offpeak`` → ``cost_usd_actual``); accept all.
+    cost_col = next(
+        (c for c in ("cost_usd_actual", "actual_cost_usd", "cost_usd_offpeak", "cost_usd")
+         if c in df.columns),
+        None,
     )
+    # ``generated`` is the generation-phase flag; ``resolved`` is the eval-phase
+    # equivalent used when this tool runs on results/EXP-*/eval/results.csv.
+    success_col = next(
+        (c for c in ("generated", "resolved") if c in df.columns), None
+    )
+
+    agg = {
+        "execution_time": ("execution_time", "mean"),
+        "total_tokens": ("total_tokens", "sum"),
+    }
+    if cost_col:
+        agg["cost_usd"] = (cost_col, "sum")
+    if success_col:
+        agg["success_rate"] = (success_col, "mean")
+
+    grouped = df.groupby(["strategy", "difficulty"]).agg(**agg).reset_index()
     return grouped.set_index(["strategy", "difficulty"])
 
 
@@ -169,8 +182,6 @@ def main():
         cmd_cost_per_success(df)
     elif args.command == "strategy_difficulty":
         cmd_strategy_difficulty(df)
-    elif args.command == "significance":
-        cmd_significance(df)
     elif args.command == "significance":
         cmd_significance(df)
 

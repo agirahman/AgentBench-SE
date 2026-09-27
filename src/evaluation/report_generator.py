@@ -21,6 +21,34 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv()
 USD_IDR_RATE = float(os.getenv("USD_IDR_RATE", "16500"))
 
+# Cost columns were renamed across schema generations
+# (``cost_usd`` → ``cost_usd_offpeak`` → ``cost_usd_actual``). Every consumer
+# below accepts all generations so that older experiment CSVs stay readable.
+# Order matters: the first name present wins, preserving each metric's original
+# meaning (off-peak totals for summaries, window-aware actual for RQ3).
+_COST_ACTUAL = ("cost_usd_actual", "actual_cost_usd", "cost_usd_offpeak", "cost_usd")
+_COST_OFFPEAK = ("cost_usd_offpeak", "cost_usd")
+_COST_PEAK = ("cost_usd_peak", "cost_usd_peak_total", "peak_total_cost_usd")
+
+
+def _pick_col(df: pd.DataFrame, *names: str) -> Optional[str]:
+    """Return the first of ``names`` present in ``df``, else None."""
+    return next((n for n in names if n in df.columns), None)
+
+
+def _ensure_cost_col(df: pd.DataFrame, names: tuple[str, ...] = _COST_OFFPEAK):
+    """Return ``(df, col)`` with a usable cost column, adding zeros if absent.
+
+    Guarantees a named column exists so downstream ``groupby().agg()`` specs
+    never raise ``KeyError`` on a CSV lacking cost data entirely.
+    """
+    col = _pick_col(df, *names)
+    if col is None:
+        df = df.copy()
+        col = "_cost_usd_zero"
+        df[col] = 0.0
+    return df, col
+
 
 def load_experiment_data(exp_dir: Path) -> pd.DataFrame:
     """Load the generation-phase CSV from an experiment dir.
@@ -108,15 +136,19 @@ def generate_reports(df: pd.DataFrame, exp_dir: Path) -> Path:
     eval_dir = exp_dir / "eval"
     eval_dir.mkdir(parents=True, exist_ok=True)
 
+    # Resolve cost columns once for every aggregation below (schema-tolerant).
+    df, cost_offpeak_col = _ensure_cost_col(df, _COST_OFFPEAK)
+    cost_actual_col = _pick_col(df, *_COST_ACTUAL) or cost_offpeak_col
+
     # 1. results.csv — raw per instance
     raw_cols = [
         "instance_id", "strategy", "model", "difficulty", "resolved",
         "patch_applied", "failure_reason",
         "inference_count", "execution_time",
         "input_tokens_total", "output_tokens", "total_tokens",
-        "cost_usd_offpeak", "cost_idr_offpeak", "patch_preview",
+        cost_actual_col, cost_offpeak_col, "cost_idr_offpeak", "patch_preview",
     ]
-    raw_cols = [c for c in raw_cols if c in df.columns]
+    raw_cols = list(dict.fromkeys(c for c in raw_cols if c in df.columns))
     results_df = df[raw_cols].copy()
     results_df.to_csv(eval_dir / "results.csv", index=False)
 
@@ -132,7 +164,7 @@ def generate_reports(df: pd.DataFrame, exp_dir: Path) -> Path:
             success_rate=("resolved", "mean"),
             avg_time=("execution_time", "mean"),
             avg_tokens=("total_tokens", "mean"),
-            avg_cost=("cost_usd_offpeak", "mean"),
+            avg_cost=(cost_offpeak_col, "mean"),
         ).reset_index()
         repo_summary["success_rate"] = (repo_summary["success_rate"] * 100).round(1)
         repo_summary.to_csv(eval_dir / "repository_summary.csv", index=False)
@@ -144,7 +176,7 @@ def generate_reports(df: pd.DataFrame, exp_dir: Path) -> Path:
         success_rate=("resolved", "mean"),
         avg_time=("execution_time", "mean"),
         avg_tokens=("total_tokens", "mean"),
-        avg_cost=("cost_usd_offpeak", "mean"),
+        avg_cost=(cost_offpeak_col, "mean"),
     ).reset_index()
     strategy_summary["success_rate"] = (strategy_summary["success_rate"] * 100).round(1)
     strategy_summary.to_csv(eval_dir / "strategy_summary.csv", index=False)
@@ -154,7 +186,7 @@ def generate_reports(df: pd.DataFrame, exp_dir: Path) -> Path:
         effectiveness_pct=("resolved", "mean"),
         avg_time_s=("execution_time", "mean"),
         avg_tokens=("total_tokens", "mean"),
-        total_cost_usd=("cost_usd_offpeak", "sum"),
+        total_cost_usd=(cost_offpeak_col, "sum"),
         resolved_count=("resolved", "sum"),
     ).reset_index()
     tradeoff["effectiveness_pct"] = (tradeoff["effectiveness_pct"] * 100).round(1)
@@ -183,11 +215,13 @@ def generate_reports(df: pd.DataFrame, exp_dir: Path) -> Path:
     with open(eval_dir / "statistics.json", "w") as f:
         json.dump(stats, f, indent=2, default=str)
 
-    # 7. figures/ — charts
+    # 7. figures/ — charts (optional: reports above are the primary artifacts)
     try:
         _generate_figures(df, eval_dir / "figures")
     except ImportError:
         print("Warning: matplotlib not installed, skipping figures")
+    except Exception as exc:  # noqa: BLE001 - figures must not lose the reports
+        print(f"Warning: figure generation failed ({type(exc).__name__}: {exc})")
 
     return eval_dir
 
@@ -218,26 +252,37 @@ def _generate_summary_md(df: pd.DataFrame, out_path: Path) -> None:
         # RQ3 — Cost Tradeoff (window-aware: actual_cost_usd reflects the
         # real WIB peak/off-peak rate per inference timestamp)
         f.write("## RQ3 — Cost Tradeoff\n\n")
-        cost_col = "actual_cost_usd" if "actual_cost_usd" in df.columns else "cost_usd"
-        strat_cost = df.groupby("strategy")[cost_col].sum()
-        strat_resolved = df.groupby("strategy")["resolved"].sum()
-        if "peak_total_cost_usd" in df.columns:
-            strat_peak = df.groupby("strategy")["peak_total_cost_usd"].sum()
+        cost_col = _pick_col(df, *_COST_ACTUAL) or _pick_col(df, *_COST_OFFPEAK)
+        if cost_col is None:
+            f.write("- (no cost columns in this CSV)\n\n")
+            strat_cost = None
         else:
-            strat_peak = pd.Series(0.0, index=strat_cost.index)
-        if "off_peak_total_cost_usd" in df.columns:
-            strat_off = df.groupby("strategy")["off_peak_total_cost_usd"].sum()
-        else:
-            strat_off = strat_cost
-        for strategy in strat_cost.index:
-            resolved = strat_resolved[strategy]
-            cost_per_fix = (strat_cost[strategy] / resolved) if resolved > 0 else float("nan")
-            f.write(
-                f"- **{strategy}**: ${strat_cost[strategy]:.4f} actual "
-                f"(off-peak ${strat_off[strategy]:.4f} / peak ${strat_peak[strategy]:.4f}), "
-                f"${cost_per_fix:.4f} per successful fix\n"
+            strat_cost = df.groupby("strategy")[cost_col].sum()
+        if strat_cost is not None:
+            strat_resolved = df.groupby("strategy")["resolved"].sum()
+            peak_col = _pick_col(df, *_COST_PEAK)
+            strat_peak = (
+                df.groupby("strategy")[peak_col].sum()
+                if peak_col
+                else pd.Series(0.0, index=strat_cost.index)
             )
-        f.write("\n")
+            off_col = _pick_col(df, *_COST_OFFPEAK)
+            strat_off = (
+                df.groupby("strategy")[off_col].sum()
+                if off_col
+                else strat_cost
+            )
+            for strategy in strat_cost.index:
+                resolved = strat_resolved[strategy]
+                cost_per_fix = (
+                    (strat_cost[strategy] / resolved) if resolved > 0 else float("nan")
+                )
+                f.write(
+                    f"- **{strategy}**: ${strat_cost[strategy]:.4f} actual "
+                    f"(off-peak ${strat_off[strategy]:.4f} / peak ${strat_peak[strategy]:.4f}), "
+                    f"${cost_per_fix:.4f} per successful fix\n"
+                )
+            f.write("\n")
 
         # Failure Analysis — patch_applied & failure reason breakdown
         f.write("## Failure Analysis (patch_applied & reasons)\n\n")
@@ -298,32 +343,34 @@ def _generate_figures(df: pd.DataFrame, fig_dir: Path) -> None:
     plt.close()
 
     # Cost by strategy
-    plt.figure(figsize=(8, 5))
-    strat_cost = df.groupby("strategy")["cost_usd"].sum()
-    strat_cost.plot(kind="bar", color="salmon")
-    plt.title("Total Cost by Strategy (USD)")
-    plt.ylabel("Cost (USD)")
-    plt.tight_layout()
-    plt.savefig(fig_dir / "cost_by_strategy.png")
-    plt.close()
+    cost_col = _pick_col(df, *_COST_ACTUAL) or _pick_col(df, *_COST_OFFPEAK)
+    if cost_col is not None:
+        plt.figure(figsize=(8, 5))
+        strat_cost = df.groupby("strategy")[cost_col].sum()
+        strat_cost.plot(kind="bar", color="salmon")
+        plt.title("Total Cost by Strategy (USD)")
+        plt.ylabel("Cost (USD)")
+        plt.tight_layout()
+        plt.savefig(fig_dir / "cost_by_strategy.png")
+        plt.close()
 
-    # Cost vs Success scatter
-    plt.figure(figsize=(8, 5))
-    for strategy in df["strategy"].unique():
-        sub = df[df["strategy"] == strategy]
-        plt.scatter(
-            sub["cost_usd"],
-            sub["resolved"].astype(int),
-            label=strategy,
-            alpha=0.7,
-        )
-    plt.title("Cost vs Success by Strategy")
-    plt.xlabel("Cost (USD)")
-    plt.ylabel("Resolved (0/1)")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(fig_dir / "cost_vs_success.png")
-    plt.close()
+        # Cost vs Success scatter
+        plt.figure(figsize=(8, 5))
+        for strategy in df["strategy"].unique():
+            sub = df[df["strategy"] == strategy]
+            plt.scatter(
+                sub[cost_col],
+                sub["resolved"].astype(int),
+                label=strategy,
+                alpha=0.7,
+            )
+        plt.title("Cost vs Success by Strategy")
+        plt.xlabel("Cost (USD)")
+        plt.ylabel("Resolved (0/1)")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(fig_dir / "cost_vs_success.png")
+        plt.close()
 
     # Difficulty analysis
     if "difficulty" in df.columns:
