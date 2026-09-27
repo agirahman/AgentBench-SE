@@ -19,7 +19,12 @@ from models.result import (
 from models.patch import Patch
 from models.inference import InferenceRun
 from experiments.csv_exporter import flatten_for_csv
-from experiments.swebench_adapter import extract_diff, validate_applicability
+from experiments.swebench_adapter import (
+    collect_test_files,
+    extract_diff,
+    strip_test_files,
+    validate_applicability,
+)
 from agents.tools import ensure_repo_root
 from evaluation.statistics import export_statistics_json, generate_summary_md
 from evaluation.cost import PricingTable
@@ -276,6 +281,30 @@ def run_experiments(
                         f"{issue.instance_id} ({name}) — using raw response as patch"
                     )
                     model_patch = patch.response
+
+                # Keep test files out of the submitted patch. The harness resets
+                # test files and applies its own gold test patch; a model patch
+                # that creates the same test file makes `git checkout <base_commit>
+                # <path>` fail ("did not match any file(s) known to git"), and the
+                # gold patch then fails with "already exists in working directory".
+                # Evaluation continues regardless (the eval script has no `set -e`),
+                # so the wrong tests could run. The harness supplies its own tests.
+                if model_patch.strip() and getattr(issue, "test_patch", ""):
+                    gold_test_files = collect_test_files(issue.test_patch)
+                    if gold_test_files:
+                        model_patch, stripped = strip_test_files(model_patch, gold_test_files)
+                        if stripped:
+                            logger.info(
+                                f"  ✂ Removed {len(stripped)} test file(s) from patch "
+                                f"for {issue.instance_id} ({name}): {', '.join(stripped)}"
+                            )
+                            if not model_patch.strip():
+                                logger.warning(
+                                    f"  ⚠ Patch for {issue.instance_id} ({name}) became "
+                                    "empty after removing test files — the model only "
+                                    "edited tests, so it will not resolve."
+                                )
+
                 pred_entry = {
                     "instance_id": issue.instance_id,
                     "model_patch": model_patch,

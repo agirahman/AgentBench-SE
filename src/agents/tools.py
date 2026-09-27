@@ -292,15 +292,52 @@ def list_files(path: str = ".", max_entries: int = 100) -> str:
     return "\n".join(entries) if entries else f"[empty] {path}"
 
 
+# Environment failures look like a broken sandbox, not a failing test. Retrying
+# cannot help, so the tool tells the agent to stop instead of letting it burn
+# turns. Measured on EXP-20260927-004: one planning step spent >33 minutes and 49
+# tool calls, 15 of them run_tests with 8 different command spellings, because
+# nothing told the agent the test environment simply was not installed.
+_ENV_FAILURE_MARKERS = (
+    "no module named",
+    "modulenotfounderror",
+    "importerror",
+    "is not recognized as an internal or external command",
+    "command not found",
+    "cannot find module",
+    "no such file or directory",
+)
+
+
+def _looks_like_env_failure(output: str) -> bool:
+    """True when the command failed because the environment is missing, not the test."""
+    low = output.lower()
+    return any(m in low for m in _ENV_FAILURE_MARKERS)
+
+
+# Repeat-call guard: an agent that retries the same failing command is wasting
+# its budget. Track the last few commands and refuse exact repeats.
+_RECENT_TEST_COMMANDS: list[str] = []
+_MAX_REPEATS = 2
+
+
 def run_tests(command: str = "") -> str:
     """Run a test command inside the instance repo (sandboxed, capped).
 
-    Measured on the tool-call logs, this tool was called 3 times out of 237 —
-    because the default ``python -m pytest -q`` almost always fails in a raw
-    SWE-bench checkout (tests need the repo's own conftest/env). An agent that
-    tries it once, sees a wall of collection errors, and stops using it loses the
-    main way to verify its own fix. So: default to a targeted command, and when
-    no command is given, discover the repo's test layout instead of guessing.
+    SWE-bench checkouts are raw clones: their per-repo dependencies are NOT
+    installed (the official harness supplies those in a conda env). So most test
+    commands fail for environmental reasons. That is not the agent's fault, and
+    retrying cannot fix it — but an agent that does not know this will retry
+    anyway, with new spellings, until its budget is gone.
+
+    Therefore this tool distinguishes two outcomes:
+
+    * **test failure** — tests ran and reported failures. Useful signal.
+    * **environment failure** — the interpreter or a module is missing. The tool
+      says so explicitly and asks the agent to stop retrying.
+
+    The interpreter is ``sys.executable`` (the project venv), not a bare
+    ``python``: on this machine a bare ``python`` resolves to the system
+    interpreter, where the venv's packages are absent.
     """
     root = _repo_root()
     if not root.exists():
@@ -309,6 +346,16 @@ def run_tests(command: str = "") -> str:
     command = (command or "").strip()
     if not command:
         command = _guess_test_command(root)
+
+    # Refuse to spin on an identical command.
+    repeats = sum(1 for c in _RECENT_TEST_COMMANDS if c == command)
+    if repeats >= _MAX_REPEATS:
+        return (
+            f"[stop] You have already run this exact command {repeats} times and it "
+            "did not help. Do NOT run it again. Verify your fix by reading the code "
+            "instead, then finish."
+        )
+    _RECENT_TEST_COMMANDS.append(command)
 
     try:
         proc = subprocess.run(
@@ -325,24 +372,51 @@ def run_tests(command: str = "") -> str:
         return "[error] command timed out (180s limit)"
     except Exception as e:  # noqa: BLE001
         return f"[error] cannot run command: {e}"
+
     out = (proc.stdout or "") + (proc.stderr or "")
     limit = 4000
-    if len(out) > limit:
-        out = out[-limit:] + "\n[... output truncated ...]"
-    return f"[exit code {proc.returncode}]\n{out}"
+    truncated = len(out) > limit
+    if truncated:
+        out = out[-limit:]
+
+    if _looks_like_env_failure(out):
+        return (
+            "[tests unavailable] The test environment for this repository is not "
+            "installed in this sandbox (its dependencies come from the evaluation "
+            "harness, not from a raw clone). This is NOT a problem with your fix, "
+            "and retrying with a different command will not help.\n"
+            "Do NOT call run_tests again. Verify your change by reasoning about the "
+            "code, then produce your final patch.\n\n"
+            f"Command: {command}\n[exit code {proc.returncode}]\n{out}"
+        )
+
+    suffix = "\n[... output truncated ...]" if truncated else ""
+    return f"[exit code {proc.returncode}]\n{out}{suffix}"
 
 
 def _guess_test_command(root: Path) -> str:
     """Pick a plausible test command for this checkout.
 
-    ``-x -q`` (stop at first failure, quiet) keeps output small and useful; a
-    full suite in a large repo can take minutes and flood the context window.
+    Uses the project interpreter (``sys.executable``) so the venv's packages are
+    visible. Layout is detected rather than assumed: Django and sympy ship a
+    ``tests/runtests.py`` runner, most other repos use pytest.
     """
-    if (root / "pytest.ini").exists() or (root / "tox.ini").exists() or (root / "setup.cfg").exists():
-        return "python -m pytest -x -q"
+    import sys
+
+    py = sys.executable or "python"
+    if (root / "tests" / "runtests.py").exists():
+        # Django-style runner; the repo root must be importable.
+        return f'cd tests && "{py}" runtests.py'
+    if (root / "pytest.ini").exists() or (root / "setup.cfg").exists() or (root / "tox.ini").exists():
+        return f'"{py}" -m pytest -x -q'
     if (root / "tests").is_dir():
-        return "python -m pytest tests -x -q"
-    return "python -m pytest -x -q"
+        return f'"{py}" -m pytest tests -x -q'
+    return f'"{py}" -m pytest -x -q'
+
+
+def reset_test_guard() -> None:
+    """Clear the repeat-call guard (called per strategy run)."""
+    _RECENT_TEST_COMMANDS.clear()
 
 
 def _run_git(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
@@ -409,12 +483,36 @@ def edit_file(path: str, old_string: str, new_string: str) -> str:
 
 
 def write_file(path: str, content: str) -> str:
-    """Create or overwrite a repo file (used for new files)."""
+    """Create a repo file, or replace one wholesale.
+
+    Overwriting is guarded: a model that emits a whole file can silently truncate
+    it (token limits, or a "rewrite" that drops half the content). Measured on
+    EXP-20260927-004, an agent rewrote ``django/forms/widgets.py`` wholesale and
+    then had to ``reset_repo`` to undo it. A large shrink is refused so the
+    damage cannot reach the captured patch. Prefer ``edit_file`` for changes to
+    existing code — it fails without modifying anything when it cannot match.
+    """
     try:
         p = _safe_path(path)
     except ValueError as e:
         return f"[error] {e}"
+
     existed = p.exists()
+    if existed:
+        try:
+            old = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            old = ""
+        # Refuse a drastic shrink of an existing file: that is a truncated
+        # rewrite, not an edit, and it would silently delete working code.
+        if len(old) > 2000 and len(content) < len(old) * 0.5:
+            return (
+                f"[refused] writing {path} would shrink it from {len(old)} to "
+                f"{len(content)} chars, which looks like a truncated rewrite. Use "
+                "edit_file to change the specific lines you need, or resend the "
+                "complete file content."
+            )
+
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
@@ -536,6 +634,9 @@ def reset_working_tree(repo_root: str | Path | None = None) -> None:
     root = Path(repo_root) if repo_root else _repo_root()
     if not root.is_dir():
         return
+    # A new strategy run is a new conversation: forget the previous run's
+    # repeated-command history so the guard only fires within one run.
+    reset_test_guard()
     try:
         _git_in(root, "reset", "-q")            # drop intent-to-add marks
         _git_in(root, "checkout", "--", ".")

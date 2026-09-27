@@ -587,3 +587,91 @@ def validate_applicability(patch: str, repo_root) -> str:
     if strict is False:
         return NEEDS_FUZZ
     return verdict
+
+
+# ---------------------------------------------------------------------------
+# Test-file stripping
+# ---------------------------------------------------------------------------
+#
+# The SWE-bench harness evaluates a patch like this:
+#
+#     git checkout <base_commit> <test_files>   # reset the test files
+#     git apply <gold test_patch>               # apply the official tests
+#     <run FAIL_TO_PASS / PASS_TO_PASS>
+#
+# `git checkout <base_commit> <path>` only works for paths that EXIST at
+# base_commit. Verified empirically: when a patch creates a test file that the
+# gold test patch also creates, the checkout fails with
+#     "error: pathspec '<path>' did not match any file(s) known to git"
+# the model's file survives, and the gold patch then fails with
+#     "error: <path>: already exists in working directory".
+#
+# The eval script runs without `set -e` (deliberately, so it can revert tests at
+# the end), so evaluation continues — meaning the tests that actually run can be
+# the model's own, not the official ones. That is a correctness hazard for the
+# resolved-rate metric, in both directions.
+#
+# The fix is to keep test files out of the submitted patch: the harness supplies
+# its own. This mirrors what SWE-bench agents normally do.
+
+_DIFF_GIT_HEADER = re.compile(r"^diff --git a/(\S+) b/(\S+)$")
+
+
+def collect_test_files(test_patch: str) -> set[str]:
+    """Return the set of file paths touched by a unified diff.
+
+    Named ``collect_*`` rather than ``test_*`` on purpose: pytest collects any
+    module-level name starting with ``test_``, so a function called
+    ``test_files_from_patch`` breaks the suite the moment it is imported into a
+    test module ("fixture 'test_patch' not found").
+    """
+    paths: set[str] = set()
+    for line in (test_patch or "").splitlines():
+        m = _DIFF_GIT_HEADER.match(line)
+        if m:
+            paths.add(m.group(2))
+            continue
+        if line.startswith("+++ "):
+            p = line[4:].split("\t")[0].strip()
+            if p and p != "/dev/null":
+                paths.add(p[2:] if p.startswith("b/") else p)
+    return paths
+
+
+def strip_test_files(patch: str, test_files: set[str]) -> tuple[str, list[str]]:
+    """Remove file sections for ``test_files`` from ``patch``.
+
+    Returns ``(filtered_patch, removed_paths)``. Sections are split on
+    ``diff --git`` so multi-file patches are handled; a patch that only touches
+    test files yields an empty string.
+    """
+    if not patch or not test_files:
+        return patch, []
+
+    # Split into per-file chunks, keeping the "diff --git" line with its chunk.
+    chunks: list[tuple[str, list[str]]] = []
+    current_path: str | None = None
+    current: list[str] = []
+    for line in patch.splitlines(keepends=True):
+        m = _DIFF_GIT_HEADER.match(line.rstrip("\n"))
+        if m:
+            if current:
+                chunks.append((current_path or "", current))
+            current_path = m.group(2)
+            current = [line]
+        else:
+            if not current and line.strip() == "":
+                continue  # leading blank line before the first header
+            current.append(line)
+    if current:
+        chunks.append((current_path or "", current))
+
+    kept: list[str] = []
+    removed: list[str] = []
+    for path, lines in chunks:
+        if path in test_files:
+            removed.append(path)
+        else:
+            kept.extend(lines)
+
+    return "".join(kept), removed

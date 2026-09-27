@@ -46,6 +46,7 @@ def select_issues(repo_specs: Iterable[tuple[str, int]] | dict[str, int] | None 
                     base_commit=d["base_commit"],
                     problem_statement=d["problem_statement"],
                     hints=d.get("hints_text", ""),
+                    test_patch=d.get("test_patch", "") or "",
                 )
             )
 
