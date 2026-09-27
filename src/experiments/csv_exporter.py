@@ -101,6 +101,7 @@ def flatten_for_csv(result: ExperimentResult) -> dict:
 
         # ── PATCH (right) ──
         "patch_status": result.patch_status,
+        "apply_status": result.apply_status,
         "raw_regex_fixed": result.patch_status == "NORMALIZE",
         "hunk_mismatch_resolved": result.patch_status == "NORMALIZE",
         "patch_preview": result.execution.patch_preview,

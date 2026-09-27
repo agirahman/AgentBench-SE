@@ -277,3 +277,210 @@ def extract_diff(response: str, finish_reason: str = "") -> PatchResult:
 
     # 3. Last resort: raw text
     return _handle_truncated(_clean_patch(response.strip()), finish_reason)
+
+
+# ---------------------------------------------------------------------------
+# Semantic applicability check
+# ---------------------------------------------------------------------------
+#
+# ``patch_status`` only proves the diff's *arithmetic* is well formed (hunk
+# header counts match the body). It says nothing about whether the patch can be
+# applied to the target file: a model that never saw the source can still emit a
+# syntactically perfect hunk full of guessed lines, which normalisation will
+# happily relabel VALID/NORMALIZE. ``apply_status`` measures the missing half.
+#
+# The SWE-bench harness itself tries ``git apply -v`` and falls back to
+# ``patch --batch --fuzz=5 -p1``. GNU patch is not available on Windows, so
+# --fuzz=5 cannot be reproduced locally; this check is therefore a prediction:
+#   * NOT_APPLYABLE is a hard conclusion — a required ``-`` line is absent from
+#     the target, or the target file does not exist at base_commit. Fuzz never
+#     rescues either case.
+#   * APPLYABLE means strict ``git apply --check`` already succeeds.
+#   * NEEDS_FUZZ means every removed line exists but strict apply still fails.
+#     This is an intentionally mixed bucket: it holds patches the fuzzy fallback
+#     might place AND patches git rejects as corrupt, which fuzz cannot fix
+#     either. Measured on EXP-20260824-005, most of it is the latter, so it is
+#     reported as an upper bound and never counted as strictly applyable.
+
+FILE_HEADER = re.compile(r"^\+\+\+ (?:b/)?(.+?)(?:\t.*)?$")
+HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+APPLYABLE = "APPLYABLE"
+NEEDS_FUZZ = "NEEDS_FUZZ"
+NOT_APPLYABLE = "NOT_APPLYABLE"
+UNKNOWN = "UNKNOWN"
+
+
+def _parse_hunks(patch: str) -> dict[str, list[tuple[int, list[str], list[str]]]]:
+    """Group a unified diff into ``{path: [(orig_start, removed, added), ...]}``.
+
+    Only the ``-`` (removed) and ``+`` (added) payload lines are captured; the
+    removed lines are what must exist verbatim in the target file.
+
+    New-file hunks (``--- /dev/null``) are skipped entirely: there is no target
+    to verify, so they must never be judged unappliable.
+    """
+    files: dict[str, list[tuple[int, list[str], list[str]]]] = {}
+    current: str | None = None
+    removed: list[str] = []
+    added: list[str] = []
+    start = 0
+    in_hunk = False
+    new_file = False
+
+    def flush() -> None:
+        if in_hunk and current is not None and not new_file:
+            files.setdefault(current, []).append((start, list(removed), list(added)))
+
+    for line in patch.split("\n"):
+        # Order matters. ``diff --git`` and ``@@`` are unambiguous markers and are
+        # checked first, so a hunk body can never swallow the next file's header.
+        # Only between a file header and its first ``@@`` (in_hunk False) do
+        # ``--- ``/``+++ `` carry structural meaning; inside a hunk a removed line
+        # whose content starts with ``--`` renders as ``--- ...`` and is payload.
+        if line.startswith("diff --git"):
+            flush()
+            current, removed, added = None, [], []
+            in_hunk, new_file = False, False
+            continue
+        m = HUNK_HEADER.match(line)
+        if m:
+            flush()
+            removed, added, in_hunk = [], [], True
+            start = int(m.group(1))
+            continue
+        if not in_hunk:
+            if line.startswith("--- "):
+                new_file = line[4:].strip() == "/dev/null"
+            elif line.startswith("+++ "):
+                m = FILE_HEADER.match(line)
+                if m:
+                    current = m.group(1).strip()
+            continue
+        # Hunk payload: "\ No newline" and context lines are ignored.
+        if line.startswith("-"):
+            removed.append(line[1:])
+        elif line.startswith("+"):
+            added.append(line[1:])
+    flush()
+    return files
+
+
+def _line_present(lines: list[str], needle: str) -> bool:
+    """True if ``needle`` occurs anywhere in ``lines`` (blank lines always match).
+
+    Exact match first, then a trailing-whitespace-tolerant comparison so that
+    CRLF/space drift does not fabricate a NOT_APPLYABLE. Deliberately NOT a
+    substring match: a substring hit would report a genuinely absent line as
+    present and silently weaken the check this function exists to enforce.
+    """
+    if needle.strip() == "":
+        return True
+    if needle in lines:
+        return True
+    stripped = needle.rstrip()
+    return any(l.rstrip() == stripped for l in lines)
+
+
+def _strict_git_apply_ok(patch: str, root) -> bool | None:
+    """Run ``git apply --check -p1``. True/False, or None if git is unusable.
+
+    Returns None only when git could not be run at all or the directory is not a
+    repository — i.e. when the result carries no information. Any other non-zero
+    exit is a real rejection (``patch does not apply``, ``corrupt patch``, …) and
+    returns False. Treating every rc>=128 as inconclusive would silently promote
+    corrupt patches to APPLYABLE, which is exactly the failure mode this check
+    exists to catch.
+
+    The patch is piped as UTF-8 bytes: on Windows the default locale codec
+    (cp1252) cannot encode arbitrary source text, and ``text=True`` would raise
+    ``UnicodeEncodeError`` on any patch containing a non-Latin-1 character.
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["git", "apply", "--check", "-p1"],
+            input=patch.encode("utf-8", errors="replace"),
+            cwd=str(root),
+            capture_output=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode == 0:
+        return True
+    stderr = (proc.stderr or b"").decode("utf-8", "replace").lower()
+    if "not a git repository" in stderr or "cannot change to" in stderr:
+        return None
+    return False
+
+
+def validate_applicability(patch: str, repo_root) -> str:
+    """Predict whether the SWE-bench harness can apply ``patch``.
+
+    Returns one of APPLYABLE | NEEDS_FUZZ | NOT_APPLYABLE | UNKNOWN.
+    ``repo_root`` may be a path or None; None yields UNKNOWN (no guess).
+
+    ``NOT_APPLYABLE`` is deliberately conservative: it is only returned when a
+    removed line exists **nowhere** in the target file. A line that exists but
+    sits at a different offset than the hunk header claims yields ``NEEDS_FUZZ``,
+    because ``patch --fuzz=5`` can still place it. Over-reporting
+    NOT_APPLYABLE would undermine the metric this check exists to support.
+    """
+    if not patch or not patch.strip():
+        return UNKNOWN
+    if repo_root is None:
+        return UNKNOWN
+
+    from pathlib import Path
+
+    root = Path(repo_root)
+    if not root.is_dir():
+        return UNKNOWN
+
+    hunks_by_file = _parse_hunks(patch)
+    if not hunks_by_file:
+        return UNKNOWN
+
+    verdict = APPLYABLE
+    saw_real_file = False
+
+    for path, hunks in hunks_by_file.items():
+        target = root / path
+        if not target.is_file():
+            # The patch edits a file that does not exist at base_commit: it can
+            # never apply. This is the dominant failure of the NORMALIZE class.
+            return NOT_APPLYABLE
+        saw_real_file = True
+        try:
+            lines = target.read_text(encoding="utf-8", errors="replace").split("\n")
+        except OSError:
+            return UNKNOWN
+
+        for orig_start, removed, _added in hunks:
+            if not removed:
+                continue
+            for needle in removed:
+                # Hard failure only when the line is absent from the whole file;
+                # fuzz cannot invent a line that is not there.
+                if not _line_present(lines, needle):
+                    return NOT_APPLYABLE
+            # Every removed line exists somewhere. If the block does not sit
+            # exactly where the header says, strict git apply fails and the
+            # harness's fuzzy fallback is what would rescue it.
+            exact = lines[orig_start - 1 : orig_start - 1 + len(removed)]
+            if exact != removed:
+                verdict = NEEDS_FUZZ
+
+    if not saw_real_file:
+        return UNKNOWN
+
+    # Line check passed: confirm with the same strict step the harness tries
+    # first. git unavailable / not a repo → keep the line-based verdict.
+    strict = _strict_git_apply_ok(patch, root)
+    if strict is True:
+        return APPLYABLE
+    if strict is False:
+        return NEEDS_FUZZ
+    return verdict

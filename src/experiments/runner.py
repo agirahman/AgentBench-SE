@@ -19,7 +19,8 @@ from models.result import (
 from models.patch import Patch
 from models.inference import InferenceRun
 from experiments.csv_exporter import flatten_for_csv
-from experiments.swebench_adapter import extract_diff
+from experiments.swebench_adapter import extract_diff, validate_applicability
+from agents.tools import ensure_repo_root
 from evaluation.statistics import export_statistics_json, generate_summary_md
 from evaluation.cost import PricingTable
 from config import Config
@@ -230,6 +231,21 @@ def run_experiments(
                     patch_status = "PARSE_ERROR"
 
                 result.patch_status = patch_status
+                # Semantic check: patch_status only proves the diff arithmetic is
+                # well formed. apply_status records whether the patch can really
+                # be applied to the target repo, so a "valid" patch that merely
+                # guessed its lines is not mistaken for a working one.
+                if Config.APPLY_CHECK_ENABLED and diff.strip():
+                    try:
+                        result.apply_status = validate_applicability(
+                            diff, ensure_repo_root(issue.repo, issue.base_commit)
+                        )
+                    except Exception as exc:  # noqa: BLE001 - never fail a run
+                        logger.warning(
+                            f"  ⚠ apply check failed for {issue.instance_id} "
+                            f"({name}): {type(exc).__name__}: {exc}"
+                        )
+                        result.apply_status = "UNKNOWN"
                 all_results.append(result)
 
                 if last_finish == "length":

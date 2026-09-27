@@ -79,6 +79,11 @@ class Config:
     MAX_TOOL_TURNS = _get_int_env("MAX_TOOL_TURNS", 8)
     TOOLCALL_REPO_DIR = _get_env("TOOLCALL_REPO_DIR", "datasets/repos")
 
+    # Semantic patch applicability check (apply_status column). Costs one
+    # `git apply --check` per produced patch against the cached repo; disable if
+    # the repo cache is unavailable so a run is never blocked on it.
+    APPLY_CHECK_ENABLED = _get_env("APPLY_CHECK_ENABLED", "true").lower() in ("1", "true", "yes")
+
     # When true, prompts are reordered so a long, identical static header sits at
     # the top (enabling automatic prefix caching within a strategy). When false,
     # the legacy layout is used so existing runs stay reproducible.

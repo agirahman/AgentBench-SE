@@ -62,6 +62,8 @@ def build_experiment_manifest(
                 "strategy": r.strategy,
                 "model": r.model,
                 "status": status,
+                "patch_status": r.patch_status,
+                "apply_status": r.apply_status,
                 "difficulty": r.difficulty,
                 "api_turns": api_turns,
                 "tokens": {

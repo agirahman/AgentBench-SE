@@ -90,5 +90,9 @@ class ExperimentResult:
     evaluation: EvaluationResult
     difficulty: str = ""
     patch_status: str = "VALID"
+    # Semantic counterpart to ``patch_status``: whether the patch can actually be
+    # applied to the target repo (APPLYABLE | NEEDS_FUZZ | NOT_APPLYABLE |
+    # UNKNOWN). ``patch_status`` only proves the diff arithmetic is well formed.
+    apply_status: str = "UNKNOWN"
     thinking: bool = False
     max_tokens: int = 0

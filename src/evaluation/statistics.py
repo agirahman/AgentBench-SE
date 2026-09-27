@@ -202,6 +202,56 @@ def compute_patch_validity_rate(df: pd.DataFrame) -> pd.Series:
     )
 
 
+def _ensure_apply_status_column(df: pd.DataFrame) -> pd.DataFrame:
+    if "apply_status" not in df.columns:
+        df = df.copy()
+        df["apply_status"] = "UNKNOWN"
+    return df
+
+
+def compute_applyability_rate(df: pd.DataFrame) -> pd.Series:
+    """Fraction of patches that strictly apply, per strategy.
+
+    Companion to ``compute_patch_validity_rate``. That one measures whether the
+    diff's arithmetic is well formed; this one measures whether the patch can
+    actually be applied to the target repo. Reporting both separates "the model
+    produced a syntactically valid diff" from "the model produced a usable fix",
+    which is what a patch-validity claim should rest on.
+
+    Deliberately counts **only APPLYABLE** (strict ``git apply --check``).
+    ``NEEDS_FUZZ`` is a lower-confidence bucket: it contains both patches that
+    ``patch --fuzz=5`` could still place and patches git rejects as corrupt, so
+    counting it here would overstate applicability. Use
+    ``compute_apply_quality`` for the full breakdown and cite
+    ``applyable_pct`` (APPLYABLE + NEEDS_FUZZ) only as an upper bound.
+    """
+    df = _ensure_strategy_column(_ensure_apply_status_column(df))
+    if df.empty:
+        return pd.Series(dtype="float64")
+    return (
+        df.assign(applyable=df["apply_status"] == "APPLYABLE")
+        .groupby("strategy")["applyable"]
+        .mean()
+    )
+
+
+def compute_apply_quality(df: pd.DataFrame) -> pd.DataFrame:
+    """Per-strategy counts of each apply_status value."""
+    df = _ensure_strategy_column(_ensure_apply_status_column(df))
+    if df.empty:
+        return pd.DataFrame()
+    total = df.groupby("strategy")["apply_status"].size()
+    out = pd.DataFrame({"total": total})
+    for status in ("APPLYABLE", "NEEDS_FUZZ", "NOT_APPLYABLE", "UNKNOWN"):
+        out[status.lower()] = (
+            df[df["apply_status"] == status].groupby("strategy").size()
+        )
+    out = out.fillna(0).astype(int)
+    out["applyable_total"] = out["applyable"] + out["needs_fuzz"]
+    out["applyable_pct"] = (out["applyable_total"] / out["total"] * 100).round(1)
+    return out
+
+
 def compute_patch_quality(df: pd.DataFrame) -> pd.DataFrame:
     """Patch Quality breakdown per strategy: VALID / NORMALIZE / INVALID."""
     df = _ensure_strategy_column(_ensure_patch_status_column(df))
@@ -262,6 +312,10 @@ def export_statistics_json(df: pd.DataFrame, out_path: str, pricing: dict | None
         "cache_hit_rate": compute_cache_hit_rate(df).to_dict(),
         "patch_validity_rate": compute_patch_validity_rate(df).to_dict(),
         "patch_quality": compute_patch_quality(df).to_dict(),
+        # Semantic counterpart: how many of those "valid" patches are actually
+        # applicable to the target repo (see compute_applyability_rate).
+        "applyability_rate": compute_applyability_rate(df).to_dict(),
+        "apply_quality": compute_apply_quality(df).to_dict(orient="index"),
         "failure_breakdown": summarize_run_failure(df).to_dict(),
         "api_requests": compute_api_requests(df).to_dict(),
         "pricing": {
@@ -377,6 +431,15 @@ def generate_summary_md(df: pd.DataFrame, out_path: str, pricing: dict | None = 
 
         f.write("\n\n## Patch Quality\n\n")
         f.write(_df_to_md_table(pq))
+
+        f.write("\n\n## Patch Applicability (semantic check)\n\n")
+        f.write("> `patch_status` above only proves the diff's **arithmetic** is "
+                "well formed. This table measures whether the patch can actually "
+                "be **applied** to the target repo: `not_applyable` means a "
+                "required removed line does not exist in the file, which no "
+                "amount of `--fuzz` can rescue. `applyable_pct` counts APPLYABLE "
+                "+ NEEDS_FUZZ (the harness retries with `patch --fuzz=5`).\n\n")
+        f.write(_df_to_md_table(compute_apply_quality(df)))
 
         f.write("\n\n## Failure Breakdown (per patch_status)\n\n")
         f.write(_df_to_md_table(fb))
