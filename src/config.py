@@ -62,6 +62,16 @@ class Config:
 
     TEMPERATURE = _get_float_env("TEMPERATURE", 0.2)
     MAX_RETRIES = _get_int_env("MAX_RETRIES", 3)
+
+    # Rate-limit (HTTP 429) handling. A usage-limit window is typically hours, so
+    # retrying after the normal 2s backoff only burns remaining quota. These
+    # control the separate, much longer backoff schedule used for 429s.
+    RATE_LIMIT_BACKOFF_BASE = _get_float_env("RATE_LIMIT_BACKOFF_BASE", 60.0)
+    RATE_LIMIT_BACKOFF_MAX = _get_float_env("RATE_LIMIT_BACKOFF_MAX", 300.0)
+    # Stop the run after this many consecutive rate-limit failures so the user
+    # can resume later, instead of grinding through the remaining quota. 0
+    # disables the breaker (always keep retrying).
+    RATE_LIMIT_CONSECUTIVE_LIMIT = _get_int_env("RATE_LIMIT_CONSECUTIVE_LIMIT", 5)
     MAX_TOKENS = _get_int_env("MAX_TOKENS", 32768)
     API_TIMEOUT = _get_int_env("API_TIMEOUT", 180)
     MAX_REVISION_TURNS = _get_int_env("MAX_REVISION_TURNS", 1)

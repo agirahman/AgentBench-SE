@@ -8,6 +8,8 @@ from evaluation.statistics import (
     compute_cost_per_success,
     compute_patch_validity_rate,
     compute_patch_quality,
+    compute_applyability_rate,
+    compute_apply_quality,
     summarize_run_failure,
     export_statistics_json,
     generate_summary_md,
@@ -156,3 +158,42 @@ def test_empty_dataframe_exports_summary_files(tmp_path):
     out_md = tmp_path / "summary.md"
     generate_summary_md(empty_df, str(out_md))
     assert out_md.exists()
+
+
+def test_summary_md_handles_all_failed_strategy(tmp_path):
+    """Regression: a strategy with zero successes must not crash the export.
+
+    cost_per_success is NA when success_count is 0 (e.g. every run failed on a
+    rate limit). ``float(pd.NA)`` raises TypeError, so formatting must tolerate
+    NA instead of aborting the report that a stopped-early run still needs.
+    """
+    df = pd.DataFrame([
+        {"instance_id": "a", "strategy": "direct", "execution_time": 1.0,
+         "inference_count": 1, "total_tokens": 10, "cost_usd_offpeak": 0.001,
+         "cost_idr_offpeak": 16.5, "error": "429 rate limit",
+         "patch_status": "TIMEOUT", "apply_status": "UNKNOWN"},
+    ])
+    out = tmp_path / "summary.md"
+    generate_summary_md(df, str(out))  # must not raise
+    text = out.read_text(encoding="utf-8")
+    assert "n/a" in text
+    assert "Patch Applicability" in text
+
+
+def test_applyability_rate_counts_only_strictly_applyable(sample_df):
+    """NEEDS_FUZZ is an upper-bound bucket and must not count as applyable."""
+    df = sample_df.copy()
+    df["apply_status"] = ["APPLYABLE", "NOT_APPLYABLE", "NEEDS_FUZZ", "APPLYABLE"]
+    rate = compute_applyability_rate(df)
+    assert rate["direct"] == pytest.approx(0.5)      # 1 of 2
+    assert rate["planning"] == pytest.approx(0.5)    # 1 of 2
+    q = compute_apply_quality(df)
+    assert q.loc["direct", "applyable_total"] == 1
+    assert q.loc["direct", "needs_fuzz"] == 0
+    assert q.loc["planning", "needs_fuzz"] == 1
+
+
+def test_applyability_rate_missing_column_is_safe(sample_df):
+    """Old CSVs have no apply_status: the metric must degrade, not raise."""
+    rate = compute_applyability_rate(sample_df)
+    assert (rate == 0.0).all()

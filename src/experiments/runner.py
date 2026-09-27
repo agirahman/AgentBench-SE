@@ -23,6 +23,7 @@ from experiments.swebench_adapter import extract_diff, validate_applicability
 from agents.tools import ensure_repo_root
 from evaluation.statistics import export_statistics_json, generate_summary_md
 from evaluation.cost import PricingTable
+from evaluation.retry import is_rate_limit_error
 from config import Config
 from experiment_id import generate_experiment_id, create_experiment_dir
 from experiments.observability import build_experiment_manifest, write_issue_run_summary
@@ -186,6 +187,12 @@ def run_experiments(
     total = len(issues) * len(strategies)
     done = 0
     skipped = 0
+    # Consecutive rate-limit failures. When the provider's usage window is
+    # exhausted, every further call fails the same way — continuing only wastes
+    # the remaining quota and produces a run full of 429 rows. Trip a breaker
+    # and stop cleanly so --resume can finish later.
+    consecutive_rate_limits = 0
+    rate_limit_stopped = False
 
     for issue in issues:
         for name, strategy in strategies.items():
@@ -231,6 +238,9 @@ def run_experiments(
                     patch_status = "PARSE_ERROR"
 
                 result.patch_status = patch_status
+                # A successful call means the provider is healthy again; the
+                # breaker only counts *consecutive* failures.
+                consecutive_rate_limits = 0
                 # Semantic check: patch_status only proves the diff arithmetic is
                 # well formed. apply_status records whether the patch can really
                 # be applied to the target repo, so a "valid" patch that merely
@@ -327,7 +337,10 @@ def run_experiments(
                 )
 
                 if rate_limit_seconds > 0:
-                    delay = random.uniform(5, 10)
+                    # Honour the caller's --rate-limit instead of a fixed 5-10s:
+                    # the parameter was previously accepted and then ignored.
+                    jitter = random.uniform(0.0, min(2.0, rate_limit_seconds * 0.5))
+                    delay = rate_limit_seconds + jitter
                     logger.info(f"Rate limit delay: {delay:.1f}s")
                     time.sleep(delay)
 
@@ -337,6 +350,25 @@ def run_experiments(
                 logger.error(
                     f"  ❌ FAILED: {issue.instance_id} ({name}, {issue.difficulty}) — {type(e).__name__}: {error_detail[:400]}"
                 )
+
+                # Rate-limit breaker: a 429 on one instance means the rest will
+                # fail too. Count consecutive hits and stop the run cleanly.
+                if is_rate_limit_error(e):
+                    consecutive_rate_limits += 1
+                    limit = Config.RATE_LIMIT_CONSECUTIVE_LIMIT
+                    logger.warning(
+                        f"  ⏳ Rate limit hit ({consecutive_rate_limits}"
+                        f"{f'/{limit}' if limit > 0 else ''} consecutive)"
+                    )
+                    if limit > 0 and consecutive_rate_limits >= limit:
+                        rate_limit_stopped = True
+                        logger.error(
+                            f"Stopping run after {consecutive_rate_limits} consecutive "
+                            f"rate-limit failures — the provider usage window is "
+                            f"exhausted. Re-run with --resume once it resets."
+                        )
+                else:
+                    consecutive_rate_limits = 0
 
                 error_entry = {
                     "instance_id": issue.instance_id,
@@ -385,6 +417,11 @@ def run_experiments(
                     error=f"{type(e).__name__}: {error_detail[:400]}",
                 )
 
+            if rate_limit_stopped:
+                break
+        if rate_limit_stopped:
+            break
+
     # --- Final exports ---
     # "generation_" prefix disambiguates phase-1 outputs from the eval-phase
     # files that report_generator writes under eval/ (results.csv, statistics.json).
@@ -428,6 +465,23 @@ def run_experiments(
 
     if skipped:
         logger.info(f"Resume: skipped {skipped} already-completed entries")
+
+    if rate_limit_stopped:
+        logger.warning("")
+        logger.warning("!" * 60)
+        logger.warning(
+            "  RUN STOPPED EARLY — provider rate limit / usage window exhausted."
+        )
+        logger.warning(
+            f"  Processed {done - 1}/{total} planned runs before stopping."
+        )
+        logger.warning(
+            "  Data collected so far is valid and already flushed to disk."
+        )
+        logger.warning(
+            "  Re-run the same command with --resume once the limit resets."
+        )
+        logger.warning("!" * 60)
 
     # --- Failure summary ---
     valid = sum(1 for p in all_predictions if p.get("patch_status") == "VALID")

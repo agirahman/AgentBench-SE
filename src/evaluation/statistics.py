@@ -346,11 +346,24 @@ def _df_to_md_table(df: pd.DataFrame) -> str:
 
 
 def _usd(x) -> str:
-    return f"${float(x):.6f}"
+    """Format a USD amount, tolerating NA.
+
+    ``float(pd.NA)`` raises TypeError. NA reaches here whenever a strategy has no
+    successful runs (cost_per_success is undefined), which is exactly the state a
+    run stopped early by rate limits leaves behind — so formatting must not be
+    the thing that crashes the export.
+    """
+    try:
+        return f"${float(x):.6f}"
+    except (TypeError, ValueError):
+        return "n/a"
 
 
 def _idr(x) -> str:
-    return f"Rp{float(x):,.0f}"
+    try:
+        return f"Rp{float(x):,.0f}"
+    except (TypeError, ValueError):
+        return "n/a"
 
 
 def generate_summary_md(df: pd.DataFrame, out_path: str, pricing: dict | None = None, usd_idr_rate: float = 16500.0) -> None:

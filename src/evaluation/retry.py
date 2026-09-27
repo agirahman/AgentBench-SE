@@ -4,11 +4,45 @@ from functools import wraps
 from config import Config
 from utils.logger import logger
 
+# Markers that identify a provider rate-limit rejection (HTTP 429). Matched
+# case-insensitively against the exception text, because the SDKs raise
+# different types (openai.RateLimitError, groq, google.api_core, …) and the
+# message is the only field common to all of them.
+_RATE_LIMIT_MARKERS = (
+    "429",
+    "rate limit",
+    "rate_limit",
+    "too many requests",
+    "quota exceeded",
+    "usage limit",
+    "resource_exhausted",
+    "resource exhausted",
+)
+
+
+def is_rate_limit_error(exc: BaseException) -> bool:
+    """True if ``exc`` looks like a provider rate-limit / quota rejection.
+
+    Checks the structured status code first (most reliable), then falls back to
+    message markers. A 429 is not a transient network blip: retrying after 2s
+    cannot help, because the window is typically hours. It needs its own, much
+    longer backoff — or the run should stop so ``--resume`` can continue later.
+    """
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status == 429:
+        return True
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(marker in text for marker in _RATE_LIMIT_MARKERS)
+
 
 def with_retry(
     max_retries: int = Config.MAX_RETRIES,
     base_delay: float = 2.0,
     retry_on: callable = None,
+    rate_limit_base_delay: float = None,
+    rate_limit_max_delay: float = None,
 ):
     """Decorator: retry a function on exception, and optionally on return value.
 
@@ -24,10 +58,29 @@ def with_retry(
         attempt 3 -> 4s
         attempt 4 -> 8s
 
+    Rate-limit (HTTP 429) failures use a separate, much longer schedule
+    (``rate_limit_base_delay``, default 60s, capped at ``rate_limit_max_delay``,
+    default 300s). A 5-hour usage limit is not cured by a 2-second pause, and
+    hammering it just burns the remaining quota.
+
     On the final failed attempt the exception is re-raised so the caller
     (runner) can record it into ``ExperimentResult.evaluation.error``.
     """
     retries = max_retries if max_retries is not None else Config.MAX_RETRIES
+    rl_base = (
+        Config.RATE_LIMIT_BACKOFF_BASE if rate_limit_base_delay is None
+        else rate_limit_base_delay
+    )
+    rl_max = (
+        Config.RATE_LIMIT_BACKOFF_MAX if rate_limit_max_delay is None
+        else rate_limit_max_delay
+    )
+
+    def _delay_for(exc: BaseException | None, attempt: int) -> float:
+        """Backoff for this attempt; rate-limit errors get the long schedule."""
+        if exc is not None and is_rate_limit_error(exc):
+            return min(rl_base * (2 ** (attempt - 1)), rl_max)
+        return base_delay * (2 ** (attempt - 1))
 
     def decorator(func):
         @wraps(func)
@@ -43,7 +96,7 @@ def with_retry(
                                 f"final attempt ({retry_on(result)!r}) — giving up"
                             )
                             return result
-                        delay = base_delay * (2 ** (attempt - 1))
+                        delay = _delay_for(None, attempt)
                         logger.warning(
                             f"{func.__name__} attempt {attempt}/{retries} returned "
                             f"retryable result — retrying in {delay:.1f}s"
@@ -58,11 +111,17 @@ def with_retry(
                             f"{func.__name__} failed after {retries} attempts: {e}"
                         )
                         raise
-                    delay = base_delay * (2 ** (attempt - 1))
-                    logger.warning(
-                        f"{func.__name__} attempt {attempt}/{retries} failed: {e} "
-                        f"— retrying in {delay:.1f}s"
-                    )
+                    delay = _delay_for(e, attempt)
+                    if is_rate_limit_error(e):
+                        logger.warning(
+                            f"{func.__name__} attempt {attempt}/{retries} hit a rate "
+                            f"limit — backing off {delay:.1f}s (rate-limit schedule)"
+                        )
+                    else:
+                        logger.warning(
+                            f"{func.__name__} attempt {attempt}/{retries} failed: {e} "
+                            f"— retrying in {delay:.1f}s"
+                        )
                     time.sleep(delay)
             if last_exc is not None:
                 raise last_exc

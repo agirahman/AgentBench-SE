@@ -158,11 +158,34 @@ Opsi CLI:
 | Argumen | Default | Keterangan |
 |:--------|:--------|:-----------|
 | `--output` | `results` | Direktori output |
-| `--provider` | `gemini` | `gemini`, `groq`, `opencode`, `openrouter` |
+| `--provider` | `gemini` | `gemini`, `groq`, `opencode`, `openrouter`, `deepseek`, `commandcode` |
 | `--issues` | (semua 50) | Batas jumlah issue untuk testing |
 | `--resume` | `False` | Lanjutkan dari run sebelumnya |
-| `--rate-limit` | `1.5` | Delay antar strategi (detik) |
+| `--rate-limit` | `1.5` | Delay antar strategi (detik). Nilai ini benar-benar dipakai; jitter kecil ditambahkan otomatis |
 | `--repo-spec` | (default repo mix) | Override sampling repo, format `repo=count` |
+
+#### Menjalankan per batch untuk menghindari limit API
+
+Provider dengan *usage window* (mis. batas per 5 jam) akan menolak request dengan
+HTTP **429** jika seluruh 150 eksekusi dijalankan sekaligus. Jalankan bertahap
+dan pakai `--resume` — run yang sudah selesai di-skip, jadi batch berikutnya
+melanjutkan dari titik terakhir:
+
+```powershell
+python src/main.py --output results/full_run --issues 20
+python src/main.py --output results/full_run --issues 20 --resume
+python src/main.py --output results/full_run --resume          # sisanya
+```
+
+Perilaku saat limit tercapai (sudah otomatis):
+
+- **Backoff 429 terpisah.** Error rate limit memakai jeda 60s → 120s → 240s
+  (maks 300s), bukan jadwal jaringan biasa 2s → 4s → 8s. Bisa diatur lewat
+  `RATE_LIMIT_BACKOFF_BASE` dan `RATE_LIMIT_BACKOFF_MAX` di `.env`.
+- **Circuit breaker.** Setelah `RATE_LIMIT_CONSECUTIVE_LIMIT` (default 5)
+  kegagalan rate limit berturut-turut, run **berhenti dengan rapi** dan
+  menyarankan `--resume`, alih-alih menghabiskan sisa kuota. Data yang sudah
+  terkumpul tetap tersimpan (CSV, predictions, statistics, manifest).
 
 ### 2. Inspeksi hasil
 
