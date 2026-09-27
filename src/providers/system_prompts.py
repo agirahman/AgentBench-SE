@@ -7,6 +7,15 @@ lived in ``tool_loop``, importing them from ``base`` created a cycle
 by accident of import order and broke as soon as a module was imported directly.
 """
 
+# Roles allowed to modify the repository. The others are read-only and must never
+# be told to edit code.
+#
+# Lives in this leaf module on purpose: both ``agents.base`` (to pick the system
+# prompt) and ``providers.tool_loop`` (to pick the wrap-up nudge) need it, and
+# having ``tool_loop`` import ``agents.base`` would recreate the import cycle this
+# module exists to avoid.
+EDITING_ROLES = frozenset({"direct", "executor"})
+
 # Editing roles (direct, executor): the agent must change real files.
 TOOL_SYSTEM_PROMPT = (
     "You are a software engineering agent fixing a bug in a real repository.\n"

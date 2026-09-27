@@ -6,7 +6,11 @@ from models.inference import InferenceResult
 from agents.messages import AgentMessage
 from agents.blackboard import Blackboard
 from agents.tools import get_tools_for_agent
-from providers.system_prompts import TOOL_SYSTEM_PROMPT, READONLY_TOOL_SYSTEM_PROMPT
+from providers.system_prompts import (
+    TOOL_SYSTEM_PROMPT,
+    READONLY_TOOL_SYSTEM_PROMPT,
+    EDITING_ROLES as _EDITING_ROLES,
+)
 from utils.prompt_loader import load_prompt_or_default, load_prompt
 
 # Loaded once; identical long prefix prepended to every request when the
@@ -14,10 +18,11 @@ from utils.prompt_loader import load_prompt_or_default, load_prompt
 # top of the prompt is byte-identical across issues in a strategy.
 _SHARED_STATIC_HEADER = load_prompt_or_default("shared_static.md", "")
 
-# Roles that may modify the repository. The others get a read-only system prompt
-# and a read-only tool set, so the model is never told to edit code it cannot
-# (or must not) touch.
-_EDITING_ROLES = {"direct", "executor"}
+# _EDITING_ROLES (roles that may modify the repository) is imported from
+# providers.system_prompts so the system-prompt choice here and the tool-loop
+# wrap-up nudge in providers.tool_loop cannot drift apart. The others get a
+# read-only system prompt and a read-only tool set, so the model is never told to
+# edit code it cannot (or must not) touch.
 
 
 @dataclass

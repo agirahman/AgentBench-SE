@@ -69,27 +69,57 @@ class ReviewStrategy:
         review_resp = self.team["reviewer"].act(review_task, bb)
         inferences.append(review_resp.inference)
 
-        needs_revision = _extract_verdict(review_resp.inference.response) != "APPROVED"
-        final_response = initial_resp.inference.response
+        # Candidate patches, each captured at the moment it was produced. Shipping
+        # `finalize_patch()` at the very end instead returns whatever the working
+        # tree holds LAST — which is how a rejected revision silently replaced a
+        # working patch (EXP-20260927-007, django-10924 review: the unverified
+        # revision was the one evaluated, and it failed, while planning's single
+        # patch on the same issue resolved).
         initial_patch = initial_diff.strip()
+        approved = _extract_verdict(review_resp.inference.response) == "APPROVED"
+        candidates: list[tuple[str, bool]] = [(initial_patch, approved)]
+
         initial_truncated = initial_resp.inference.finish_reason == "length"
-        if needs_revision and initial_patch and not initial_truncated:
+        if not approved and initial_patch and not initial_truncated:
             bb.feedback = review_resp.inference.response
             bb.log(AgentMessage(sender="orchestrator", receiver="reviewer", kind="task", content="", bb_ops=["save_feedback"]))
-            while needs_revision and bb.revision < Config.MAX_REVISION_TURNS:
+            while not approved and bb.revision < Config.MAX_REVISION_TURNS:
                 revision_task = AgentMessage(sender="orchestrator", receiver="executor", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_feedback"])
                 bb.log(revision_task)
                 revision_resp = self.team["executor"].act(revision_task, bb)
                 inferences.append(revision_resp.inference)
-                final_response = revision_resp.inference.response
-                # Re-capture: the revision may have edited further, and the diff
-                # is cumulative against HEAD, so this is the latest full change.
-                bb.patch = finalize_patch(repo_root, final_response)
+                # Capture this revision's own diff now, while it is still the
+                # working-tree state (diffs are cumulative against HEAD).
+                bb.patch = finalize_patch(repo_root, revision_resp.inference.response)
                 bb.revision += 1
                 bb.log(AgentMessage(sender="orchestrator", receiver="executor", kind="task", content="", bb_ops=["save_patch"]))
 
-        # Final patch is the working-tree diff (latest edit wins).
-        patch_text = finalize_patch(repo_root, final_response)
+                revised_patch = bb.patch.strip()
+                if not revised_patch:
+                    break
+
+                # Re-review the revision. A revision nobody checked is not an
+                # improvement, it is an unverified rewrite — and it must not be
+                # shipped merely because it came later.
+                re_review_task = AgentMessage(sender="orchestrator", receiver="reviewer", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_plan", "get_patch"])
+                bb.log(re_review_task)
+                re_review_resp = self.team["reviewer"].act(re_review_task, bb)
+                inferences.append(re_review_resp.inference)
+                approved = _extract_verdict(re_review_resp.inference.response) == "APPROVED"
+                candidates.append((revised_patch, approved))
+                if approved:
+                    break
+                bb.feedback = re_review_resp.inference.response
+                bb.log(AgentMessage(sender="orchestrator", receiver="reviewer", kind="task", content="", bb_ops=["save_feedback"]))
+
+        # Prefer a patch the reviewer actually approved. If none was approved,
+        # ship the executor's first attempt: every candidate was rejected, so a
+        # later rewrite carries no evidence of being better, and there is direct
+        # evidence in EXP-20260927-007 of one being worse.
+        patch_text = next(
+            (p for p, ok in candidates if ok and p),
+            initial_patch or candidates[-1][0],
+        )
 
         run = InferenceRun(
             patch=patch_text,

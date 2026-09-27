@@ -73,12 +73,19 @@ def test_review_strategy_approved_uses_three_agents(issue):
     assert [inf.role for inf in result.execution.inferences] == ["planner", "executor", "reviewer"]
 
 
-def test_review_strategy_revision_adds_executor_round(issue):
+def test_review_strategy_revision_adds_executor_and_re_review(issue):
+    """One revision turn costs two inferences: the executor's rewrite AND a
+    re-review of it.
+
+    Re-reviewing is the point: without it the strategy shipped whichever diff the
+    working tree held last, so a rejected rewrite replaced a working patch with
+    nothing checking it (EXP-20260927-007, django-10924).
+    """
     provider = DummyProvider(reviewer_verdict='{"verdict": "NEEDS_REVISION"}')
     patch, result = ReviewStrategy(provider).run(issue)
 
     assert patch.response == "patch"
-    assert result.execution.inference_count == 4
+    assert result.execution.inference_count == 5
     assert [inf.role for inf in result.execution.inferences] == [
-        "planner", "executor", "reviewer", "executor",
+        "planner", "executor", "reviewer", "executor", "reviewer",
     ]

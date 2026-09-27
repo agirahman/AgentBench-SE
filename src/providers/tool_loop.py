@@ -20,7 +20,7 @@ from config import Config
 from utils.logger import logger
 from models.inference import InferenceResult
 from providers.response_utils import build_openai_inference_result, _extract_cached_tokens
-from providers.system_prompts import TOOL_SYSTEM_PROMPT
+from providers.system_prompts import TOOL_SYSTEM_PROMPT, EDITING_ROLES as _EDITING_ROLES
 from agents.tools import TOOL_SCHEMAS, execute_tool, set_repo_root
 
 
@@ -119,18 +119,26 @@ def run_tool_loop(
         # Budget pressure: the loop previously ran out of turns with no final
         # answer (13 occurrences in the logs) because nothing told the model to
         # stop exploring. Nudge it to wrap up as the budget runs low.
+        #
+        # The nudge must match the role's mandate: telling a read-only role
+        # (planner, reviewer) to "apply your fix with edit_file" is an instruction
+        # it cannot obey — it has no edit_file tool — and it invites the model to
+        # narrate an edit that never happens instead of returning its verdict.
         remaining = max_tool_turns - turn
         if remaining <= 1:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        "You are almost out of tool budget. Stop exploring and "
-                        "apply your fix NOW with edit_file, then reply with a "
-                        "one-line summary and no tool call."
-                    ),
-                }
-            )
+            if role in _EDITING_ROLES:
+                wrap_up = (
+                    "You are almost out of tool budget. Stop exploring and apply "
+                    "your fix NOW with edit_file, then reply with a one-line "
+                    "summary and no tool call."
+                )
+            else:
+                wrap_up = (
+                    "You are almost out of tool budget. Stop exploring and reply "
+                    "NOW with your final answer and no tool call. Do not call any "
+                    "more tools."
+                )
+            messages.append({"role": "user", "content": wrap_up})
 
         response = client.chat.completions.create(**kwargs)
         _accumulate_usage(response)
