@@ -11,7 +11,8 @@ AgentInstance: TypeAlias = BaseAgent
 
 
 def build_agent_team(provider) -> dict[str, AgentInstance]:
-    # Tool calling is only meaningful when enabled AND the provider supports it.
+    # Tool calling is only meaningful when enabled AND the provider supports it
+    # (openrouter and commandcode both implement generate_with_tools).
     toolcall_active = Config.TOOLCALL_ENABLED and hasattr(provider, "generate_with_tools")
     team = {
         "direct": DirectAgent(provider),

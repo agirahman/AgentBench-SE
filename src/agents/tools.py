@@ -17,10 +17,18 @@ Each tool returns a plain string the model can read.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
 from config import Config
+
+# Models frequently emit absolute paths in a shell-native dialect instead of
+# repo-relative ones: Git-Bash/MSYS style ("/d/dev/repo/file.py") or a Windows
+# drive path ("D:\dev\repo\file.py"). Both were observed in EXP-20260823-010,
+# where every such call was rejected as "outside the allowed repo directory" and
+# the agent burned turns retrying. They are normalised to repo-relative below.
+_MSYS_PATH_RE = re.compile(r"^/([a-zA-Z])/(.*)$")
 
 # Current repo root for the active issue (set per strategy run). When None,
 # tools fall back to the global TOOLCALL_REPO_DIR (still sandboxed).
@@ -37,6 +45,16 @@ def set_repo_root(path: str | Path | None) -> None:
     if not p.is_absolute():
         p = Path(os.getcwd()) / p
     _CURRENT_REPO_ROOT = p.resolve()
+
+
+def repo_root_resolved() -> bool:
+    """True when tools are bound to a real instance checkout.
+
+    Used to refuse tool execution when the root could not be resolved: falling
+    back to the shared sandbox base would let an agent read a DIFFERENT
+    instance's files, silently contaminating the run's patch.
+    """
+    return _CURRENT_REPO_ROOT is not None and _CURRENT_REPO_ROOT.is_dir()
 
 
 def ensure_repo_root(repo: str, base_commit: str) -> Path | None:
@@ -113,14 +131,81 @@ def _repo_root() -> Path:
     return root.resolve()
 
 
+def _normalize_tool_path(path: str) -> str:
+    """Rewrite shell-native absolute paths into repo-relative ones.
+
+    Observed in real runs (EXP-20260823-010): the model asked for
+    ``/d/development/Skripsi2/AgantBech-SE/datasets/repos/django/django/<sha>``
+    and the sandbox rejected it, so the agent retried the same shape and wasted
+    turns. Three shapes are handled, all reduced to a path relative to the
+    active repo root:
+
+      * Git-Bash / MSYS:  ``/d/dev/repo/file.py``   -> ``file.py``
+      * Windows drive:    ``D:\\dev\\repo\\file.py`` -> ``file.py``
+      * Absolute under root: ``<root>/file.py``     -> ``file.py``
+
+    A path that cannot be mapped is returned unchanged so the sandbox still
+    rejects it with an explicit error instead of silently reading elsewhere.
+    """
+    if not path:
+        return path
+
+    raw = path.strip().strip('"').strip("'")
+    root = _repo_root()
+
+    # Already relative: leave it alone (the common, correct case).
+    if not Path(raw).is_absolute() and not _MSYS_PATH_RE.match(raw):
+        return raw
+
+    candidates: list[Path] = []
+
+    m = _MSYS_PATH_RE.match(raw)
+    if m:
+        # /d/dev/repo/file.py -> D:\dev\repo\file.py
+        candidates.append(Path(f"{m.group(1).upper()}:/{m.group(2)}"))
+
+    candidates.append(Path(raw))
+
+    for cand in candidates:
+        try:
+            resolved = cand.resolve()
+        except (OSError, ValueError):
+            continue
+        try:
+            return str(resolved.relative_to(root))
+        except ValueError:
+            # Not under this instance's root. Fall back to matching the path
+            # *suffix* against the repo (e.g. ".../django/conf/x.py" inside a
+            # differently-rooted checkout) so a valid file is still reachable.
+            parts = resolved.parts
+            for i in range(len(parts)):
+                sub = Path(*parts[i:])
+                if (root / sub).exists():
+                    return str(sub)
+            continue
+
+    return raw
+
+
 def _safe_path(path: str) -> Path:
     """Resolve `path` and ensure it stays within the repo root."""
+    if not repo_root_resolved():
+        raise ValueError(
+            "No repository is bound to this run (the instance checkout could not "
+            "be resolved). Refusing to read files: falling back to the shared "
+            "sandbox would expose a DIFFERENT instance's source. "
+            "Run tools/prepare_repos.py for this instance and re-run."
+        )
     root = _repo_root()
+    path = _normalize_tool_path(path)
     candidate = (root / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
     try:
         candidate.relative_to(root)
     except ValueError:
-        raise ValueError(f"Path '{path}' is outside the allowed repo directory.")
+        raise ValueError(
+            f"Path '{path}' is outside the allowed repo directory. "
+            f"Use a path RELATIVE to the repository root, e.g. 'requests/sessions.py'."
+        )
     return candidate
 
 
@@ -207,11 +292,24 @@ def list_files(path: str = ".", max_entries: int = 100) -> str:
     return "\n".join(entries) if entries else f"[empty] {path}"
 
 
-def run_tests(command: str = "python -m pytest -q") -> str:
-    """Run a test command inside the repo directory (sandboxed, capped)."""
+def run_tests(command: str = "") -> str:
+    """Run a test command inside the instance repo (sandboxed, capped).
+
+    Measured on the tool-call logs, this tool was called 3 times out of 237 —
+    because the default ``python -m pytest -q`` almost always fails in a raw
+    SWE-bench checkout (tests need the repo's own conftest/env). An agent that
+    tries it once, sees a wall of collection errors, and stops using it loses the
+    main way to verify its own fix. So: default to a targeted command, and when
+    no command is given, discover the repo's test layout instead of guessing.
+    """
     root = _repo_root()
     if not root.exists():
         return f"[error] repo dir not found: {root}"
+
+    command = (command or "").strip()
+    if not command:
+        command = _guess_test_command(root)
+
     try:
         proc = subprocess.run(
             command,
@@ -219,10 +317,12 @@ def run_tests(command: str = "python -m pytest -q") -> str:
             cwd=str(root),
             capture_output=True,
             text=True,
-            timeout=120,
+            encoding="utf-8",
+            errors="replace",
+            timeout=180,
         )
     except subprocess.TimeoutExpired:
-        return "[error] command timed out (120s limit)"
+        return "[error] command timed out (180s limit)"
     except Exception as e:  # noqa: BLE001
         return f"[error] cannot run command: {e}"
     out = (proc.stdout or "") + (proc.stderr or "")
@@ -232,21 +332,260 @@ def run_tests(command: str = "python -m pytest -q") -> str:
     return f"[exit code {proc.returncode}]\n{out}"
 
 
+def _guess_test_command(root: Path) -> str:
+    """Pick a plausible test command for this checkout.
+
+    ``-x -q`` (stop at first failure, quiet) keeps output small and useful; a
+    full suite in a large repo can take minutes and flood the context window.
+    """
+    if (root / "pytest.ini").exists() or (root / "tox.ini").exists() or (root / "setup.cfg").exists():
+        return "python -m pytest -x -q"
+    if (root / "tests").is_dir():
+        return "python -m pytest tests -x -q"
+    return "python -m pytest -x -q"
+
+
+def _run_git(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
+    """Run git inside the active repo root, returning the raw completed process."""
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(_repo_root()),
+        capture_output=True,
+        timeout=timeout,
+    )
+
+
+def edit_file(path: str, old_string: str, new_string: str) -> str:
+    """Replace an exact substring in a repo file.
+
+    This is the primary way an agent applies a fix. Producing a unified diff as
+    *text* was the previous mechanism and it failed structurally: measured on
+    EXP-20260824-005, 56 of 150 patches carried status NORMALIZE (well-formed
+    arithmetic, wrong content) and 31 of 66 sampled patches could never apply
+    because the removed lines did not exist in the target. Editing the real file
+    and letting ``git diff`` derive the patch removes that whole failure class.
+
+    ``old_string`` must match exactly once: an ambiguous edit is rejected with an
+    explicit error rather than applied to the wrong occurrence, because a
+    mis-placed edit produces a plausible-looking but wrong patch.
+    """
+    try:
+        p = _safe_path(path)
+    except ValueError as e:
+        return f"[error] {e}"
+    if not p.exists() or not p.is_file():
+        return f"[error] file not found: {path}"
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:  # noqa: BLE001
+        return f"[error] cannot read {path}: {e}"
+
+    if old_string == new_string:
+        return "[error] old_string and new_string are identical — nothing to change"
+    if old_string == "":
+        return "[error] old_string is empty; use write_file to create a file"
+
+    count = text.count(old_string)
+    if count == 0:
+        return (
+            f"[error] old_string not found in {path}. "
+            f"Read the file first and copy the exact text, including indentation."
+        )
+    if count > 1:
+        return (
+            f"[error] old_string appears {count} times in {path} — ambiguous. "
+            f"Include more surrounding context so it matches exactly once."
+        )
+
+    updated = text.replace(old_string, new_string, 1)
+    try:
+        p.write_text(updated, encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        return f"[error] cannot write {path}: {e}"
+
+    # Report the resulting diff for this file so the model sees exactly what
+    # changed, without having to guess whether the edit landed.
+    return f"[ok] edited {path}\n{_diff_for_path(p)}"
+
+
+def write_file(path: str, content: str) -> str:
+    """Create or overwrite a repo file (used for new files)."""
+    try:
+        p = _safe_path(path)
+    except ValueError as e:
+        return f"[error] {e}"
+    existed = p.exists()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        return f"[error] cannot write {path}: {e}"
+    verb = "overwrote" if existed else "created"
+    return f"[ok] {verb} {path} ({len(content)} chars)"
+
+
+def _diff_for_path(p: Path) -> str:
+    """Return the working-tree diff for one file (bounded)."""
+    try:
+        rel = p.relative_to(_repo_root())
+    except ValueError:
+        rel = p
+    try:
+        proc = _run_git("diff", "--no-color", "--", str(rel))
+    except Exception as e:  # noqa: BLE001
+        return f"[diff unavailable: {e}]"
+    out = (proc.stdout or b"").decode("utf-8", "replace")
+    if not out.strip():
+        return "[no diff — file content unchanged vs HEAD]"
+    limit = 3000
+    return out[:limit] + ("\n[... diff truncated ...]" if len(out) > limit else "")
+
+
+def git_diff() -> str:
+    """Return the full working-tree diff of the repo (this becomes the patch).
+
+    The pipeline extracts the submitted patch with this, so whatever the agent
+    changed on disk is exactly what gets evaluated — no diff re-typing, no hunk
+    arithmetic, no hallucinated context lines.
+    """
+    try:
+        proc = _run_git("diff", "--no-color")
+    except Exception as e:  # noqa: BLE001
+        return f"[error] cannot run git diff: {e}"
+    out = (proc.stdout or b"").decode("utf-8", "replace")
+    if not out.strip():
+        return "[empty] no changes have been made to the repository yet"
+    return out
+
+
+def reset_repo() -> str:
+    """Discard all working-tree changes (clean slate before a new attempt)."""
+    try:
+        proc = _run_git("checkout", "--", ".")
+        if proc.returncode != 0:
+            err = (proc.stderr or b"").decode("utf-8", "replace").strip()
+            return f"[error] git checkout failed: {err}"
+        proc2 = _run_git("clean", "-fd", "--", ".")
+        err2 = (proc2.stderr or b"").decode("utf-8", "replace").strip()
+        return f"[ok] repository reset to HEAD{(' | ' + err2) if err2.strip() else ''}"
+    except Exception as e:  # noqa: BLE001
+        return f"[error] cannot reset repo: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Patch capture (edit-then-diff)
+# ---------------------------------------------------------------------------
+#
+# Under tool calling the agent edits real files, so the authoritative patch is
+# the repository's working-tree diff — not whatever text the model typed. This
+# is the whole point of the change: a diff produced by git is applyable by
+# construction, whereas a diff re-typed by the model can carry invented context
+# lines (31 of 66 sampled patches on EXP-20260824-005 could never apply).
+
+
+def _git_in(root: Path, *args: str, timeout: int = 60) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(root),
+        capture_output=True,
+        timeout=timeout,
+    )
+
+
+def _warn(message: str) -> None:
+    """Log a warning without a hard import-time dependency on the logger."""
+    try:
+        from utils.logger import logger
+
+        logger.warning(message)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def capture_diff(repo_root: str | Path | None = None) -> str:
+    """Return the working-tree diff for ``repo_root`` as a unified patch.
+
+    Newly created files are included: ``git diff`` alone omits untracked files,
+    so a fix that adds a file would silently vanish. ``git add -N`` marks them
+    intent-to-add (content is NOT staged), which makes them appear in the diff
+    while keeping the working tree unchanged.
+
+    CRLF is normalised to LF because the diff is later piped to ``git apply``,
+    and a stray ``\\r`` on every line makes a patch fail to apply.
+    """
+    root = Path(repo_root) if repo_root else _repo_root()
+    if not root.is_dir():
+        return ""
+    try:
+        _git_in(root, "add", "-N", ".")
+        proc = _git_in(root, "diff", "--no-color", "--no-ext-diff")
+    except Exception as e:  # noqa: BLE001
+        _warn(f"[capture_diff] failed for {root}: {e}")
+        return ""
+    out = (proc.stdout or b"").decode("utf-8", "replace")
+    return out.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def reset_working_tree(repo_root: str | Path | None = None) -> None:
+    """Return ``repo_root`` to a pristine checkout (no edits, no new files).
+
+    Called before each strategy so the three strategies on the same issue each
+    start from the same base commit. Without it, strategy N+1 would inherit
+    strategy N's edits and its captured diff would contain both.
+    """
+    root = Path(repo_root) if repo_root else _repo_root()
+    if not root.is_dir():
+        return
+    try:
+        _git_in(root, "reset", "-q")            # drop intent-to-add marks
+        _git_in(root, "checkout", "--", ".")
+        _git_in(root, "clean", "-fdq", "--", ".")
+    except Exception as e:  # noqa: BLE001
+        _warn(f"[reset_working_tree] failed for {root}: {e}")
+
+
+def finalize_patch(repo_root: str | Path | None, fallback_response: str) -> str:
+    """Choose the patch to evaluate.
+
+    Tool-calling path: the working-tree diff, which is applyable by construction.
+    Fallback: the model's own text (legacy path, and the case where the agent
+    explored but never edited anything — in which case there is genuinely no
+    patch and the text-based extractor should report NO_DIFF honestly).
+    """
+    if not Config.TOOLCALL_ENABLED or repo_root is None:
+        return fallback_response
+    diff = capture_diff(repo_root)
+    if diff.strip():
+        return diff
+    return fallback_response
+
+
 TOOL_FUNCTIONS = {
     "read_file": read_file,
     "grep": grep,
     "list_files": list_files,
     "run_tests": run_tests,
+    "edit_file": edit_file,
+    "write_file": write_file,
+    "git_diff": git_diff,
+    "reset_repo": reset_repo,
 }
 
 # Per-role tool assignment: tools match each agent's function so the
 # orchestration comparison stays meaningful (planner analyses, executor
 # builds+verifies, reviewer checks with evidence, direct is a cheap one-shot).
+#
+# Editing tools are granted only to roles that are supposed to change code:
+# planner is read-only by design (it produces a plan, not a patch), and the
+# reviewer inspects rather than authors (it may run tests to gather evidence).
 AGENT_TOOLS: dict[str, list[str]] = {
-    "direct": ["read_file", "grep", "list_files"],
+    "direct": ["read_file", "grep", "list_files", "edit_file", "write_file", "git_diff"],
     "planner": ["read_file", "grep", "list_files"],
-    "executor": ["read_file", "grep", "list_files", "run_tests"],
-    "reviewer": ["read_file", "grep", "run_tests"],
+    "executor": [
+        "read_file", "grep", "list_files", "run_tests",
+        "edit_file", "write_file", "git_diff", "reset_repo",
+    ],
+    "reviewer": ["read_file", "grep", "run_tests", "git_diff"],
 }
 
 
@@ -307,14 +646,82 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "run_tests",
-            "description": "Run a test command inside the repo (sandboxed, 120s cap).",
+            "description": (
+                "Run a test command inside the instance repo to verify your fix. "
+                "Omit the command to auto-select one for this repo's layout "
+                "(recommended). Use a targeted path, e.g. "
+                "'python -m pytest tests/test_x.py -x -q', rather than the whole suite."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "default": "python -m pytest -q"},
+                    "command": {
+                        "type": "string",
+                        "description": "Shell command to run. Omit to auto-detect.",
+                    },
                 },
                 "required": [],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": (
+                "Apply a fix by replacing an exact block of text in a repository file. "
+                "PREFER THIS over writing a diff by hand. Read the file first, then copy "
+                "the exact text (including indentation) into old_string."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Repo-relative file path."},
+                    "old_string": {
+                        "type": "string",
+                        "description": "Exact existing text to replace. Must appear exactly once.",
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "Replacement text. Use the same indentation as the file.",
+                    },
+                },
+                "required": ["path", "old_string", "new_string"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Create a new file or overwrite an existing one with full content.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Repo-relative file path."},
+                    "content": {"type": "string", "description": "Full file content to write."},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_diff",
+            "description": (
+                "Show the unified diff of everything you have changed so far. "
+                "Call this to verify your fix before finishing."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reset_repo",
+            "description": "Discard ALL working-tree changes and start over from a clean checkout.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
 ]

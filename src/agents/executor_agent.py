@@ -8,15 +8,15 @@ class ExecutorAgent(BaseAgent):
     prompt_file = "executor.md"
     default_template = "{{issue}}\n\nPlan:\n{{plan}}"
 
-    def _render(self, task: AgentMessage, context: Blackboard) -> str:
+    def _render(self, task: AgentMessage, context: Blackboard, template: str) -> str:
         context.bb_ops.append("get_issue")
         if context.plan:
             context.bb_ops.append("get_plan")
-        dynamic = self.template.replace("{{issue}}", task.content)
+        dynamic = template.replace("{{issue}}", task.content)
         dynamic = dynamic.replace("{{plan}}", context.plan)
         if context.feedback:
             context.bb_ops.append("get_feedback")
-            if "{{feedback}}" in self.template:
+            if "{{feedback}}" in template:
                 dynamic = dynamic.replace("{{feedback}}", context.feedback)
             else:
                 dynamic = dynamic + f"\n\nReviewer Feedback:\n{context.feedback}"

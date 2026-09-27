@@ -8,7 +8,7 @@ class DirectAgent(BaseAgent):
     prompt_file = "direct_prompt.md"
     default_template = "{{issue}}\n"
 
-    def _render(self, task: AgentMessage, context: Blackboard) -> str:
+    def _render(self, task: AgentMessage, context: Blackboard, template: str) -> str:
         context.bb_ops.append("get_issue")
-        dynamic = self.template.replace("{{issue}}", task.content)
+        dynamic = template.replace("{{issue}}", task.content)
         return self._wrap(dynamic)

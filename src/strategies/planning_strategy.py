@@ -5,7 +5,7 @@ from models.inference import InferenceRun
 from agents.messages import AgentMessage
 from agents.blackboard import Blackboard
 from agents.registry import build_agent_team
-from agents.tools import ensure_repo_root
+from agents.tools import ensure_repo_root, reset_working_tree, finalize_patch
 from evaluation.cost import CostCalculator
 
 
@@ -23,6 +23,9 @@ class PlanningStrategy:
             self.provider.user_id = f"{self.strategy_name}_{issue.instance_id.replace('__', '-')}"
         # Point tool-calling agents at this instance's checked-out repo.
         repo_root = ensure_repo_root(issue.repo, issue.base_commit)
+        # Pristine checkout: strategies share one repo per issue, so a previous
+        # strategy's edits would otherwise leak into this captured diff.
+        reset_working_tree(repo_root)
         for agent in self.team.values():
             agent.repo_root = str(repo_root) if repo_root else None
         bb = Blackboard(issue=issue)
@@ -42,14 +45,17 @@ class PlanningStrategy:
         inferences.append(exec_resp.inference)
         bb.log(AgentMessage(sender="orchestrator", receiver="executor", kind="task", content="", bb_ops=["save_patch"]))
 
+        # Executor is the role that edits; take the patch from the repo, not text.
+        patch_text = finalize_patch(repo_root, exec_resp.inference.response)
+
         run = InferenceRun(
-            patch=exec_resp.inference.response,
+            patch=patch_text,
             inferences=inferences,
             messages=list(bb.history),
         )
         cost = self.calculator.aggregate(inferences)
         exec_res = ExecutionResult(run=run)
-        eval_res = EvaluationResult(success=exec_resp.inference.response.strip() != "", error="")
+        eval_res = EvaluationResult(success=patch_text.strip() != "", error="")
         result = ExperimentResult(
             instance_id=issue.instance_id,
             strategy="planning",
@@ -58,4 +64,4 @@ class PlanningStrategy:
             cost=cost,
             evaluation=eval_res,
         )
-        return Patch(response=exec_resp.inference.response), result
+        return Patch(response=patch_text), result

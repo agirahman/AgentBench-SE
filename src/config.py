@@ -1,7 +1,80 @@
 import os
-from dotenv import load_dotenv
+from pathlib import Path
 
-load_dotenv()
+from dotenv import load_dotenv, dotenv_values
+
+# .env is this experiment's configuration file. ``load_dotenv()`` deliberately
+# does NOT overwrite variables already present in the process environment — that
+# is standard dotenv behaviour, but it means an ambient shell variable silently
+# wins over the file the researcher edited.
+#
+# Measured on the development machine, the inherited environment carried
+# OPENROUTER_MODEL=poolside/laguna-s-2.1:free and TOOLCALL_ENABLED=false while
+# .env said stealth/space-bunny-alpha and true. A run would therefore have used a
+# different model AND a different patch mechanism than experiment.yaml appeared
+# to configure — a silent reproducibility break in a comparison study.
+_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(_ENV_PATH)
+
+# Keys whose value is a credential: never echo them, only report that they differ.
+_SECRET_MARKERS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD")
+
+
+def _env_drift() -> dict[str, tuple[str, str]]:
+    """Return {key: (env_value, dotenv_value)} for keys the shell overrides.
+
+    Only keys actually defined in .env are considered, so unrelated ambient
+    variables are ignored.
+    """
+    try:
+        file_values = dotenv_values(_ENV_PATH)
+    except Exception:  # noqa: BLE001 - never let diagnostics break startup
+        return {}
+    drift: dict[str, tuple[str, str]] = {}
+    for key, file_value in file_values.items():
+        if file_value is None:
+            continue
+        env_value = os.environ.get(key)
+        if env_value is None:
+            continue
+        if env_value.strip() != file_value.strip():
+            drift[key] = (env_value, file_value)
+    return drift
+
+
+def _report_env_drift() -> None:
+    """Warn loudly when the ambient environment overrides .env."""
+    drift = _env_drift()
+    if not drift:
+        return
+    try:
+        from utils.logger import logger
+    except Exception:  # noqa: BLE001
+        logger = None
+
+    lines = [
+        "=" * 72,
+        "  CONFIG DRIFT: environment variables override .env",
+        "=" * 72,
+        "  The values below come from the SHELL, not from .env. load_dotenv() does",
+        "  not overwrite variables that already exist, so the run will use these.",
+    ]
+    for key, (env_value, file_value) in sorted(drift.items()):
+        if any(m in key.upper() for m in _SECRET_MARKERS):
+            lines.append(f"    {key}: shell=<set, {len(env_value)} chars>  .env=<set, {len(file_value)} chars>")
+        else:
+            lines.append(f"    {key}: shell={env_value!r}  .env={file_value!r}")
+    lines.append("  Unset the shell variables, or edit .env to match, before a real run.")
+    lines.append("=" * 72)
+    message = "\n".join(lines)
+
+    if logger is not None:
+        logger.warning(message)
+    else:
+        print(message, file=os.sys.stderr)
+
+
+_report_env_drift()
 
 
 def _get_env(name: str, default: str = "") -> str:
@@ -78,6 +151,11 @@ class Config:
 
     OPENROUTER_REASONING = _get_env("OPENROUTER_REASONING", "false").lower() in ("1", "true", "yes")
     OPENROUTER_REASONING_EFFORT = _get_env("OPENROUTER_REASONING_EFFORT", "low")
+    # Opt-in explicit reasoning-off. Some OpenRouter endpoints reject
+    # {"reasoning": {"enabled": false}} with HTTP 400 ("Reasoning is mandatory
+    # for this endpoint and cannot be disabled"), so the default is to send
+    # nothing and let the provider decide.
+    OPENROUTER_DISABLE_REASONING = _get_env("OPENROUTER_DISABLE_REASONING", "false").lower() in ("1", "true", "yes")
 
     DEEPSEEK_THINKING = _get_env("DEEPSEEK_THINKING", "false").lower() in ("1", "true", "yes")
     DEEPSEEK_REASONING_EFFORT = _get_env("DEEPSEEK_REASONING_EFFORT", "low")

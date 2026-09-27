@@ -5,7 +5,7 @@ from models.inference import InferenceRun
 from agents.messages import AgentMessage
 from agents.blackboard import Blackboard
 from agents.registry import build_agent_team
-from agents.tools import ensure_repo_root
+from agents.tools import ensure_repo_root, reset_working_tree, finalize_patch
 from evaluation.cost import CostCalculator
 
 
@@ -22,6 +22,10 @@ class DirectStrategy:
         if hasattr(self.provider, "user_id"):
             self.provider.user_id = f"{self.strategy_name}_{issue.instance_id.replace('__', '-')}"
         repo_root = ensure_repo_root(issue.repo, issue.base_commit)
+        # Start from a pristine checkout: strategies share one repo per issue, so
+        # without this the captured diff would include the previous strategy's
+        # edits as well as this one's.
+        reset_working_tree(repo_root)
         for agent in self.team.values():
             agent.repo_root = str(repo_root) if repo_root else None
         bb = Blackboard(issue=issue)
@@ -29,14 +33,18 @@ class DirectStrategy:
         bb.log(task)
         resp = self.team["direct"].act(task, bb)
 
+        # Under tool calling the agent edits files, so the authoritative patch is
+        # the working-tree diff; otherwise fall back to the model's own text.
+        patch_text = finalize_patch(repo_root, resp.inference.response)
+
         run = InferenceRun(
-            patch=resp.inference.response,
+            patch=patch_text,
             inferences=[resp.inference],
             messages=list(bb.history),
         )
         cost = self.calculator.aggregate([resp.inference])
         exec_res = ExecutionResult(run=run)
-        eval_res = EvaluationResult(success=resp.inference.response.strip() != "", error="")
+        eval_res = EvaluationResult(success=patch_text.strip() != "", error="")
         result = ExperimentResult(
             instance_id=issue.instance_id,
             strategy="direct",
@@ -45,4 +53,4 @@ class DirectStrategy:
             cost=cost,
             evaluation=eval_res,
         )
-        return Patch(response=resp.inference.response), result
+        return Patch(response=patch_text), result

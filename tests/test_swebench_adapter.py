@@ -112,37 +112,56 @@ def test_apply_status_not_applyable_when_target_file_absent(tmp_path):
     assert validate_applicability(patch, tmp_path) == NOT_APPLYABLE
 
 
-def test_apply_status_corrupt_patch_is_not_applyable(tmp_path, monkeypatch):
-    # Regression: git exits 128 with "corrupt patch". That must NOT be treated as
-    # inconclusive (None), which previously promoted corrupt patches to APPLYABLE.
+def _init_repo(path):
+    """Create a real git repo with a committed file, for git-backed checks."""
     import subprocess
 
+    def g(*a):
+        return subprocess.run(["git", *a], cwd=str(path), capture_output=True, timeout=60)
+
+    g("init", "-q")
+    g("config", "user.email", "t@t.t")
+    g("config", "user.name", "t")
+    _write(path, "app.py", 'print("old")\n')
+    g("add", ".")
+    g("commit", "-qm", "init")
+
+
+def test_apply_status_corrupt_patch_is_not_applyable(tmp_path):
+    # Regression: git exits 128 with "corrupt patch". That must NOT be treated as
+    # inconclusive (None), which previously promoted corrupt patches to APPLYABLE.
+    from experiments import swebench_adapter as sa
+
+    _init_repo(tmp_path)
+    corrupt = (
+        "diff --git a/app.py b/app.py\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        " this is not a valid hunk body\n"
+    )
+    assert sa._strict_git_apply_ok(corrupt, tmp_path) is False
+
+
+def test_apply_status_not_a_repo_is_inconclusive(tmp_path):
+    # A genuine "git cannot answer" signal stays inconclusive rather than FAIL.
+    #
+    # Also guards a real trap: git walks UP the directory tree, so a non-repo
+    # path can silently resolve to an unrelated parent repository (measured on
+    # this machine: a temp dir resolved to C:/Users/<user>). Validating against
+    # the wrong repo yields a confident but meaningless verdict.
     from experiments import swebench_adapter as sa
 
     _write(tmp_path, "app.py", 'print("old")\n')
-
-    class _Proc:
-        returncode = 128
-        stderr = b"error: corrupt patch at line 11\n"
-        stdout = b""
-
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc())
-    assert sa._strict_git_apply_ok("diff", tmp_path) is False
-
-
-def test_apply_status_not_a_repo_is_inconclusive(tmp_path, monkeypatch):
-    # A genuine "git cannot answer" signal stays inconclusive rather than FAIL.
-    import subprocess
-
-    from experiments import swebench_adapter as sa
-
-    class _Proc:
-        returncode = 128
-        stderr = b"fatal: not a git repository (or any of the parent directories)\n"
-        stdout = b""
-
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Proc())
-    assert sa._strict_git_apply_ok("diff", tmp_path) is None
+    valid = (
+        "diff --git a/app.py b/app.py\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        '-print("old")\n'
+        '+print("new")\n'
+    )
+    assert sa._strict_git_apply_ok(valid, tmp_path) is None
 
 
 def test_apply_status_removed_line_present_elsewhere_is_needs_fuzz(tmp_path):
@@ -159,3 +178,57 @@ def test_apply_status_removed_line_present_elsewhere_is_needs_fuzz(tmp_path):
     )
     verdict = validate_applicability(patch, tmp_path)
     assert verdict in (NEEDS_FUZZ, APPLYABLE)
+
+
+# ---------------------------------------------------------------------------
+# Trailing whitespace-only context line
+# ---------------------------------------------------------------------------
+#
+# Under edit-then-diff the patch comes verbatim from `git diff`, so a false
+# HUNK_MISMATCH would mislabel perfect patches as NORMALIZE and corrupt the
+# patch-validity metric. `str.strip()` used to eat the final " " context line,
+# counting the hunk one line short: measured (4, 4) instead of (5, 5).
+
+
+def _git_diff_with_trailing_blank_context():
+    """Return a real git diff whose hunk ends with a whitespace-only line."""
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    repo = Path(tempfile.mkdtemp()) / "r"
+    repo.mkdir()
+
+    def g(*a, **kw):
+        return subprocess.run(
+            ["git", *a], cwd=str(repo), capture_output=True, timeout=60, **kw
+        )
+
+    g("init", "-q")
+    g("config", "user.email", "t@t.t")
+    g("config", "user.name", "t")
+    (repo / "f.py").write_text("a\nb\n\nc\n\n", encoding="utf-8")
+    g("add", ".")
+    g("commit", "-qm", "init")
+    (repo / "f.py").write_text("a\nb\n\nX\n\n", encoding="utf-8")
+    return g("diff", "--no-color").stdout.decode("utf-8", "replace")
+
+
+def test_git_diff_with_trailing_blank_context_is_valid():
+    from experiments import swebench_adapter as sa
+
+    diff = _git_diff_with_trailing_blank_context()
+
+    # The final context line is " " and must survive trimming.
+    assert diff.split("\n")[-2] == " ", "fixture no longer exercises the bug"
+    assert sa._check_patch_syntax(diff) is None
+    assert extract_diff(diff).status == "VALID"
+
+
+def test_strip_blank_edges_keeps_whitespace_only_line():
+    from experiments import swebench_adapter as sa
+
+    # Leading/trailing empty lines go, but a " " context line is significant.
+    assert sa._strip_blank_edges("\n\nx\n \n\n") == "x\n "
+    assert sa._strip_blank_edges("") == ""
+    assert sa._strip_blank_edges("\n\n") == ""

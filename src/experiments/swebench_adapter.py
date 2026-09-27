@@ -12,6 +12,24 @@ class PatchResult:
     status: str  # VALID | INVALID_HUNK | PARSE_ERROR | NO_DIFF | EMPTY | PLACEHOLDER_ONLY
 
 
+def _strip_blank_edges(text: str) -> str:
+    """Trim blank edges WITHOUT eating significant trailing whitespace.
+
+    A diff's final line may legitimately be a whitespace-only context line
+    (``" "``). ``str.strip()`` deletes it, silently dropping one line from the
+    hunk body, so a diff produced verbatim by ``git diff`` was counted short and
+    wrongly condemned as HUNK_MISMATCH. Measured on a git-generated diff:
+    counts were (4, 4) after strip versus the correct (5, 5) before it.
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
+    while lines and lines[0].strip() == "":
+        lines.pop(0)
+    while lines and lines[-1] == "":
+        lines.pop()
+    return "\n".join(lines)
+
+
 def _count_hunk_body(body):
     """Hitung baris orig/new per hunk body.
 
@@ -55,7 +73,7 @@ def _check_patch_syntax(text: str) -> str | None:
     if not text:
         return "EMPTY"
 
-    lines = text.strip().split("\n")
+    lines = _strip_blank_edges(text).split("\n")
     if not lines[0].startswith("diff --git"):
         return "NO_DIFF"
 
@@ -205,7 +223,7 @@ def _clean_patch(text: str) -> PatchResult:
     """
     if not text:
         return PatchResult(patch="", status="EMPTY")
-    patch = _normalize_newlines(text).strip()
+    patch = _strip_blank_edges(_normalize_newlines(text))
     if not patch:
         return PatchResult(patch="", status="NO_DIFF")
     failure = _check_patch_syntax(patch)
@@ -253,7 +271,7 @@ def extract_diff(response: str, finish_reason: str = "") -> PatchResult:
     # 1. Markdown code block (toleran label apa pun, mis. python/diff/patch/json)
     m = re.search(r"```(?:[A-Za-z0-9_-]+)?\s*\n(.*?)```", response, re.DOTALL)
     if m:
-        content = m.group(1).strip()
+        content = _strip_blank_edges(m.group(1))
         if content.startswith("{"):
             try:
                 data = json.loads(content)
@@ -276,7 +294,7 @@ def extract_diff(response: str, finish_reason: str = "") -> PatchResult:
         pass
 
     # 3. Last resort: raw text
-    return _handle_truncated(_clean_patch(response.strip()), finish_reason)
+    return _handle_truncated(_clean_patch(response), finish_reason)
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +401,16 @@ def _line_present(lines: list[str], needle: str) -> bool:
 
 
 def _strict_git_apply_ok(patch: str, root) -> bool | None:
-    """Run ``git apply --check -p1``. True/False, or None if git is unusable.
+    """Run ``git apply --check -p1`` against a CLEAN tree at HEAD.
+
+    True/False, or None if git is unusable.
+
+    The check runs against a temporary index seeded from HEAD rather than the
+    working tree. This matters under the edit-then-diff mechanism: the agent has
+    ALREADY applied its change to the working tree, so checking the patch there
+    fails by construction ("patch does not apply") and every patch would be
+    misreported. The SWE-bench harness applies the patch to a pristine checkout
+    of base_commit, so HEAD is the correct reference.
 
     Returns None only when git could not be run at all or the directory is not a
     repository — i.e. when the result carries no information. Any other non-zero
@@ -396,18 +423,62 @@ def _strict_git_apply_ok(patch: str, root) -> bool | None:
     (cp1252) cannot encode arbitrary source text, and ``text=True`` would raise
     ``UnicodeEncodeError`` on any patch containing a non-Latin-1 character.
     """
+    import os
     import subprocess
+    import tempfile
+    from pathlib import Path
 
     try:
+        fd, tmp_index = tempfile.mkstemp(prefix="ab-applycheck-")
+        os.close(fd)
+    except OSError:
+        return None
+
+    env = dict(os.environ)
+    env["GIT_INDEX_FILE"] = tmp_index
+    try:
+        # `root` must BE a repository. git otherwise walks up to parent
+        # directories and happily uses an unrelated one: measured on this
+        # machine, a plain temp directory resolved to C:/Users/<user> because
+        # that directory happened to be a git repo. Validating a patch against
+        # the wrong repository produces a confident but meaningless verdict.
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=str(root), capture_output=True, timeout=30, env=env,
+        )
+        if top.returncode != 0:
+            return None
+        try:
+            top_path = Path((top.stdout or b"").decode("utf-8", "replace").strip()).resolve()
+        except (OSError, ValueError):
+            return None
+        if top_path != Path(root).resolve():
+            return None
+
+        seed = subprocess.run(
+            ["git", "read-tree", "HEAD"],
+            cwd=str(root), capture_output=True, timeout=30, env=env,
+        )
+        if seed.returncode != 0:
+            # A broken/unborn HEAD (observed on one cached checkout) carries no
+            # usable information about the patch.
+            return None
         proc = subprocess.run(
-            ["git", "apply", "--check", "-p1"],
+            ["git", "apply", "--check", "--cached", "-p1"],
             input=patch.encode("utf-8", errors="replace"),
             cwd=str(root),
             capture_output=True,
             timeout=30,
+            env=env,
         )
     except (OSError, subprocess.SubprocessError):
         return None
+    finally:
+        try:
+            os.unlink(tmp_index)
+        except OSError:
+            pass
+
     if proc.returncode == 0:
         return True
     stderr = (proc.stderr or b"").decode("utf-8", "replace").lower()
@@ -416,11 +487,38 @@ def _strict_git_apply_ok(patch: str, root) -> bool | None:
     return False
 
 
+def _file_lines_at_head(root, path: str) -> list[str] | None:
+    """Read ``path`` as of HEAD, or None if it cannot be read.
+
+    The working tree must NOT be used: under edit-then-diff the agent's own edit
+    is already there, so a line the patch intends to remove looks absent and the
+    patch is wrongly condemned as NOT_APPLYABLE.
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["git", "show", f"HEAD:{path}"],
+            cwd=str(root), capture_output=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return (proc.stdout or b"").decode("utf-8", "replace").split("\n")
+
+
 def validate_applicability(patch: str, repo_root) -> str:
     """Predict whether the SWE-bench harness can apply ``patch``.
 
     Returns one of APPLYABLE | NEEDS_FUZZ | NOT_APPLYABLE | UNKNOWN.
     ``repo_root`` may be a path or None; None yields UNKNOWN (no guess).
+
+    Files are read from **HEAD**, never the working tree. Under edit-then-diff the
+    agent has already written its change to the working tree, so a line the patch
+    removes is genuinely gone there and the patch would be condemned as
+    NOT_APPLYABLE by construction. The harness applies the patch to a pristine
+    checkout of base_commit, which is what HEAD represents.
 
     ``NOT_APPLYABLE`` is deliberately conservative: it is only returned when a
     removed line exists **nowhere** in the target file. A line that exists but
@@ -447,16 +545,20 @@ def validate_applicability(patch: str, repo_root) -> str:
     saw_real_file = False
 
     for path, hunks in hunks_by_file.items():
-        target = root / path
-        if not target.is_file():
-            # The patch edits a file that does not exist at base_commit: it can
-            # never apply. This is the dominant failure of the NORMALIZE class.
-            return NOT_APPLYABLE
+        # Prefer HEAD; fall back to the working tree only when the file is
+        # untracked/absent at HEAD (a genuinely new file created by the patch).
+        lines = _file_lines_at_head(root, path)
+        if lines is None:
+            target = root / path
+            if not target.is_file():
+                # The patch edits a file that does not exist at base_commit: it
+                # can never apply. This is the dominant failure of NORMALIZE.
+                return NOT_APPLYABLE
+            try:
+                lines = target.read_text(encoding="utf-8", errors="replace").split("\n")
+            except OSError:
+                return UNKNOWN
         saw_real_file = True
-        try:
-            lines = target.read_text(encoding="utf-8", errors="replace").split("\n")
-        except OSError:
-            return UNKNOWN
 
         for orig_start, removed, _added in hunks:
             if not removed:
@@ -477,7 +579,8 @@ def validate_applicability(patch: str, repo_root) -> str:
         return UNKNOWN
 
     # Line check passed: confirm with the same strict step the harness tries
-    # first. git unavailable / not a repo → keep the line-based verdict.
+    # first (against a clean HEAD index). git unavailable / not a repo → keep
+    # the line-based verdict.
     strict = _strict_git_apply_ok(patch, root)
     if strict is True:
         return APPLYABLE

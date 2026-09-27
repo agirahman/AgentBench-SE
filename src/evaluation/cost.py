@@ -69,6 +69,32 @@ class PricingTable:
             "currency": "USD",
             "pricing_version": "2026-07",
         },
+        # OpenRouter testing model: free tier, so cost metrics are genuinely $0
+        # (not a dummy rate). Used only for pipeline validation before the final
+        # DeepSeek run, so a $0 cost card is accurate, not a placeholder.
+        "stealth/space-bunny-alpha": {
+            "input_per_million": 0.0,
+            "output_per_million": 0.0,
+            "currency": "USD",
+            "pricing_version": "2026-09-free",
+        },
+        # OpenRouter route to the SAME DeepSeek model as the official API. The
+        # official DeepSeek rate card is applied so RQ3 is comparable across the
+        # two routes; note in the methodology that this is a modelled price.
+        "deepseek/deepseek-v4-flash": {
+            "off_peak": {
+                "input_per_million": 0.22,
+                "cached_input_per_million": 0.007,
+                "output_per_million": 0.66,
+            },
+            "peak": {
+                "input_per_million": 0.44,
+                "cached_input_per_million": 0.014,
+                "output_per_million": 1.32,
+            },
+            "currency": "USD",
+            "pricing_version": "2026-08-16-via-openrouter",
+        },
         "oc/deepseek-v4-flash-free": {
             "input_per_million": 0.0,
             "output_per_million": 0.0,

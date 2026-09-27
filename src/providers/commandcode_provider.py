@@ -15,7 +15,6 @@ rejects json_object + tools together), so the tool path omits it.
 
 from __future__ import annotations
 
-import json
 import time
 from typing import Optional
 
@@ -25,8 +24,10 @@ from config import Config
 from utils.logger import logger
 from models.inference import InferenceResult
 from evaluation.retry import with_retry
-from providers.response_utils import build_openai_inference_result, _extract_cached_tokens
-from agents.tools import TOOL_SCHEMAS, execute_tool, set_repo_root
+from providers.response_utils import build_openai_inference_result
+from providers.tool_loop import run_tool_loop
+from providers.system_prompts import TOOL_SYSTEM_PROMPT, NO_TOOL_SYSTEM_PROMPT
+from agents.tools import TOOL_SCHEMAS
 
 
 class CommandCodeProvider:
@@ -105,14 +106,11 @@ class CommandCodeProvider:
         try:
             if "json" not in prompt.lower():
                 prompt = f"{prompt}\n\nRespond in valid JSON."
-            # Identical system prompt to generate_with_tools so both paths share
-            # the same cacheable prefix (stable across instances).
-            system_content = (
-                "You are a software engineering agent. "
-                "Use the provided tools to explore the repository and gather evidence "
-                "before producing your final answer. When you have enough information, "
-                "respond with your final answer (no tool call)."
-            )
+            # The system prompt must match the path actually taken. It previously
+            # said "use the provided tools" here too, while no tools were sent —
+            # so the model narrated tool use it could not perform and returned no
+            # patch. That is a direct contributor to the NO_DIFF failures.
+            system_content = NO_TOOL_SYSTEM_PROMPT
             kwargs: dict = {
                 "model": self.model,
                 "messages": [
@@ -156,159 +154,27 @@ class CommandCodeProvider:
         tools: Optional[list] = None,
         max_tool_turns: Optional[int] = None,
         repo_root: Optional[str] = None,
+        system_prompt: Optional[str] = None,
     ) -> InferenceResult:
         """Run a tool-calling conversation and return the final answer.
 
-        The final InferenceResult.response is the LAST assistant text (tool
-        messages excluded). All tool calls are recorded in result.tool_calls as
-        a list of {"name", "arguments", "result"} dicts for logging.
-
-        If ``repo_root`` is given, tools explore that checked-out instance repo
-        (e.g. datasets/repos/psf/requests/<hash>) so agents never guess paths.
+        Delegates to the shared loop in ``providers.tool_loop`` so this provider
+        and OpenRouter cannot drift apart. The final ``result.response`` is the
+        LAST assistant text (tool messages excluded); every executed call is in
+        ``result.tool_calls`` for the artifact trail.
         """
-        tools = tools or TOOL_SCHEMAS
-        max_tool_turns = max_tool_turns or Config.MAX_TOOL_TURNS
-        t0 = time.perf_counter()
-
-        # Always sync the tool sandbox to THIS instance's repo root. Passing
-        # None resets it to the global sandbox base — never reuse a previous
-        # instance's root silently.
-        set_repo_root(repo_root)
-
-        # Cache-friendly system prompt: identical across ALL instances so the
-        # top of every request is byte-for-byte stable (enables automatic prefix
-        # caching). The per-instance repo_root is NOT embedded here — it is only
-        # used by the tool sandbox at execution time. When PROMPT_CACHE_LAYOUT is
-        # off we keep the legacy behavior (repo_root still omitted from the static
-        # prefix anyway, so both paths share the same stable system string).
-        system_content = (
-            "You are a software engineering agent. "
-            "Use the provided tools to explore the repository and gather evidence "
-            "before producing your final answer. When you have enough information, "
-            "respond with your final answer (no tool call)."
-        )
-
-        messages = [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": prompt},
-        ]
-        recorded_calls: list[dict] = []
-        # Cumulative usage across ALL API turns: each turn re-sends the growing
-        # conversation, so summing is required or token/cost metrics undercount
-        # by 3-10x on tool-heavy runs.
-        usage_totals = {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-            "cached_tokens": 0,
-        }
-        api_turns = 0
-
-        def _accumulate_usage(resp) -> None:
-            nonlocal api_turns
-            api_turns += 1
-            u = getattr(resp, "usage", None)
-            if u is None:
-                return
-            pt = getattr(u, "prompt_tokens", 0) or 0
-            ct = getattr(u, "completion_tokens", 0) or 0
-            tt = getattr(u, "total_tokens", 0) or (pt + ct)
-            ca = _extract_cached_tokens(u)
-            usage_totals["prompt_tokens"] += pt
-            usage_totals["completion_tokens"] += ct
-            usage_totals["total_tokens"] += tt
-            usage_totals["cached_tokens"] += ca
-
-        def _finalize(resp) -> InferenceResult:
-            elapsed = time.perf_counter() - t0
-            result = build_openai_inference_result(
-                resp,
-                role=role,
-                model=self.model,
-                elapsed=elapsed,
-                response_headers=getattr(resp, "response_headers", None),
-            )
-            # Override per-call usage with cumulative loop totals.
-            result.usage = dict(usage_totals)
-            result.tool_calls = recorded_calls
-            result.api_turns = max(1, api_turns)
-            return result
-
         try:
-            for _ in range(max_tool_turns):
-                kwargs: dict = {
-                    "model": self.model,
-                    "messages": messages,
-                    "temperature": Config.TEMPERATURE,
-                    "timeout": Config.API_TIMEOUT,
-                    "max_tokens": Config.MAX_TOKENS,
-                    "tools": tools,
-                    "tool_choice": "auto",
-                }
-                extra = self._extra_body()
-                if extra:
-                    kwargs["extra_body"] = extra
-                response = self.client.chat.completions.create(**kwargs)
-                _accumulate_usage(response)
-                choice = response.choices[0]
-                msg = choice.message
-                finish = getattr(choice, "finish_reason", "")
-
-                # No tool call -> this is the final answer.
-                if not getattr(msg, "tool_calls", None):
-                    return _finalize(response)
-
-                # Append assistant message (with tool_calls) to history.
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": getattr(msg, "content", "") or "",
-                        "tool_calls": [
-                            {
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.function.name,
-                                    "arguments": tc.function.arguments,
-                                },
-                            }
-                            for tc in msg.tool_calls
-                        ],
-                    }
-                )
-
-                # Execute each tool call and feed results back.
-                for tc in msg.tool_calls:
-                    name = tc.function.name
-                    try:
-                        args = json.loads(tc.function.arguments or "{}")
-                    except json.JSONDecodeError:
-                        args = {}
-                    tool_out = execute_tool(name, args)
-                    recorded_calls.append(
-                        {"name": name, "arguments": args, "result": tool_out[:2000]}
-                    )
-                    logger.info(f"[toolcall] role={role} tool={name} args={args}")
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": tool_out[:8000],
-                        }
-                    )
-
-            # Reached max turns without a final answer; force one last call.
-            logger.warning(f"CommandCode tool loop hit max_tool_turns={max_tool_turns} for role={role}")
-            kwargs_final = {
-                "model": self.model,
-                "messages": messages,
-                "temperature": Config.TEMPERATURE,
-                "timeout": Config.API_TIMEOUT,
-                "max_tokens": Config.MAX_TOKENS,
-            }
-            response = self.client.chat.completions.create(**kwargs_final)
-            _accumulate_usage(response)
-            return _finalize(response)
+            return run_tool_loop(
+                self.client,
+                model=self.model,
+                prompt=prompt,
+                role=role,
+                tools=tools or TOOL_SCHEMAS,
+                max_tool_turns=max_tool_turns,
+                repo_root=repo_root,
+                extra_body=self._extra_body() or None,
+                system_prompt=system_prompt or TOOL_SYSTEM_PROMPT,
+            )
         except Exception as e:
             logger.error(f"CommandCode Tool Generate Error: {e}")
             raise
