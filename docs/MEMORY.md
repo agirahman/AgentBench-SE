@@ -1,7 +1,7 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-09-28 19:45 WIB
-**Status:** Run 10-issue dihentikan di 10/30 (bug retry ditemukan) — perlu perbaikan sebelum lanjut
+**Last Updated:** 2026-09-28 21:30 WIB
+**Status:** Bug retry-reset-budget **SUDAH DIPERBAIKI** — siap run ulang 10 issue
 **Active Branch:** `19/toolcall-commandcode`
 **Detail sesi terakhir:** lihat [`HANDOFF_20260928.md`](HANDOFF_20260928.md)
 
@@ -16,11 +16,12 @@
 | **Repo cache** | ✅ Done | 50 instance pristine di `datasets/repos/` |
 | **Mekanisme patch** | ✅ Done | edit-then-diff: agen mengedit file, patch diambil dari `git diff` |
 | **Tool calling** | ✅ Done | Loop bersama di `providers/tool_loop.py` (3 provider berbagi) |
-| **Budget tool-turn** | ✅ Done | `agents/budget.py` — total sama per strategi (lihat di bawah) |
+| **Budget tool-turn** | ✅ Done | `agents/budget.py` — total sama per strategi, sekarang **40** |
 | **Pre-flight validator** | ✅ Done | `tools/preflight_modal.py` — replikasi kontrak Modal secara lokal |
 | **Rate-limit handling** | ✅ Done | Backoff 429 + circuit breaker |
-| **Test suite** | ✅ Done | 199 lulus |
-| **Retry vs budget** | ❌ **BUG** | `@with_retry` me-restart loop → budget ter-reset. **Harus diperbaiki dulu.** |
+| **Test suite** | ✅ Done | **207 lulus** (dari 199) |
+| **Retry vs budget** | ✅ **FIXED** | Retry per-request di dalam loop (commit `dfc9fa8`) |
+| **Konteks per turn** | ✅ Done | `TOOL_OUTPUT_MAX_CHARS=2000`, head+tail (dari 8000 head-only) |
 | **Reviewer oracle** | ⚠️ Terbatas | `run_tests` selalu gagal; reviewer hanya bisa menalar |
 
 ---
@@ -34,6 +35,9 @@
 | Bounded re-review (bukan auto-approve) | 2026-09-27 | Revisi tanpa re-review terbukti merugikan (EXP-007) | Menambah biaya token |
 | Budget setara per strategi | 2026-09-28 | Cap per-`act()` membuat total jadi kecelakaan arsitektur; `direct` selalu terpotong | `review` tidak berubah, `direct` naik 3× |
 | Reviewer tanpa oracle didokumentasikan sebagai temuan | 2026-09-28 | Lebih jujur daripada memoles angka | `review` tidak bisa lebih baik dari `planning` |
+| Retry per-request, bukan per-loop | 2026-09-28 | `@with_retry` me-restart seluruh loop → eksplorasi hilang + budget ter-reset (99 call untuk budget 60) | Retry sekarang di dalam `tool_loop.py`, bukan dekorator |
+| Budget 60 → 40 | 2026-09-28 | `direct` eksplorasi sampai dihentikan, bukan konvergen; 60 memakai ~4× token/waktu tanpa bukti akurasi naik (2/3 resolved di 20 maupun 60) | Angka **tidak komparabel** dengan EXP-20260927-010 |
+| Potong konteks tool ke 2000 char | 2026-09-28 | 8000/turn × 60 turn ≈ 480 KB → request akhir melewati timeout | Detail menengah hilang; head+tail dipertahankan |
 
 ---
 
@@ -66,10 +70,11 @@ Dihentikan karena bug retry-reset-budget (lihat handoff).
 | `OPENCODE_MODEL` | `oc/space-bunny-free` | via 9router |
 | `OPENCODE_BASE_URL` | `http://localhost:20128/v1` | 9router harus hidup |
 | `TOOLCALL_ENABLED` | `true` | edit-then-diff |
-| `TOTAL_TOOL_TURNS` | `60` → **ubah ke 40** | pool per strategi |
+| `TOTAL_TOOL_TURNS` | `40` | pool per strategi: direct 40; planning 20+20; review 13+13+14 |
 | `MAX_TOOL_TURNS` | `20` | fallback per-act, hanya jika TOTAL=0 |
+| `TOOL_OUTPUT_MAX_CHARS` | `2000` | cap per hasil tool, head+tail |
 | `MAX_REVISION_TURNS` | `1` | batas revisi |
-| `API_TIMEOUT` | `180` → **naikkan** | penyebab timeout yang memicu bug retry |
+| `API_TIMEOUT` | `600` | dinaikkan dari 180 |
 | `PROMPT_CACHE_LAYOUT` | `true` | prefix caching terbukti nyata (~90% hit) |
 | `SOURCE_CONTEXT_ENABLED` | `false` | agen eksplorasi pakai tool |
 
@@ -78,11 +83,13 @@ Dihentikan karena bug retry-reset-budget (lihat handoff).
 ## 🚨 Jebakan yang Sudah Memakan Waktu
 
 1. **Env drift** — shell mengekspor `OPENCODE_API_KEY` berisi literal `${NINEROUTER_API_KEY}` (21 char) yang menimpa key asli di `.env` (35 char) → `401`. **Selalu** jalankan lewat `tools/run_with_env.py`, jangan `main.py` langsung.
-2. **9router harus hidup** di `localhost:20128` sebelum run.
-3. **Jangan `.strip()` sebuah diff** — baris konteks terakhir bisa berupa spasi; strip membuat hunk corrupt.
-4. **Hash repo harus 40 karakter** — cache di `datasets/repos/<owner>/<name>/<commit>`.
-5. **Working tree kotor saat run itu normal** — strategi berbagi satu repo per issue, jadi `git apply --check` gagal di tengah run.
-6. **PowerShell 5.1** tidak mendukung `&&`; kutip bersarang sering gagal parse (tulis ke `.ps1` lalu `-File`).
+   - Shell juga mengekspor `TOTAL_TOOL_TURNS=60` dan `API_TIMEOUT=180`, menimpa `.env` (40/600). Ini **pernah membuat test lulus palsu**: `test_strategies` assert literal `60` dan kebetulan cocok dengan nilai shell, bukan `.env`.
+2. **Reload modul `config` di test** — `tests/test_response_utils.py` memanggil `importlib.reload(config)`, yang membuat `config.Config` jadi kelas **baru** sementara modul yang sudah `from config import Config` tetap memegang kelas **lama**. `monkeypatch.setattr("config.Config", ...)` akan **meleset**. Patch setiap modul yang memegang binding sendiri (`agents.budget`, `agents.base`, `agents.registry`, `agents.tools`, `strategies.review_strategy`).
+3. **9router harus hidup** di `localhost:20128` sebelum run.
+4. **Jangan `.strip()` sebuah diff** — baris konteks terakhir bisa berupa spasi; strip membuat hunk corrupt.
+5. **Hash repo harus 40 karakter** — cache di `datasets/repos/<owner>/<name>/<commit>`.
+6. **Working tree kotor saat run itu normal** — strategi berbagi satu repo per issue, jadi `git apply --check` gagal di tengah run.
+7. **PowerShell 5.1** tidak mendukung `&&`; kutip bersarang sering gagal parse (tulis ke `.ps1` lalu `-File`).
 
 ---
 
@@ -113,9 +120,10 @@ Dihentikan karena bug retry-reset-budget (lihat handoff).
 
 ## 📝 Catatan
 
-- **Commit belum di-push:** `4d89434`, `8e6db35` — jalankan `git push` dulu.
+- **Commit sudah di-push:** `4d89434`, `8e6db35`, `97a71f7`, `dfc9fa8` (branch `19/toolcall-commandcode`).
 - **Temuan untuk skripsi:** reviewer tanpa execution feedback tidak menambah kemampuan verifikasi; test tersembunyi adalah oracle yang tidak bisa digantikan penalaran.
+- **Temuan tambahan (2026-09-28):** retry yang membungkus loop — bukan request — membatalkan batas budget. Satu act bisa memakai 180 turn alih-alih 60. Ini kelas bug yang mudah terlewat karena tidak muncul sampai timeout benar-benar terjadi.
 
 ---
 
-**Last working state:** commit `8e6db35` — 199 test lulus, budget setara terpasang, dry-run 1 issue bersih, bug retry teridentifikasi dan belum diperbaiki.
+**Last working state:** commit `dfc9fa8` — 207 test lulus, retry per-request terpasang, budget 40 setara, `TOOL_OUTPUT_MAX_CHARS=2000`, bug retry-reset-budget terverifikasi hilang.
