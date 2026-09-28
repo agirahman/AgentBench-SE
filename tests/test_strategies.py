@@ -114,8 +114,26 @@ class BudgetRecordingProvider(DummyProvider):
 @pytest.fixture
 def tool_provider(monkeypatch):
     """A provider that exposes generate_with_tools, so tool calling activates."""
-    monkeypatch.setattr("config.Config.TOOLCALL_ENABLED", True)
-    monkeypatch.setattr("config.Config.TOTAL_TOOL_TURNS", 60)
+    # Patch every module that holds its own `from config import Config` binding.
+    # test_response_utils reloads the config module, which rebinds config.Config
+    # to a NEW class object while modules that already imported it keep the old
+    # one — so patching only "config.Config" would miss the object the
+    # strategies actually read. That is how these tests passed before: the
+    # ambient shell happened to carry TOTAL_TOOL_TURNS=60, matching the number
+    # the test asserted, so the assertion never really exercised .env.
+    #
+    # strategies.direct_strategy and planning_strategy are absent on purpose:
+    # they never import Config, they go through ToolTurnBudget.from_config(),
+    # which reads agents.budget.Config — patched below.
+    from agents import base as base_mod
+    from agents import budget as budget_mod
+    from agents import registry as registry_mod
+    from agents import tools as tools_mod
+    from strategies import review_strategy
+
+    for mod in (base_mod, budget_mod, registry_mod, tools_mod, review_strategy):
+        monkeypatch.setattr(mod.Config, "TOOLCALL_ENABLED", True)
+        monkeypatch.setattr(mod.Config, "TOTAL_TOOL_TURNS", 40)
     monkeypatch.setattr(
         "agents.base.load_prompt_or_default",
         lambda filename, default="": str(default),
@@ -129,6 +147,9 @@ def test_every_strategy_gets_the_same_total_tool_turns(issue, tool_provider):
     Before this, the per-act cap gave direct 20, planning 40 and review 60 —
     direct hit its cap on all three EXP-20260927-010 instances and was cut off
     mid-exploration, so the comparison measured the budget, not the strategy.
+
+    The total is the configured 40, not a number baked into the test: the point
+    is that all three are EQUAL, whatever the run is configured with.
     """
     totals = {}
     for name, strategy_cls in (
@@ -140,9 +161,9 @@ def test_every_strategy_gets_the_same_total_tool_turns(issue, tool_provider):
         strategy_cls(provider).run(issue)
         totals[name] = sum(granted for _role, granted in provider.tool_turns)
 
-    assert totals["direct"] == 60, totals
-    assert totals["planning"] == 60, totals
-    assert totals["review"] == 60, totals
+    assert totals["direct"] == 40, totals
+    assert totals["planning"] == 40, totals
+    assert totals["review"] == 40, totals
     assert len(set(totals.values())) == 1, f"budgets differ: {totals}"
 
 
@@ -150,4 +171,4 @@ def test_direct_is_not_starved_by_its_single_agent(issue, tool_provider):
     """direct's one act must receive the whole pool, not a fraction of it."""
     provider = BudgetRecordingProvider()
     DirectStrategy(provider).run(issue)
-    assert provider.tool_turns == [("direct", 60)]
+    assert provider.tool_turns == [("direct", 40)]

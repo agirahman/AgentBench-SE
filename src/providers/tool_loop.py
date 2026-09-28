@@ -8,6 +8,14 @@ the same call forever.
 
 Kept provider-agnostic so ``commandcode`` (9router) and ``openrouter`` share one
 implementation instead of drifting apart.
+
+Retry happens HERE, per request, not around the whole loop. Wrapping the loop in
+``@with_retry`` meant one HTTP timeout restarted the conversation from scratch:
+the exploration gathered so far was discarded and the tool-turn budget was
+handed out a second time. Measured on EXP-20260928-001 (django-11019, direct):
+45 + 16 + 38 = 99 tool calls against a budget of 60, 152 minutes for one
+strategy. A retry inside the loop resends the failed turn only, so the budget
+stays a real bound.
 """
 
 from __future__ import annotations
@@ -19,9 +27,47 @@ from typing import Optional
 from config import Config
 from utils.logger import logger
 from models.inference import InferenceResult
+from evaluation.retry import call_with_retry
 from providers.response_utils import build_openai_inference_result, _extract_cached_tokens
 from providers.system_prompts import TOOL_SYSTEM_PROMPT, EDITING_ROLES as _EDITING_ROLES
 from agents.tools import TOOL_SCHEMAS, execute_tool, set_repo_root
+
+
+def _truncate_tool_output(text: str, limit: int) -> str:
+    """Cap a tool result, keeping the head AND the tail.
+
+    The tail is what matters for diagnostics: test output, tracebacks and
+    ``git diff`` summaries put the actual error or the changed-file list last,
+    so a plain head-only slice hid exactly the line the model needed. The
+    dropped part is the middle.
+
+    Each turn re-sends the whole conversation, so this value multiplies by the
+    number of turns: at 8000 chars/turn a 60-turn run accumulated ~480 KB of
+    tool output alone, which is what pushed late requests past the API timeout.
+    """
+    if limit <= 0 or len(text) <= limit:
+        return text
+    half = max(1, limit // 2)
+    head, tail = text[:half], text[-half:]
+    dropped = len(text) - len(head) - len(tail)
+    return f"{head}\n… [{dropped} chars omitted] …\n{tail}"
+
+
+def _retryable_response(resp) -> bool:
+    """True when a single response would end the loop with nothing.
+
+    A response WITH tool calls is normal even when its text is empty — that is
+    how tool calling looks. Only "no tool call and no text" is a dead end worth
+    resending, and resending it costs one request rather than the whole
+    conversation.
+    """
+    try:
+        msg = resp.choices[0].message
+    except (AttributeError, IndexError, TypeError):
+        return False
+    if getattr(msg, "tool_calls", None):
+        return False
+    return not (getattr(msg, "content", "") or "").strip()
 
 
 def run_tool_loop(
@@ -46,12 +92,18 @@ def run_tool_loop(
     executed call, and ``result.api_turns`` reports how many HTTP turns the loop
     actually used — token/turn metrics would otherwise undercount tool-heavy
     runs, where each turn re-sends the whole growing conversation.
+
+    ``api_turns`` counts LOGICAL turns, not HTTP attempts: a request that times
+    out and is retried still consumed one turn, so a retry can never enlarge the
+    budget the strategy granted. Token usage, by contrast, counts every request
+    actually paid for, retries included.
     """
     tools = tools or TOOL_SCHEMAS
     max_tool_turns = max_tool_turns or Config.MAX_TOOL_TURNS
     temperature = Config.TEMPERATURE if temperature is None else temperature
     timeout = Config.API_TIMEOUT if timeout is None else timeout
     max_tokens = Config.MAX_TOKENS if max_tokens is None else max_tokens
+    output_limit = Config.TOOL_OUTPUT_MAX_CHARS
     t0 = time.perf_counter()
 
     # Always sync the sandbox to THIS instance's repo root. Passing None resets
@@ -83,9 +135,12 @@ def run_tool_loop(
             kwargs["extra_body"] = extra_body
         return kwargs
 
-    def _accumulate_usage(resp) -> None:
-        nonlocal api_turns
-        api_turns += 1
+    def _record_usage(resp) -> None:
+        """Accumulate tokens for a request we actually paid for.
+
+        Called on every successful HTTP response, including one that is about to
+        be retried for empty content — that request was still billed.
+        """
         u = getattr(resp, "usage", None)
         if u is None:
             return
@@ -96,6 +151,25 @@ def run_tool_loop(
         usage_totals["completion_tokens"] += ct
         usage_totals["total_tokens"] += tt
         usage_totals["cached_tokens"] += _extract_cached_tokens(u)
+
+    def _create(kwargs: dict, label: str):
+        """One request, retried in place on failure or empty content.
+
+        The retry wraps this single call rather than the loop, so a timeout on
+        turn N resends turn N: the conversation so far and the turn budget are
+        both untouched.
+        """
+
+        def _attempt():
+            resp = client.chat.completions.create(**kwargs)
+            _record_usage(resp)
+            return resp
+
+        return call_with_retry(
+            _attempt,
+            retry_on=_retryable_response,
+            label=label,
+        )
 
     def _finalize(resp) -> InferenceResult:
         elapsed = time.perf_counter() - t0
@@ -140,8 +214,8 @@ def run_tool_loop(
                 )
             messages.append({"role": "user", "content": wrap_up})
 
-        response = client.chat.completions.create(**kwargs)
-        _accumulate_usage(response)
+        response = _create(kwargs, f"tool_loop[{role}] turn {turn}")
+        api_turns += 1
         choice = response.choices[0]
         msg = choice.message
 
@@ -183,13 +257,13 @@ def run_tool_loop(
                 {
                     "role": "tool",
                     "tool_call_id": tc.id,
-                    "content": tool_out[:8000],
+                    "content": _truncate_tool_output(tool_out, output_limit),
                 }
             )
 
     # Out of turns: ask for a final answer WITHOUT tools so the model cannot
     # call another one and loop again.
     logger.warning(f"Tool loop hit max_tool_turns={max_tool_turns} for role={role}")
-    response = client.chat.completions.create(**_base_kwargs())
-    _accumulate_usage(response)
+    response = _create(_base_kwargs(), f"tool_loop[{role}] final-answer")
+    api_turns += 1
     return _finalize(response)

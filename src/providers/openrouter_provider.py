@@ -82,9 +82,10 @@ class OpenRouterProvider:
             logger.error(f"OpenRouter Generate Error: {e}")
             raise
 
-    @with_retry(
-        retry_on=lambda r: not getattr(r, "response", "").strip()
-    )
+    # No @with_retry here on purpose: retrying this function restarts the whole
+    # conversation when one request times out, which discards the exploration
+    # and hands out a fresh tool-turn budget (EXP-20260928-001: 99 calls against
+    # a budget of 60). Retry is per request, inside the loop.
     def generate_with_tools(
         self,
         prompt: str,

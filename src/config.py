@@ -175,6 +175,11 @@ class Config:
     # instead of a total that is an accident of how many agents they have.
     # See agents/budget.py. Set to 0 to fall back to the legacy per-act cap.
     TOTAL_TOOL_TURNS = _get_int_env("TOTAL_TOOL_TURNS", 60)
+    # Cap on a single tool result before it enters the conversation. Every turn
+    # re-sends the whole conversation, so this value multiplies by the number of
+    # turns. Head and tail are both kept (see providers/tool_loop): the tail
+    # carries the error or the changed-file list.
+    TOOL_OUTPUT_MAX_CHARS = _get_int_env("TOOL_OUTPUT_MAX_CHARS", 2000)
     TOOLCALL_REPO_DIR = _get_env("TOOLCALL_REPO_DIR", "datasets/repos")
 
     # Semantic patch applicability check (apply_status column). Costs one
