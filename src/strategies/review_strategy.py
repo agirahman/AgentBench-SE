@@ -5,6 +5,7 @@ from models.issue import Issue
 from models.patch import Patch
 from models.result import ExperimentResult, ExecutionResult, EvaluationResult
 from models.inference import InferenceRun
+from agents.budget import ToolTurnBudget
 from agents.messages import AgentMessage
 from agents.blackboard import Blackboard
 from agents.registry import build_agent_team
@@ -44,16 +45,23 @@ class ReviewStrategy:
         bb = Blackboard(issue=issue)
         inferences = []
 
+        # Three base acts share the strategy-wide pool: 60 -> 20 + 20 + 20.
+        # A revision act draws from whatever the earlier acts left unused, so
+        # the total stays bounded however many revisions run.
+        budget = ToolTurnBudget.from_config()
+
         plan_task = AgentMessage(sender="orchestrator", receiver="planner", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_issue"])
         bb.log(plan_task)
-        plan_resp = self.team["planner"].act(plan_task, bb)
+        plan_resp = self.team["planner"].act(plan_task, bb, max_tool_turns=budget.share(3))
+        budget.spend(getattr(plan_resp.inference, "api_turns", 1))
         bb.plan = plan_resp.inference.response
         inferences.append(plan_resp.inference)
         bb.log(AgentMessage(sender="orchestrator", receiver="planner", kind="task", content="", bb_ops=["save_plan"]))
 
         exec_task = AgentMessage(sender="orchestrator", receiver="executor", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_plan"])
         bb.log(exec_task)
-        initial_resp = self.team["executor"].act(exec_task, bb)
+        initial_resp = self.team["executor"].act(exec_task, bb, max_tool_turns=budget.share(2))
+        budget.spend(getattr(initial_resp.inference, "api_turns", 1))
         inferences.append(initial_resp.inference)
 
         # The reviewer must inspect the REAL change, so hand it the diff captured
@@ -66,7 +74,8 @@ class ReviewStrategy:
 
         review_task = AgentMessage(sender="orchestrator", receiver="reviewer", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_plan", "get_patch"])
         bb.log(review_task)
-        review_resp = self.team["reviewer"].act(review_task, bb)
+        review_resp = self.team["reviewer"].act(review_task, bb, max_tool_turns=budget.share(1))
+        budget.spend(getattr(review_resp.inference, "api_turns", 1))
         inferences.append(review_resp.inference)
 
         # Candidate patches, each captured at the moment it was produced. Shipping
@@ -91,7 +100,14 @@ class ReviewStrategy:
             while not approved and bb.revision < Config.MAX_REVISION_TURNS:
                 revision_task = AgentMessage(sender="orchestrator", receiver="executor", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_feedback"])
                 bb.log(revision_task)
-                revision_resp = self.team["executor"].act(revision_task, bb)
+                # A revision is an extra act, but it does not get a fresh pool:
+                # it draws the remainder, split across itself and the re-review
+                # that must follow it. When the base acts used their whole
+                # share this grants the floor of 1 turn rather than nothing.
+                revision_resp = self.team["executor"].act(
+                    revision_task, bb, max_tool_turns=budget.share(2)
+                )
+                budget.spend(getattr(revision_resp.inference, "api_turns", 1))
                 inferences.append(revision_resp.inference)
                 # Capture this revision's own diff now, while it is still the
                 # working-tree state (diffs are cumulative against HEAD).
@@ -108,7 +124,10 @@ class ReviewStrategy:
                 # shipped merely because it came later.
                 re_review_task = AgentMessage(sender="orchestrator", receiver="reviewer", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_plan", "get_patch"])
                 bb.log(re_review_task)
-                re_review_resp = self.team["reviewer"].act(re_review_task, bb)
+                re_review_resp = self.team["reviewer"].act(
+                    re_review_task, bb, max_tool_turns=budget.share(1)
+                )
+                budget.spend(getattr(re_review_resp.inference, "api_turns", 1))
                 inferences.append(re_review_resp.inference)
                 approved = _extract_verdict(re_review_resp.inference.response) == "APPROVED"
                 candidates.append((revised_patch, approved))

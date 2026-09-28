@@ -2,6 +2,7 @@ from models.issue import Issue
 from models.patch import Patch
 from models.result import ExperimentResult, ExecutionResult, CostSummary, EvaluationResult
 from models.inference import InferenceRun
+from agents.budget import ToolTurnBudget
 from agents.messages import AgentMessage
 from agents.blackboard import Blackboard
 from agents.registry import build_agent_team
@@ -29,9 +30,12 @@ class DirectStrategy:
         for agent in self.team.values():
             agent.repo_root = str(repo_root) if repo_root else None
         bb = Blackboard(issue=issue)
+        # One act, so it gets the whole strategy-wide pool: direct is not
+        # penalised for having a single agent (see agents/budget.py).
+        budget = ToolTurnBudget.from_config()
         task = AgentMessage(sender="orchestrator", receiver="direct", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_issue"])
         bb.log(task)
-        resp = self.team["direct"].act(task, bb)
+        resp = self.team["direct"].act(task, bb, max_tool_turns=budget.share(1))
 
         # Under tool calling the agent edits files, so the authoritative patch is
         # the working-tree diff; otherwise fall back to the model's own text.

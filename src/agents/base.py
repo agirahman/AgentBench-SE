@@ -84,7 +84,12 @@ class BaseAgent(ABC):
             return dynamic_part
         return f"{header}\n\n{dynamic_part}"
 
-    def act(self, task: AgentMessage, context: Blackboard) -> AgentResponse:
+    def act(
+        self,
+        task: AgentMessage,
+        context: Blackboard,
+        max_tool_turns: int | None = None,
+    ) -> AgentResponse:
         context.bb_ops = []
         # Select the template for this mode without mutating instance state, so
         # the non-tool template is still intact if the mode ever changes.
@@ -105,6 +110,7 @@ class BaseAgent(ABC):
                 tools=get_tools_for_agent(self.name),
                 repo_root=self.repo_root,
                 system_prompt=system_prompt,
+                max_tool_turns=max_tool_turns,
             )
         else:
             inference = self.provider.generate(prompt, role=self.name)

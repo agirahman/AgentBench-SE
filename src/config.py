@@ -168,7 +168,13 @@ class Config:
     COMMANDCODE_BASE_URL = _get_env("COMMANDCODE_BASE_URL", "http://localhost:20128/v1")
     COMMANDCODE_MODEL = _get_env("COMMANDCODE_MODEL", "cmd/deepseek/deepseek-v4-flash")
     TOOLCALL_ENABLED = _get_env("TOOLCALL_ENABLED", "false").lower() in ("1", "true", "yes")
+    # Per-act cap. Only binds when TOTAL_TOOL_TURNS is disabled (0); otherwise
+    # the strategy-wide pool below decides each act's share.
     MAX_TOOL_TURNS = _get_int_env("MAX_TOOL_TURNS", 8)
+    # Strategy-wide tool-turn pool, so the three strategies get the same TOTAL
+    # instead of a total that is an accident of how many agents they have.
+    # See agents/budget.py. Set to 0 to fall back to the legacy per-act cap.
+    TOTAL_TOOL_TURNS = _get_int_env("TOTAL_TOOL_TURNS", 60)
     TOOLCALL_REPO_DIR = _get_env("TOOLCALL_REPO_DIR", "datasets/repos")
 
     # Semantic patch applicability check (apply_status column). Costs one

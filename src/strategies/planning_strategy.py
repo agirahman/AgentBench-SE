@@ -2,6 +2,7 @@ from models.issue import Issue
 from models.patch import Patch
 from models.result import ExperimentResult, ExecutionResult, EvaluationResult
 from models.inference import InferenceRun
+from agents.budget import ToolTurnBudget
 from agents.messages import AgentMessage
 from agents.blackboard import Blackboard
 from agents.registry import build_agent_team
@@ -31,16 +32,20 @@ class PlanningStrategy:
         bb = Blackboard(issue=issue)
         inferences = []
 
+        # Two acts share the strategy-wide pool: 60 -> 30 + 30.
+        budget = ToolTurnBudget.from_config()
+
         plan_task = AgentMessage(sender="orchestrator", receiver="planner", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_issue"])
         bb.log(plan_task)
-        plan_resp = self.team["planner"].act(plan_task, bb)
+        plan_resp = self.team["planner"].act(plan_task, bb, max_tool_turns=budget.share(2))
+        budget.spend(getattr(plan_resp.inference, "api_turns", 1))
         bb.plan = plan_resp.inference.response
         inferences.append(plan_resp.inference)
         bb.log(AgentMessage(sender="orchestrator", receiver="planner", kind="task", content="", bb_ops=["save_plan"]))
 
         exec_task = AgentMessage(sender="orchestrator", receiver="executor", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_plan"])
         bb.log(exec_task)
-        exec_resp = self.team["executor"].act(exec_task, bb)
+        exec_resp = self.team["executor"].act(exec_task, bb, max_tool_turns=budget.share(1))
         bb.patch = exec_resp.inference.response
         inferences.append(exec_resp.inference)
         bb.log(AgentMessage(sender="orchestrator", receiver="executor", kind="task", content="", bb_ops=["save_patch"]))
