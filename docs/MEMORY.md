@@ -1,7 +1,7 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-09-29 01:30 WIB
-**Status:** Run 10 issue (`EXP-20260928-003`) **selesai 30/30**; bug korupsi patch ketemu & diperbaiki; semua patch kini APPLYABLE
+**Last Updated:** 2026-09-29 03:00 WIB
+**Status:** `EXP-20260928-003` **sudah dievaluasi** (Modal): direct 8/10, planning 8/10, review 6/10
 **Active Branch:** `19/toolcall-commandcode`
 **Detail sesi terakhir:** lihat [`HANDOFF_20260928.md`](HANDOFF_20260928.md)
 
@@ -23,6 +23,7 @@
 | **Retry vs budget** | ✅ **FIXED** | Retry per-request di dalam loop (commit `dfc9fa8`) |
 | **Konteks per turn** | ✅ Done | `TOOL_OUTPUT_MAX_CHARS=2000`, head+tail (dari 8000 head-only) |
 | **Korupsi patch** | ✅ **FIXED** | `_normalize_newlines` merusak diff yang mengandung literal `\n` (commit `3cbd9d1`) |
+| **Evaluasi EXP-003** | ✅ Done | Modal SWE-bench harness: **30/30 patch applied**, hasil di `EVAL_NOTE.md` |
 | **Reviewer oracle** | ⚠️ Terbatas | `run_tests` selalu gagal; reviewer hanya bisa menalar |
 
 ---
@@ -41,6 +42,7 @@
 | Potong konteks tool ke 2000 char | 2026-09-28 | 8000/turn × 60 turn ≈ 480 KB → request akhir melewati timeout | Detail menengah hilang; head+tail dipertahankan |
 | `_normalize_newlines` hanya untuk patch JSON yang kolaps | 2026-09-29 | Diff asli boleh mengandung literal `\n` di dalam kode sumber; meng-unescape-nya membelah baris konteks | Patch lama di `results/` sudah di-derive ulang dari artefak mentah |
 | `BAD_BODY` untuk baris body tanpa prefix | 2026-09-29 | Sebelumnya `pass` → korupsi dilabeli VALID/NORMALIZE, merusak 2 metrik sekaligus | Patch model yang benar-benar cacat sekarang ditolak, bukan "diperbaiki" palsu |
+| Evaluasi via Modal SWE-bench harness | 2026-09-29 | Verdict lokal (`apply_status`) hanyalah prediksi `git apply --check`; harness punya fallback `patch --fuzz=5` yang tidak reproducible di Windows | Butuh Modal token + WSL untuk pre-flight |
 
 ---
 
@@ -64,16 +66,31 @@ Budget 60/60/60 (setara). Loop revisi **terpicu 1×** di 10924/review — pertam
 
 Dihentikan karena bug retry-reset-budget (lihat handoff). **1 patch-nya (`11019/direct`) juga kena korupsi `\n`; sudah di-derive ulang.**
 
-### `EXP-20260928-003` — 10 issue × 3 strategi, SELESAI 30/30
+### `EXP-20260928-003` — 10 issue × 3 strategi, SELESAI 30/30 + **DIEVALUASI**
 
 Budget 40/40/40, retry per-request, konteks 2000 char. Durasi total ~2,5 jam.
+Evaluasi via Modal SWE-bench harness. Detail: `results/EXP-20260928-003/EVAL_NOTE.md`.
 
-| Metrik | Nilai |
-|---|---|
-| Patch valid | **30/30 VALID** |
-| `git apply --check` | **30/30 APPLYABLE** (setelah re-derive) |
-| Retry | 1× (HTTP 529 di `planning 10924`) — tidak menambah turn |
-| Cap warning | 4× (semua di act revisi, jatah 1–3 turn) |
+| Strategi | Resolved | Rate | Median turn | Median waktu | Median token |
+|---|---|---|---|---|---|
+| direct | **8/10** | 80% | 25,0 | 187 s | 238 K |
+| planning | **8/10** | 80% | 21,5 | 111 s | 140 K |
+| review | **6/10** | 60% | 36,5 | 271 s | 291 K |
+
+**30/30 patch terapply di harness** (`patch_successfully_applied: true` semua) — nol `APPLY_PATCH_FAIL`, semua kegagalan murni semantik.
+
+**Dua kegagalan `review` — mekanisme berbeda, keduanya soal pembagian budget:**
+
+| Instance | direct | planning | review | Penyebab kekalahan review |
+|---|---|---|---|---|
+| 10924 | ✓ | ✓ | ✗ | Executor kena cap **15 turn** → dipotong; reviewer **APPROVED** patch yang belum selesai (callable tidak pernah dipanggil → `TypeError` di hidden test) |
+| 11001 | ✓ | ✓ | ✗ | Reviewer **benar** mendiagnosis (`re.DOTALL`), tapi act revisi dapat **1 turn** → hanya sempat 2× `read_file`, **nol edit** |
+
+**Reviewer tidak punya daya beda (terkonfirmasi di sampel lebih besar):** APPROVED 9/10 run review, resolved hanya 6/9. Satu-satunya `NEEDS_REVISION` (11001) juga gagal. Korelasi verdict ↔ outcome nol.
+
+**Pembagian budget 40 ke 3 act = akar masalah review.** Split-nya dinamis (`total//3` lalu separuh sisanya), jadi act yang overspend mengurangi jatah act berikutnya; act revisi hanya dapat floor 1 turn. Planning dengan 2 act (20+20) memberi executor ruang lebih → menang di dua instance yang sama. **Review membayar 2× token planning (291 K vs 140 K) untuk hasil lebih buruk.**
+
+**Catatan:** angka lama `EXP-20260927-010` (2/3, 3/3, 2/3) tidak komparabel — budget dan model berbeda.
 
 **`django-11019/direct` — perbandingan sebelum/sesudah fix retry:**
 
@@ -152,8 +169,10 @@ Model bisa mengeluarkan beberapa tool call paralel dalam satu turn HTTP. `total_
 - **Temuan untuk skripsi:** reviewer tanpa execution feedback tidak menambah kemampuan verifikasi; test tersembunyi adalah oracle yang tidak bisa digantikan penalaran.
 - **Temuan tambahan (2026-09-28):** retry yang membungkus loop — bukan request — membatalkan batas budget. Satu act bisa memakai 180 turn alih-alih 60. Ini kelas bug yang mudah terlewat karena tidak muncul sampai timeout benar-benar terjadi.
 - **Temuan tambahan (2026-09-29):** bug di jalur patch dapat **memanipulasi hasil penelitian secara diam-diam**. `_normalize_newlines` merusak 4 patch di EXP-003, dan pelabelannya salah **dua kali** — patch rusak disebut "VALID" *dan* "NOT_APPLYABLE", sehingga angkanya tampak masuk akal (patch tidak apply = model salah), padahal pipeline-nya yang merusak. **Pelajaran metodologis:** verdict yang dihasilkan pipeline yang sama yang memproduksi artefak tidak boleh dipercaya begitu saja; verifikasi silang dengan `git apply` pada checkout bersih.
-- **Belum dievaluasi:** EXP-20260928-003 sudah punya 30 patch APPLYABLE tapi **belum dijalankan evaluator Modal** — angka `resolved` belum ada. Jalankan evaluasi sebelum menulis hasil ke skripsi.
+- **Sudah dievaluasi (2026-09-29):** `EXP-20260928-003` dijalankan di Modal SWE-bench harness. Hasil: direct 8/10, planning 8/10, review 6/10.
+- **Temuan tambahan (2026-09-29, evaluasi):** kegagalan `review` di 10924 & 11001 **bukan** kegagalan penalaran — keduanya artefak pembagian budget. Di 11001 reviewer mendiagnosis dengan benar tapi act revisi hanya dapat 1 turn (cukup untuk *membaca*, tidak untuk *mengedit*). Di 10924 executor dipotong di cap 15 turn lalu patch setengah jadi disetujui reviewer (false approval). **Implikasi untuk skripsi:** dengan budget 40, strategi 3-act (`review`) berada di bawah strategi 2-act (`planning`) bukan karena review tidak berguna, tapi karena split `total//n` menghukum strategi dengan lebih banyak act. Kalau `review` ingin diuji secara adil, act revisi butuh jatah minimum yang terjamin (mis. reservasi eksplisit), atau total budget per strategi dinaikkan proporsional terhadap jumlah act.
+- **Implikasi metodologis:** `APPROVED` tidak berkorelasi dengan `resolved` (9 approved → 6 resolved). Reviewer tanpa oracle tidak bisa memverifikasi; verdict-nya tidak boleh dipakai sebagai sinyal kualitas patch di analisis.
 
 ---
 
-**Last working state:** commit `3cbd9d1` — 213 test lulus, retry per-request terpasang, budget 40 setara, `TOOL_OUTPUT_MAX_CHARS=2000`, korupsi patch diperbaiki, EXP-20260928-003 30/30 patch APPLYABLE (belum dievaluasi).
+**Last working state:** commit `3cbd9d1` + `bca32eb` — 213 test lulus, retry per-request terpasang, budget 40 setara, `TOOL_OUTPUT_MAX_CHARS=2000`, korupsi patch diperbaiki, EXP-20260928-003 30/30 patch APPLYABLE **dan sudah dievaluasi** (direct 8/10, planning 8/10, review 6/10; `results/EXP-20260928-003/EVAL_NOTE.md`).
