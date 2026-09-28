@@ -137,7 +137,16 @@ def _check_patch_syntax(text: str) -> str | None:
                 if i + 1 < len(lines) and lines[i + 1].startswith("@@"):
                     break
             elif l.strip() and not l.startswith(("@@", "diff ", "--- ", "+++ ")):
-                pass
+                # A hunk-body line with no prefix (" ", "+", "-", "\") cannot
+                # come from `git diff` and can never apply: it is the orphaned
+                # remainder of a line that was split mid-way. Tolerating it let a
+                # corrupt patch be labelled VALID, or "repaired" to NORMALIZE by
+                # normalize_patch_headers — which rewrote the @@ header to match
+                # the truncated body, producing something that looks well formed
+                # and corrupts the patch-validity metric. Measured on
+                # EXP-20260928-003: four patches were labelled VALID while
+                # `git apply --check` rejected them with "corrupt patch".
+                return "BAD_BODY"
             else:
                 return "BAD_BODY"
             i += 1
@@ -167,8 +176,38 @@ def _is_valid_patch_syntax(text: str) -> bool:
     return _check_patch_syntax(text) is None
 
 
+def _has_diff_line_structure(text: str) -> bool:
+    """True when ``text`` already carries real diff line breaks.
+
+    A patch that went through JSON compression collapses into a single physical
+    line whose "newlines" are the two characters ``\\`` and ``n``. A real diff
+    puts every header and body line on its own physical line, so at least one
+    of these markers is always present.
+    """
+    return any(
+        marker in text for marker in ("\n@@", "\ndiff --git", "\n--- ", "\n+++ ")
+    )
+
+
 def _normalize_newlines(text: str) -> str:
-    """Konversi double-escape newline hasil kompresi JSON secara menyeluruh."""
+    """Unescape literal ``\\n`` / ``\\t`` sequences from a JSON-compressed response.
+
+    ONLY for text that collapsed into one physical line (the legacy path). A
+    well-formed diff must never be touched: a context line may legitimately
+    contain the two characters ``\\`` and ``n`` as part of the source code
+    itself, and rewriting them into a real line break splits the line in two.
+    The orphaned remainder then carries no diff prefix, so git rejects the
+    patch with "corrupt patch at line N".
+
+    Measured on EXP-20260928-003 (django-11019, all three strategies plus
+    django-11001/review): the raw captured diff applied cleanly with
+    ``git apply --check``, while the patch submitted after this function had
+    run failed with "corrupt patch". The source line that split was
+    ``return mark_safe('\\n'.join(...))`` in ``django/forms/widgets.py`` —
+    an untouched context line that no model had edited.
+    """
+    if _has_diff_line_structure(text):
+        return text
     if "\\n" in text:
         text = text.replace("\\n", "\n")
     if "\\t" in text:
