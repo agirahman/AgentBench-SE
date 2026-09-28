@@ -1,8 +1,9 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-07-17 14:59 UTC  
-**Status:** Ready for 50-issue full run  
-**Active Branch:** `16/feat/eval-toolchain`
+**Last Updated:** 2026-09-28 19:45 WIB
+**Status:** Run 10-issue dihentikan di 10/30 (bug retry ditemukan) — perlu perbaikan sebelum lanjut
+**Active Branch:** `19/toolcall-commandcode`
+**Detail sesi terakhir:** lihat [`HANDOFF_20260928.md`](HANDOFF_20260928.md)
 
 ---
 
@@ -10,180 +11,111 @@
 
 | Aspect | Status | Notes |
 |--------|--------|-------|
-| **Provider** | ✅ Done | OpenCode (deepseek-v4-flash) at https://opencode.ai/zen/v1 + Gemini + Groq |
-| **Dataset** | ✅ Done | 50 issues balanced: django(10)+sympy(10)+scikit(10)+matplotlib(10)+requests(6)+seaborn(4) |
-| **Difficulty** | ✅ Done | Domain-based: hard/medium/easy mapped in `models/issue.py` |
-| **Auto-fix hunk** | ✅ Done | `_auto_fix_hunk_headers()` in swebench_adapter.py — recount @@ headers |
-| **Enhanced logging** | ✅ Done | Phase-level detail: issue loaded → strategy init → API call → result |
-| **Pricing** | ✅ Done | DeepSeek v4 flash: $0.14/M input (cache miss), $0.28/M output |
-| **Per-experiment logs** | ✅ Done | Dual log: `logs/agentbench.log` (global) + `results/EXP-*/logs/experiment.log` (per-run) |
+| **Provider** | ✅ Done | OpenCode via 9router (`oc/space-bunny-free`), model gratis untuk testing |
+| **Dataset** | ✅ Done | 50 issues: django(10)+sympy(10)+scikit(10)+matplotlib(10)+requests(6)+seaborn(4) |
+| **Repo cache** | ✅ Done | 50 instance pristine di `datasets/repos/` |
+| **Mekanisme patch** | ✅ Done | edit-then-diff: agen mengedit file, patch diambil dari `git diff` |
+| **Tool calling** | ✅ Done | Loop bersama di `providers/tool_loop.py` (3 provider berbagi) |
+| **Budget tool-turn** | ✅ Done | `agents/budget.py` — total sama per strategi (lihat di bawah) |
+| **Pre-flight validator** | ✅ Done | `tools/preflight_modal.py` — replikasi kontrak Modal secara lokal |
+| **Rate-limit handling** | ✅ Done | Backoff 429 + circuit breaker |
+| **Test suite** | ✅ Done | 199 lulus |
+| **Retry vs budget** | ❌ **BUG** | `@with_retry` me-restart loop → budget ter-reset. **Harus diperbaiki dulu.** |
+| **Reviewer oracle** | ⚠️ Terbatas | `run_tests` selalu gagal; reviewer hanya bisa menalar |
 
 ---
 
-## 🔑 Key Decisions Made
+## 🔑 Keputusan Kunci
 
-| Decision | Date | Reason | Trade-off |
-|----------|------|--------|-----------|
-| OpenCode provider (not DeepSeek direct) | 2026-07-17 | User has OPENCODE_API_KEY + response_format=json_object support | Less direct control, forward to DeepSeek Zen |
-| Random 5-10s delay per issue | 2026-07-17 | Rate limit safety for 150 executions | Slower total runtime (~12-20 min for 50 issues) |
-| Auto-fix hunk headers instead of empty string | 2026-07-17 | Improve valid patch rate (~60% → ~85%), strong skripsi contribution | Extra processing, may mask actual AI failures |
-| 50 issues balanced vs 50 from single repo | 2026-07-17 | Generalizability across domains for sidang | Less deep analysis per repo |
-| Domain-based difficulty vs empirics-based | 2026-07-17 | Dosen will ask; objective criteria (framework vs lib) | May not reflect actual complexity |
-
----
-
-## 🚀 Latest Commits (Branch: 16/feat/eval-toolchain)
-
-```
-8b8d695 feat: auto-fix hunk headers, 50 issues balanced, difficulty field, enhanced logging
-fa8fdac fix: normalize double-escaped newlines properly regardless of real newlines present
-494939e feat: random rate-limit delay 5-10s between issue runs
-2dd6af0 feat: add deepseek-v4-flash pricing (.14/M input, .28/M output)
-4350ffb feat: add --issues flag for testing subset of issues
-cb590da fix: replace DeepSeek provider with OpenCode provider (zen/v1 + json_object)
-690c415 feat: add per-experiment log sink to runner for reproducibility
-abcd724 feat: deepseek provider + multi-repo sampling + savepoint/resume + per-strategy jsonl
-```
+| Keputusan | Tanggal | Alasan | Trade-off |
+|-----------|---------|--------|-----------|
+| Opsi A: edit-then-diff | 2026-09-27 | Model menulis diff sebagai teks sering cacat; mengedit file lalu `git diff` jauh lebih andal | Butuh tool calling |
+| Pindah ke OpenCode/9router | 2026-09-27 | OpenRouter kena rate limit | Bergantung 9router lokal harus hidup |
+| Bounded re-review (bukan auto-approve) | 2026-09-27 | Revisi tanpa re-review terbukti merugikan (EXP-007) | Menambah biaya token |
+| Budget setara per strategi | 2026-09-28 | Cap per-`act()` membuat total jadi kecelakaan arsitektur; `direct` selalu terpotong | `review` tidak berubah, `direct` naik 3× |
+| Reviewer tanpa oracle didokumentasikan sebagai temuan | 2026-09-28 | Lebih jujur daripada memoles angka | `review` tidak bisa lebih baik dari `planning` |
 
 ---
 
-## 📊 Test Results (Last Run)
+## 📊 Hasil Eksperimen Terakhir
 
-**Test:** 1 issue, 3 strategies (2026-07-17, OpenCode)
-- **Result:** ✅ Success
-- **Output:** `results/EXP-20260717-004/`
-- **Token cost:** planning strategy generated valid patch
-- **Direct strategy:** patch empty (truncated/invalid)
-- **Review strategy:** patch empty (failed reasoning)
-- **Cost:** $0.0 (OpenCode Zen is free tier)
+### `EXP-20260927-010` — 3 issue, budget 20/40/60
 
-**Auto-fix hunk test:**
-- Input: hunk with mismatch `-1,3/+1,3` (actual `-1,2/+1,3`)
-- Output: ✅ Fixed header correctly
+| Strategi | Resolved | Apply fail |
+|---|---|---|
+| direct | 2/3 | 0 |
+| planning | **3/3** | 0 |
+| review | 2/3 | 0 |
 
----
+**9/9 patch lolos `git apply` ketat, 0 `APPLY_PATCH_FAIL`** — kegagalan murni semantik.
 
-## 🎯 What's Ready
+Reviewer menyetujui **9/9** patch, tapi hanya ~5/9 resolved → `APPROVED` tidak punya daya beda.
 
-✅ **All 4 major items from PLAN.md:**
-1. Auto-fix hunk headers in `swebench_adapter.py`
-2. 50 issues (balanced repo distribution)
-3. Difficulty field + domain mapping
-4. Enhanced phase-level logging (logs include difficulty, tokens, cost, steps)
+### `EXP-20260928-001` — 10 issue, DIHENTIKAN di 10/30
 
-✅ **Per-experiment structure:**
-- `results/EXP-{date}-{num}/`
-  - `logs/experiment.log` — execution trace
-  - `predictions/{direct,planning,review}.jsonl` — per-strategy predictions
-  - `results.csv` — flattened metrics with `difficulty` column
-  - `artifacts/{instance_id}/` — planner.md, executor.md, reviewer.md, patch.txt
+Budget 60/60/60 (setara). Loop revisi **terpicu 1×** di 10924/review — pertama kali sejak perbaikan prompt, dan bekerja dengan benar.
 
-✅ **CLI flags:**
-- `python src/main.py --provider opencode` — full 50 issues
-- `python src/main.py --provider opencode --issues 2` — testing mode
-- `python src/main.py --provider opencode --resume` — continue from interruption
+Dihentikan karena bug retry-reset-budget (lihat handoff).
 
 ---
 
-## ⚠️ Known Issues & Workarounds
+## ⚙️ Konfigurasi Aktif (`.env`)
 
-| Issue | Impact | Workaround | Status |
-|-------|--------|-----------|--------|
-| DeepSeek JSON Mode requires "JSON" keyword in prompt | Medium | Prompts already have "Output ONLY valid JSON" | ✅ Done |
-| Double-escaped newlines in JSON values | Low | `_normalize_newlines()` fixed to process all escapes | ✅ Fixed |
-| Hunk count mismatch from AI hallucination | High | Auto-fix headers + recount lines | ✅ Done |
-| OpenCode base_url (v1 vs zen/v1) | Medium | Zen/v1 tested & working | ✅ Verified |
-| 50 issues is less than original 150 (docker/modal limitation) | Medium | Acceptable for skripsi scope | Accepted |
-
----
-
-## 🔧 Configuration
-
-**`.env` (commit-safe, secrets masked):**
-```
-GEMINI_API_KEY=***
-GEMINI_MODEL=gemini-3.5-flash
-OPENCODE_API_KEY=***
-OPENCODE_MODEL=deepseek-v4-flash
-TEMPERATURE=0.2
-MAX_RETRIES=3
-USD_IDR_RATE=17914.0
-```
-
-**`src/dataset_loader.py` — DEFAULT_REPO_SPECS:**
-```python
-[
-    ("django/django", 10),              # hard
-    ("sympy/sympy", 10),                # hard
-    ("scikit-learn/scikit-learn", 10),  # medium
-    ("matplotlib/matplotlib", 10),      # medium
-    ("psf/requests", 6),                # easy
-    ("mwaskom/seaborn", 4),             # easy
-]
-```
+| Key | Nilai | Catatan |
+|---|---|---|
+| `OPENCODE_MODEL` | `oc/space-bunny-free` | via 9router |
+| `OPENCODE_BASE_URL` | `http://localhost:20128/v1` | 9router harus hidup |
+| `TOOLCALL_ENABLED` | `true` | edit-then-diff |
+| `TOTAL_TOOL_TURNS` | `60` → **ubah ke 40** | pool per strategi |
+| `MAX_TOOL_TURNS` | `20` | fallback per-act, hanya jika TOTAL=0 |
+| `MAX_REVISION_TURNS` | `1` | batas revisi |
+| `API_TIMEOUT` | `180` → **naikkan** | penyebab timeout yang memicu bug retry |
+| `PROMPT_CACHE_LAYOUT` | `true` | prefix caching terbukti nyata (~90% hit) |
+| `SOURCE_CONTEXT_ENABLED` | `false` | agen eksplorasi pakai tool |
 
 ---
 
-## 📈 Next Steps (Immediate)
+## 🚨 Jebakan yang Sudah Memakan Waktu
 
-1. **Run full 50-issue experiment:**
-   ```bash
-   python src/main.py --provider opencode
-   # ~12-20 min runtime (150 executions × 5-10s random delay + API call time)
-   ```
-
-2. **Verify output structure:**
-   - Check `results/EXP-{date}-001/predictions/` has 3 `.jsonl` files (direct, planning, review)
-   - Check `results/EXP-{date}-001/results.csv` has `difficulty` column
-   - Check `logs/experiment.log` has enhanced phase-level logs
-
-3. **Analysis (for Bab 4 skripsi):**
-   - Compare success rate by difficulty (easy vs medium vs hard)
-   - Token usage per strategy × difficulty
-   - Cost breakdown: input/output tokens vs total_cost_usd
-   - AI auto-fix hunk impact: patches fixed % before vs after
+1. **Env drift** — shell mengekspor `OPENCODE_API_KEY` berisi literal `${NINEROUTER_API_KEY}` (21 char) yang menimpa key asli di `.env` (35 char) → `401`. **Selalu** jalankan lewat `tools/run_with_env.py`, jangan `main.py` langsung.
+2. **9router harus hidup** di `localhost:20128` sebelum run.
+3. **Jangan `.strip()` sebuah diff** — baris konteks terakhir bisa berupa spasi; strip membuat hunk corrupt.
+4. **Hash repo harus 40 karakter** — cache di `datasets/repos/<owner>/<name>/<commit>`.
+5. **Working tree kotor saat run itu normal** — strategi berbagi satu repo per issue, jadi `git apply --check` gagal di tengah run.
+6. **PowerShell 5.1** tidak mendukung `&&`; kutip bersarang sering gagal parse (tulis ke `.ps1` lalu `-File`).
 
 ---
 
-## 🚨 Blockers / Questions for Researcher
+## 📂 Path Penting
 
-| Blocker | Impact | Status |
-|---------|--------|--------|
-| None currently | — | Ready to execute |
-
----
-
-## 📂 Important Paths
-
-| Path | Purpose |
-|------|---------|
-| `src/experiments/runner.py` | Core loop (issue × strategy) + savepoint append |
-| `src/experiments/swebench_adapter.py` | `_auto_fix_hunk_headers()` + `extract_diff()` |
-| `src/models/issue.py` | `DIFFICULTY_MAP` + difficulty property |
-| `src/main.py` | CLI entry, loads difficulty breakdown at start |
-| `PLAN.md` | Full technical plan for this sprint |
-| `.env` | Config (API keys, model names, rate) |
+| Path | Fungsi |
+|------|--------|
+| `src/agents/budget.py` | Pool tool-turn per strategi |
+| `src/providers/tool_loop.py` | Loop tool bersama 3 provider |
+| `src/strategies/review_strategy.py` | Loop review + re-review revisi |
+| `src/agents/tools.py` | Definisi tool + guard (termasuk `[tests unavailable]`) |
+| `tools/run_with_env.py` | **Wrapper wajib** — membuat `.env` menang |
+| `tools/preflight_modal.py` | Replikasi kontrak `git apply` Modal secara lokal |
+| `docs/HANDOFF_20260928.md` | **Detail sesi terakhir + plan berikutnya** |
+| `docs/RUNBOOK.md` | Prosedur menjalankan eksperimen |
 
 ---
 
-## 💡 Tips for Next Agent Session
+## 💡 Tips untuk Sesi Berikutnya
 
-1. **Before running:** Always check `.env` has valid `OPENCODE_API_KEY` (URL is https://opencode.ai/zen/v1)
-2. **Resume mode:** If interrupted, run with `--resume` to skip completed issues
-3. **Testing:** Use `--issues 2` to test pipeline before full 50
-4. **Logs:** Dual logs at `logs/agentbench.log` + `results/EXP-*/logs/experiment.log`
-5. **CSV analysis:** `results.csv` has `difficulty` column for stratification
-6. **Skripsi contribution:** Auto-fix hunk impact is strong data point for Bab 4
-
----
-
-## 📝 Notes
-
-- **Commit convention:** All recent commits to branch `16/feat/eval-toolchain` follow pattern `feat:`, `fix:`, `refactor:`
-- **No breaking changes:** All changes backward-compatible with existing results
-- **Pricing update:** DeepSeek v4 flash added to `PricingTable` in `cost.py` — applies automatically
-- **Prompts:** Tightened hunk-count instructions in `direct_prompt.md` + `executor.md` to reduce AI hallucination
+1. **Baca `docs/HANDOFF_20260928.md` dulu** — berisi plan lengkap dan bug yang harus diperbaiki.
+2. **Perbaiki bug retry sebelum run apa pun** — kalau tidak, budget tidak benar-benar ditegakkan.
+3. **Selalu** lewat `tools/run_with_env.py`.
+4. **Cek cap warning** di `results/EXP-*/logs/experiment.log` — kalau ada, ada yang terpotong.
+5. **Verifikasi dengan `--resume`** bila run terputus.
 
 ---
 
-**Last working state:** Commit `8b8d695` — all 4 items ready, tested on 1-issue dry run, ready for 50-issue full run.
+## 📝 Catatan
+
+- **Commit belum di-push:** `4d89434`, `8e6db35` — jalankan `git push` dulu.
+- **Temuan untuk skripsi:** reviewer tanpa execution feedback tidak menambah kemampuan verifikasi; test tersembunyi adalah oracle yang tidak bisa digantikan penalaran.
+
+---
+
+**Last working state:** commit `8e6db35` — 199 test lulus, budget setara terpasang, dry-run 1 issue bersih, bug retry teridentifikasi dan belum diperbaiki.
