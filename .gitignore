@@ -38,6 +38,13 @@ gen_out.txt
 tencent__hy3
 *.modal-*.json
 
+# Scratch files used to pass multi-line commit messages to git, plus captured
+# command output. They are written and deleted around a commit, but `git add -A`
+# catches them while they exist, so they must never be tracked.
+_msg.txt
+_commitmsg.txt
+_*.txt
+
 # doc
 docs/*
 !docs/MEMORY.md
