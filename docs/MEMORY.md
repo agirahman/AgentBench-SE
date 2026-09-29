@@ -165,12 +165,49 @@ Cap-hit `executor=4` di smoke test **milik act revisi** (act berjalan 11:24:57�
 
 **Konfigurasi tiap level:** `BUDGET_MODE=per_task`, `BUDGET_FLOOR_PER_ACT=10`, `REVISION_TOOL_TURNS=0` (di per-task tidak ada reserve terpisah), `COST_LIMIT_USD=3.0`, `PRICING_MODEL_OVERRIDE=deepseek-v4-flash`.
 
+#### ✅ HASIL LEVEL 40 (per_task, floor 10) — `EXP-20260929-003`, dievaluasi Modal
+
+| Instance | direct | planning | review |
+|---|---|---|---|
+| 10914 | ✅ resolved | ✅ resolved | ✅ resolved |
+| **11001** | ✅ resolved | ✅ resolved | **✅ resolved** ← sebelumnya GAGAL di review |
+| 11019 | ❌ TESTS_ERROR | ❌ TESTS_ERROR | ❌ TESTS_ERROR |
+
+**2/3 resolved untuk KETIGA strategi — seri untuk pertama kalinya.** 9/9 patch lolos kontrak `git apply` Modal; 9/9 `patch_applied: true`. Biaya 9 run: **$0.5724** ($0.0636/run; termahal $0.1584 vs cap $3 → guard tidak pernah menyala).
+
+**Temuan utama: perbaikan act revisi BEKERJA.** `11001/review` sekarang resolved. Verifikasi rantai (`tools/verify_review_11001_resolved.py`):
+
+| Bukti | EXP-003 (per_act) | Level 40 (per_task) |
+|---|---|---|
+| Urutan act | plan→exec→review→**revisi 1 turn**→re-review | plan→exec→review→**revisi (executor)**→re-review |
+| Edit act revisi | **0** (2× read saja) | **3× `edit_file`** (#13, #19, #20 dari 60 call) |
+| Verdict akhir | NEEDS_REVISION | **APPROVED** |
+| Hasil | ❌ gagal | **✅ resolved** |
+
+Urutan pesan membuktikan act revisi dieksekusi **executor** (MSG 9: `orchestrator → executor [get_feedback]`), bukan reviewer — sesuai desain. Tool call per agent: planner 9, executor 16 (3 edit), reviewer 35.
+
+**11019 masih gagal di ketiganya (`TESTS_ERROR`)** — konsisten dengan temuan lama bahwa instance ini mengukur batas budget, bukan strategi. Di level 40 review masih `truncated` di 11001 **dan** 11019 (pool 40 harus menutup 5 act review: plan, exec, review, revisi, re-review). Level 100/200 menguji apakah pool lebih besar mengubahnya.
+
+**Perbandingan aturan pembagian pada pool yang sama** (`tools/compare_curve_vs_baseline.py`):
+
+| Instance | Strategi | per_act → per_task |
+|---|---|---|
+| 11001 | direct | 27 → **12** turn |
+| 11001 | planning | 14 → 27 turn |
+| 10914 | planning | 28 → 39 turn |
+| 11019 | review | 39 → 42 turn (masih truncated) |
+
 **Preflight (1 run, 10914 direct, level 40) membuktikan plumbing-nya:**
 - `cost_usd_actual = $0.0731` — **bukan** $0.0000 → override pricing sampai ke kalkulator biaya, RQ3 punya data dolar meski modelnya gratis
 - `truncated = True`, `truncated_acts = 1` → field truncation merekam dirinya sendiri (adopsi dari harness SWE-bench)
 - `patch_status = VALID`, `experiment.yaml` mencatat semua knob kurva
 
 **Koreksi estimasi waktu:** laju terukur **10,9–13,7 s/turn** (bukan asumsi 3,5 menit/run). Kurva jadi **1–6 jam** dengan level 200 mendominasi, bukan ~2,5 jam.
+
+**3 bug ditemukan saat memantau** (commit `90effea`, semua ada test):
+1. `experiment.yaml` ditulis **setelah** run selesai → crash = konfigurasi hilang, tidak reproducible. Diperbaiki dengan `on_experiment_start` callback (config ditulis sebelum run pertama).
+2. Watcher membaca `generation_result.csv` yang ditulis sekali di akhir level → melaporkan 0/9 selama satu jam. Diganti ke `predictions/predictions.jsonl` (savepoint per run).
+3. Log sweep ditulis PowerShell sebagai **UTF-16LE** → dibaca sebagai UTF-8, regex `LEVEL` tidak pernah cocok. Ditambah `read_text_tolerant()`.
 
 **Dasar riset (terverifikasi dari sumber primer):**
 
