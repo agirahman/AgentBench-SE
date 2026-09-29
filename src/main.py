@@ -78,6 +78,16 @@ def parse_args():
         default=[],
         help="Override sampling repo, format: repo=count (mis. django/django=10)",
     )
+    parser.add_argument(
+        "--instance-ids",
+        nargs="+",
+        default=None,
+        help=(
+            "Jalankan instance tertentu saja, mis. django__django-11001. "
+            "Mengabaikan --repo-spec. Dipakai untuk re-run bertarget satu kegagalan "
+            "yang sudah terukur, bukan untuk run besar."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -102,6 +112,8 @@ def _save_experiment_config(
     pricing = PricingTable.get(model_name) or {}
     off_peak = PricingTable.rates_for(model_name, "off_peak")
     peak = PricingTable.rates_for(model_name, "peak")
+    # getattr: callers that build args by hand (tests, tooling) predate this flag.
+    targeted_ids = getattr(args, "instance_ids", None)
     config = {
         "experiment_meta": {
             "project": "Skripsi AI Agent SWE-bench Lite",
@@ -152,6 +164,10 @@ def _save_experiment_config(
             "name": "SWE-bench/SWE-bench_Lite",
             "repos": repos or {},
             "n_issues": issue_count,
+            # A targeted re-run selects by id instead of by repo count; recording
+            # the ids is what makes it reproducible (the repos map is then only
+            # a summary of what those ids happened to be).
+            "instance_ids": list(targeted_ids) if targeted_ids else None,
         },
         "strategies": strategy_names,
         "agents": agents or [],
@@ -191,7 +207,15 @@ def _save_experiment_config(
 
 
 def _yaml_scalar(value):
-    """Quote scalar strings that YAML would misread (flow indicators, ': ')."""
+    """Render a scalar so a YAML loader reads it back as the same value.
+
+    ``None`` must become ``null``: returning the object leaves the f-string to
+    render it as the string ``"None"``, which yaml.safe_load reads back as the
+    STRING 'None' rather than as null. That silently turns "no targeted ids"
+    into "an id named None" for anyone reading experiment.yaml.
+    """
+    if value is None:
+        return "null"
     if isinstance(value, str) and (
         value.startswith(("{", "[")) or ": " in value or value.strip() != value
     ):
@@ -208,6 +232,13 @@ def _to_yaml(data, indent: int = 0) -> str:
             lines.append(f"{pad}{key}:")
             lines.append(_to_yaml(value, indent + 1))
         elif isinstance(value, list):
+            if not value:
+                # An empty list must not render as a bare "key:" — a YAML
+                # loader reads that back as null, so a consumer doing
+                # len(cfg["agents"]) would crash on a field that is meant to
+                # be an empty list.
+                lines.append(f"{pad}{key}: []")
+                continue
             lines.append(f"{pad}{key}:")
             for item in value:
                 lines.append(f"{pad}  - {_yaml_scalar(item)}")
@@ -250,9 +281,15 @@ def main():
             logger.warning(f"Health check skipped/unavailable: {e}")
 
     from dataset_loader import DEFAULT_REPO_SPECS
-    repo_specs = _parse_repo_specs(args.repo_spec) if args.repo_spec else DEFAULT_REPO_SPECS
-    logger.info(f"Loading SWE-bench Lite — multi-repo: {repo_specs}")
-    issues = select_issues(repo_specs)
+    if args.instance_ids:
+        # A targeted re-run: --instance-ids wins over --repo-spec, so the same
+        # command cannot silently measure a different set than the one asked for.
+        logger.info(f"Targeted run — instances: {args.instance_ids}")
+        issues = select_issues(instance_ids=args.instance_ids)
+    else:
+        repo_specs = _parse_repo_specs(args.repo_spec) if args.repo_spec else DEFAULT_REPO_SPECS
+        logger.info(f"Loading SWE-bench Lite — multi-repo: {repo_specs}")
+        issues = select_issues(repo_specs)
     logger.info(f"Loaded {len(issues)} issues")
 
     if args.issues:
