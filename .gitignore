@@ -54,6 +54,11 @@ docs/*
 !docs/RUNBOOK.md
 !docs/FRAMEWORK_FLOW_RESEARCH.md
 !docs/FRAMEWORK_FLOW_TECHNICAL.md
+# Research deliverables: these carry citations that back the thesis, so they must
+# be versioned rather than left as local scratch.
+!docs/RESEARCH_*.md
+!docs/SPIKE_ORACLE_20260929.md
+!docs/PARALLEL_RUN_20260929.md
 
 # Local agent tooling (Command Code config + workstream briefs)
 .commandcode/

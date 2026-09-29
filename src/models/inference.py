@@ -28,6 +28,15 @@ class InferenceResult:
     # tool-loop results report the real turn count so token/turn metrics are
     # not understated.
     api_turns: int = 1
+    # True when the tool loop ran out of turns instead of the agent choosing to
+    # stop. Such a result measures the granted budget, not the agent's own
+    # judgement, so it must be reported separately: SWE-bench's convention is to
+    # keep it in the denominator under its own heading rather than drop it
+    # (docs/guides/evaluation.md: the failure lines "never remove anything from
+    # the total"). Recorded here because the alternative -- re-deriving it from
+    # log warnings after the fact -- is how EXP-20260928-003 ended up reporting
+    # 8/8/6 with no truncation count.
+    truncated: bool = False
 
     def __post_init__(self):
         if not self.timestamp:

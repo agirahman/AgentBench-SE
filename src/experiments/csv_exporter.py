@@ -7,7 +7,8 @@ def flatten_for_csv(result: ExperimentResult) -> dict:
 
     Column layout (sectioned, paired token→cost):
       1. Meta  : id, strategy, model, difficulty, inference_count,
-                 total_tool_calls, api_turns, total_turns, execution_time,
+                 total_tool_calls, api_turns, total_turns, truncated_acts,
+                 truncated, execution_time,
                  timestamp, timestamp_wib, window, pricing_version, generated, error
       2. INPUT (token → cost paired, USD + IDR):
                  input_tokens_cached, input_cost_usd_cached, input_cost_idr_cached,
@@ -29,6 +30,11 @@ def flatten_for_csv(result: ExperimentResult) -> dict:
     total_turns = sum(getattr(inf, "api_turns", 1) for inf in inferences) if inferences else 0
     first_api_turns = getattr(inferences[0], "api_turns", 1) if inferences else 1
     total_tool_calls = sum(len(getattr(inf, "tool_calls", []) or []) for inf in inferences)
+    # How many acts were cut off by their turn cap. A truncated run's outcome
+    # measures the granted budget, not the strategy, so it must be reportable
+    # rather than inferred from logs afterwards (SWE-bench reports this class
+    # separately and keeps it in the denominator).
+    truncated_acts = sum(1 for inf in inferences if getattr(inf, "truncated", False))
 
     # Tokens
     cached_tok = result.cost.cached_input_tokens
@@ -62,6 +68,8 @@ def flatten_for_csv(result: ExperimentResult) -> dict:
         "total_tool_calls": total_tool_calls,
         "api_turns": first_api_turns,
         "total_turns": total_turns,
+        "truncated_acts": truncated_acts,
+        "truncated": truncated_acts > 0,
         "execution_time": result.execution.execution_time,
         "timestamp": result.evaluation.timestamp,
         "timestamp_wib": _to_wib(result.evaluation.timestamp),

@@ -266,4 +266,10 @@ def run_tool_loop(
     logger.warning(f"Tool loop hit max_tool_turns={max_tool_turns} for role={role}")
     response = _create(_base_kwargs(), f"tool_loop[{role}] final-answer")
     api_turns += 1
-    return _finalize(response)
+    result = _finalize(response)
+    # This act was CUT OFF, not finished: the answer came from the forced
+    # no-tools request above, so the result reflects the granted budget rather
+    # than the agent's own stopping point. Flagged so the export can report it
+    # instead of letting a truncated run pass as a clean measurement.
+    result.truncated = True
+    return result
