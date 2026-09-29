@@ -64,7 +64,19 @@ def parse_args():
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Lanjutkan eksperimen sebelumnya — skip issue yang sudah selesai",
+        help=(
+            "Lanjutkan eksperimen yang sudah ada — skip issue yang sudah selesai. "
+            "Butuh --exp-id: tanpa itu tidak ada eksperimen yang bisa dilanjutkan."
+        ),
+    )
+    parser.add_argument(
+        "--exp-id",
+        default=None,
+        help=(
+            "Tulis ke direktori eksperimen ini (mis. EXP-20260929-022) alih-alih "
+            "membuat ID baru. Dipakai bersama --resume untuk melanjutkan run yang "
+            "terputus. Tanpa --resume, ID ini dijalankan ulang dari awal."
+        ),
     )
     parser.add_argument(
         "--issues",
@@ -348,6 +360,7 @@ def main():
         agents=agents,
         model=provider.model,
         on_experiment_start=_write_early_config,
+        experiment_id=getattr(args, "exp_id", None),
     )
 
     # Save experiment.yaml to per-experiment folder

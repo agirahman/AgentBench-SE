@@ -145,6 +145,7 @@ def run_experiments(
     agents: list[dict[str, str]] | None = None,
     model: str = "",
     on_experiment_start: Callable[[str, str], None] | None = None,
+    experiment_id: str | None = None,
 ) -> tuple[pd.DataFrame, str]:
     """Execute experiments and dump results to a per-experiment folder.
 
@@ -166,12 +167,21 @@ def run_experiments(
             produced them -- and a multi-hour sweep is exactly where that
             matters. Failures here are logged, never fatal: losing a metadata
             write must not abort an experiment that is already running.
+        experiment_id: Continue an EXISTING experiment instead of creating a new
+            one. This is what makes ``resume`` functional: the directory is
+            chosen first and the resume scan then reads the savepoints inside
+            it. Previously every invocation minted a fresh id, so the scan ran
+            against an empty directory and could never skip anything -- the flag
+            was accepted and inert. Selecting the directory is separate from
+            ``resume``: passing an id without ``resume`` deliberately re-runs
+            everything into that directory (e.g. re-measuring after a code
+            change), which would otherwise be impossible.
 
     Returns:
         (DataFrame, experiment_id) where DataFrame is the flattened results.csv
     """
     effective_model = model or provider_name
-    exp_id = generate_experiment_id()
+    exp_id = experiment_id or generate_experiment_id()
     exp_dir = create_experiment_dir(base_dir, exp_id)
     if on_experiment_start is not None:
         try:
