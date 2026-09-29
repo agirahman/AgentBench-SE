@@ -37,15 +37,27 @@ class PlanningStrategy:
 
         plan_task = AgentMessage(sender="orchestrator", receiver="planner", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_issue"])
         bb.log(plan_task)
-        plan_resp = self.team["planner"].act(plan_task, bb, max_tool_turns=budget.share(2))
+        plan_resp = self.team["planner"].act(
+            plan_task,
+            bb,
+            max_tool_turns=budget.share(2),
+            max_cost_usd=budget.cost_share(2),
+        )
         budget.spend(getattr(plan_resp.inference, "api_turns", 1))
+        budget.spend_cost(plan_resp.inference.cost_usd)
         bb.plan = plan_resp.inference.response
         inferences.append(plan_resp.inference)
         bb.log(AgentMessage(sender="orchestrator", receiver="planner", kind="task", content="", bb_ops=["save_plan"]))
 
         exec_task = AgentMessage(sender="orchestrator", receiver="executor", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_plan"])
         bb.log(exec_task)
-        exec_resp = self.team["executor"].act(exec_task, bb, max_tool_turns=budget.share(1))
+        exec_resp = self.team["executor"].act(
+            exec_task,
+            bb,
+            max_tool_turns=budget.share(1),
+            max_cost_usd=budget.cost_share(1),
+        )
+        budget.spend_cost(exec_resp.inference.cost_usd)
         bb.patch = exec_resp.inference.response
         inferences.append(exec_resp.inference)
         bb.log(AgentMessage(sender="orchestrator", receiver="executor", kind="task", content="", bb_ops=["save_patch"]))

@@ -15,6 +15,9 @@ class DummyInference:
         self.completion_tokens = 0
         self.total_tokens = 0
         self.timestamp = ""
+        # Strategies debit a task-level dollar budget with this; a double that
+        # omits it is not faithful to InferenceResult.
+        self.cost_usd = 0.0
 
 
 class DummyProvider:

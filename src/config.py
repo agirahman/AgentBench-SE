@@ -183,6 +183,32 @@ class Config:
     # (django-11001: use re.DOTALL) could not be applied. 0 = legacy behaviour,
     # where revisions draw the base remainder and get a floor of 1 turn.
     REVISION_TOOL_TURNS = _get_int_env("REVISION_TOOL_TURNS", 0)
+    # How the strategy-wide pool is handed out. "per_act" (default) splits the
+    # remainder evenly at each act, which caps the first act and can leave a
+    # later act on the floor of 1 turn. "per_task" gives each act the remainder
+    # minus a floor held for the acts still to come -- the structure every
+    # reference implementation uses (mini-SWE-agent, SWE-agent, OpenHands,
+    # SWE-bench Pro all bound per task, never per agent). See agents/budget.py.
+    BUDGET_MODE = _get_env("BUDGET_MODE", "per_act").strip().lower()
+    # Turns guaranteed to each act still to come, in per_task mode. Only used
+    # when BUDGET_MODE=per_task. 8-10 is the defensible band: enough for a
+    # read-only act (reviewer) to read the plan and the patch and return a
+    # verdict, while freeing the executor from the even-split cap.
+    BUDGET_FLOOR_PER_ACT = _get_int_env("BUDGET_FLOOR_PER_ACT", 0)
+    # Price every run with this model's rate card, whatever model actually served
+    # it. Needed because the budget-curve runs use a free testing model whose real
+    # rate is $0: without this, all 21 cost columns read 0.00, a dollar cap can
+    # never bind, and RQ3 has no data (the state EXP-20260928-003 was left in).
+    # The resulting figures are an ESTIMATE, and the pricing_version column is
+    # suffixed so no reader mistakes them for a real charge. Empty = use the
+    # model's own card.
+    PRICING_MODEL_OVERRIDE = _get_env("PRICING_MODEL_OVERRIDE", "")
+    # Runaway guard, in dollars, for the whole task (not per act) -- the same
+    # shape the reference implementations use ($3 per task). Measured on
+    # EXP-20260928-003, our runs cost ~$0.07/run worst case, so this does not bind
+    # in normal operation; it exists so a pathological loop cannot spend without
+    # bound. 0 = disabled.
+    COST_LIMIT_USD = _get_float_env("COST_LIMIT_USD", 3.0)
     # Cap on a single tool result before it enters the conversation. Every turn
     # re-sends the whole conversation, so this value multiplies by the number of
     # turns. Head and tail are both kept (see providers/tool_loop): the tail

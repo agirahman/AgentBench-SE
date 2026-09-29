@@ -19,6 +19,9 @@ class DummyInference:
         self.completion_tokens = 0
         self.total_tokens = 0
         self.timestamp = ""
+        # Strategies debit a task-level dollar budget with this. A double must
+        # carry it or the strategy blows up on a stub that is otherwise faithful.
+        self.cost_usd = 0.0
 
 
 class DummyProvider:

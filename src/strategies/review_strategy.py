@@ -56,16 +56,28 @@ class ReviewStrategy:
 
         plan_task = AgentMessage(sender="orchestrator", receiver="planner", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_issue"])
         bb.log(plan_task)
-        plan_resp = self.team["planner"].act(plan_task, bb, max_tool_turns=budget.share(3))
+        plan_resp = self.team["planner"].act(
+            plan_task,
+            bb,
+            max_tool_turns=budget.share(3),
+            max_cost_usd=budget.cost_share(3),
+        )
         budget.spend(getattr(plan_resp.inference, "api_turns", 1))
+        budget.spend_cost(plan_resp.inference.cost_usd)
         bb.plan = plan_resp.inference.response
         inferences.append(plan_resp.inference)
         bb.log(AgentMessage(sender="orchestrator", receiver="planner", kind="task", content="", bb_ops=["save_plan"]))
 
         exec_task = AgentMessage(sender="orchestrator", receiver="executor", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_plan"])
         bb.log(exec_task)
-        initial_resp = self.team["executor"].act(exec_task, bb, max_tool_turns=budget.share(2))
+        initial_resp = self.team["executor"].act(
+            exec_task,
+            bb,
+            max_tool_turns=budget.share(2),
+            max_cost_usd=budget.cost_share(2),
+        )
         budget.spend(getattr(initial_resp.inference, "api_turns", 1))
+        budget.spend_cost(initial_resp.inference.cost_usd)
         inferences.append(initial_resp.inference)
 
         # The reviewer must inspect the REAL change, so hand it the diff captured
@@ -78,8 +90,16 @@ class ReviewStrategy:
 
         review_task = AgentMessage(sender="orchestrator", receiver="reviewer", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_plan", "get_patch"])
         bb.log(review_task)
-        review_resp = self.team["reviewer"].act(review_task, bb, max_tool_turns=budget.share(1))
+        # In per_task mode the reviewer may draw whatever the executor left (minus
+        # its own floor), instead of being capped at an even share.
+        review_resp = self.team["reviewer"].act(
+            review_task,
+            bb,
+            max_tool_turns=budget.share(1),
+            max_cost_usd=budget.cost_share(1),
+        )
         budget.spend(getattr(review_resp.inference, "api_turns", 1))
+        budget.spend_cost(review_resp.inference.cost_usd)
         inferences.append(review_resp.inference)
 
         # Candidate patches, each captured at the moment it was produced. Shipping
@@ -114,9 +134,13 @@ class ReviewStrategy:
                 # already counted for this round (the revision runs first).
                 rounds_left = max(1, Config.MAX_REVISION_TURNS - bb.revision)
                 revision_resp = self.team["executor"].act(
-                    revision_task, bb, max_tool_turns=budget.share_revision(2 * rounds_left)
+                    revision_task,
+                    bb,
+                    max_tool_turns=budget.share_revision(2 * rounds_left),
+                    max_cost_usd=budget.cost_share(2 * rounds_left),
                 )
                 budget.spend_revision(getattr(revision_resp.inference, "api_turns", 1))
+                budget.spend_cost(revision_resp.inference.cost_usd)
                 inferences.append(revision_resp.inference)
                 # Capture this revision's own diff now, while it is still the
                 # working-tree state (diffs are cumulative against HEAD).
@@ -135,9 +159,13 @@ class ReviewStrategy:
                 bb.log(re_review_task)
                 # The re-review counts as one of the remaining revision acts.
                 re_review_resp = self.team["reviewer"].act(
-                    re_review_task, bb, max_tool_turns=budget.share_revision(max(1, 2 * rounds_left - 1))
+                    re_review_task,
+                    bb,
+                    max_tool_turns=budget.share_revision(max(1, 2 * rounds_left - 1)),
+                    max_cost_usd=budget.cost_share(max(1, 2 * rounds_left - 1)),
                 )
                 budget.spend_revision(getattr(re_review_resp.inference, "api_turns", 1))
+                budget.spend_cost(re_review_resp.inference.cost_usd)
                 inferences.append(re_review_resp.inference)
                 approved = _extract_verdict(re_review_resp.inference.response) == "APPROVED"
                 candidates.append((revised_patch, approved))

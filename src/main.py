@@ -153,6 +153,17 @@ def _save_experiment_config(
             # because a run that used it is not directly comparable to one that
             # did not (EXP-20260928-003 ran with 0).
             "revision_tool_turns": Config.REVISION_TOOL_TURNS,
+            # How the pool is divided. These three decide the result as much as
+            # total_tool_turns does, so a run that omits them cannot be compared
+            # to a later one: per_act caps the first act (13 of 40 for review),
+            # per_task lets it draw the remainder minus the floor. EXP-003 ran
+            # per_act with no floor; the budget curve varies both.
+            "budget_mode": Config.BUDGET_MODE,
+            "budget_floor_per_act": Config.BUDGET_FLOOR_PER_ACT,
+            "cost_limit_usd": Config.COST_LIMIT_USD,
+            # Non-empty means every cost column is MODELLED, not billed: the
+            # run used a free model and the tokens were priced with this card.
+            "pricing_model_override": Config.PRICING_MODEL_OVERRIDE or None,
             "repo_dir": Config.TOOLCALL_REPO_DIR,
             "tools": [
                 {"agent": name, "tools": list(T.AGENT_TOOLS.get(name, T.TOOL_FUNCTIONS.keys()))}

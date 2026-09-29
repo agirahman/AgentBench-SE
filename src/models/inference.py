@@ -62,6 +62,19 @@ class InferenceResult:
     def total_tokens(self) -> int:
         return (self.usage or {}).get("total_tokens", 0)
 
+    @property
+    def cost_usd(self) -> float:
+        """Cost of this act in USD, per the rate card (override-aware).
+
+        Exists so a caller can debit a task-level dollar budget without
+        re-deriving pricing. Returns 0.0 when the model has no card, which is
+        the correct answer for a free testing model and keeps the dollar guard
+        inert rather than silently binding on a $0 rate.
+        """
+        from evaluation.cost import CostCalculator
+
+        return CostCalculator().calculate(self).total_cost_usd
+
 
 @dataclass
 class InferenceRun:

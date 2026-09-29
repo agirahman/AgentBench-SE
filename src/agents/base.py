@@ -89,6 +89,7 @@ class BaseAgent(ABC):
         task: AgentMessage,
         context: Blackboard,
         max_tool_turns: int | None = None,
+        max_cost_usd: float | None = None,
     ) -> AgentResponse:
         context.bb_ops = []
         # Select the template for this mode without mutating instance state, so
@@ -111,6 +112,10 @@ class BaseAgent(ABC):
                 repo_root=self.repo_root,
                 system_prompt=system_prompt,
                 max_tool_turns=max_tool_turns,
+                # Dollar guard for the whole task, handed down per act so the
+                # loop can stop before a request that would exceed it. None
+                # (or 0) means uncapped.
+                max_cost_usd=max_cost_usd,
             )
         else:
             inference = self.provider.generate(prompt, role=self.name)

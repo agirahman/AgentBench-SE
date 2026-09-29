@@ -155,6 +155,7 @@ class CommandCodeProvider:
         role: str = "",
         tools: Optional[list] = None,
         max_tool_turns: Optional[int] = None,
+        max_cost_usd: Optional[float] = None,
         repo_root: Optional[str] = None,
         system_prompt: Optional[str] = None,
     ) -> InferenceResult:
@@ -173,6 +174,7 @@ class CommandCodeProvider:
                 role=role,
                 tools=tools or TOOL_SCHEMAS,
                 max_tool_turns=max_tool_turns,
+                max_cost_usd=max_cost_usd,
                 repo_root=repo_root,
                 extra_body=self._extra_body() or None,
                 system_prompt=system_prompt or TOOL_SYSTEM_PROMPT,

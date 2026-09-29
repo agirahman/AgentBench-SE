@@ -27,6 +27,7 @@ from typing import Optional
 from config import Config
 from utils.logger import logger
 from models.inference import InferenceResult
+from evaluation.cost import PricingTable
 from evaluation.retry import call_with_retry
 from providers.response_utils import build_openai_inference_result, _extract_cached_tokens
 from providers.system_prompts import TOOL_SYSTEM_PROMPT, EDITING_ROLES as _EDITING_ROLES
@@ -51,6 +52,25 @@ def _truncate_tool_output(text: str, limit: int) -> str:
     head, tail = text[:half], text[-half:]
     dropped = len(text) - len(head) - len(tail)
     return f"{head}\n… [{dropped} chars omitted] …\n{tail}"
+
+
+def _cost_so_far(usage_totals: dict, rates: dict) -> float:
+    """Cost of the tokens accumulated so far, using a per-million rate card.
+
+    Split into cached and regular input because the two rates differ by ~31x
+    ($0.007/M vs $0.22/M on the DeepSeek card). Charging the whole prompt at the
+    regular rate would overstate cost by an order of magnitude -- measured on
+    EXP-20260928-003, 90.7% of input was cached.
+    """
+    cached = usage_totals.get("cached_tokens", 0) or 0
+    prompt = usage_totals.get("prompt_tokens", 0) or 0
+    regular = max(0, prompt - cached)
+    completion = usage_totals.get("completion_tokens", 0) or 0
+    return (
+        regular / 1_000_000 * rates.get("input_per_million", 0.0)
+        + cached / 1_000_000 * rates.get("cached_input_per_million", 0.0)
+        + completion / 1_000_000 * rates.get("output_per_million", 0.0)
+    )
 
 
 def _retryable_response(resp) -> bool:
@@ -78,6 +98,7 @@ def run_tool_loop(
     role: str = "",
     tools: Optional[list] = None,
     max_tool_turns: Optional[int] = None,
+    max_cost_usd: Optional[float] = None,
     repo_root: Optional[str] = None,
     temperature: Optional[float] = None,
     timeout: Optional[int] = None,
@@ -97,6 +118,14 @@ def run_tool_loop(
     out and is retried still consumed one turn, so a retry can never enlarge the
     budget the strategy granted. Token usage, by contrast, counts every request
     actually paid for, retries included.
+
+    ``max_cost_usd`` is a runaway guard, not a tuning knob. SWE-agent and
+    mini-SWE-agent both bound a task by dollars ($3) and we bounded turns only,
+    so a strategy that spends 2x tokens for the same turns was unconstrained.
+    The caller passes what remains of the TASK budget; the loop enforces it and
+    marks the result truncated, because an act stopped for cost was cut off for
+    exactly the same reason as one stopped for turns: the bound, not the model's
+    own judgement, decided where it ended.
     """
     tools = tools or TOOL_SCHEMAS
     max_tool_turns = max_tool_turns or Config.MAX_TOOL_TURNS
@@ -105,6 +134,21 @@ def run_tool_loop(
     max_tokens = Config.MAX_TOKENS if max_tokens is None else max_tokens
     output_limit = Config.TOOL_OUTPUT_MAX_CHARS
     t0 = time.perf_counter()
+
+    # Rate card for the cost guard. None when no cap was requested, so the loop
+    # does no pricing work at all in the default (uncapped) path.
+    #
+    # `is not None`, not truthiness: an EXHAUSTED cap arrives as 0.0 and must
+    # still arm the guard. Testing truthiness would read "budget spent" as "no
+    # budget", so the run would keep spending precisely when it should stop.
+    #
+    # PricingTable.get() honours PRICING_MODEL_OVERRIDE, so a free testing model
+    # is priced with the paid card when the curve runs ask for it. Without that
+    # the rates are all 0.0, the guard can never bind, and the cost columns stay
+    # empty -- the exact hole EXP-20260928-003 fell into.
+    capped = max_cost_usd is not None
+    cost_rates = PricingTable.rates_for(model, "off_peak") if capped else None
+    cost_exceeded = False
 
     # Always sync the sandbox to THIS instance's repo root. Passing None resets
     # it to the shared base — never silently reuse a previous instance's root.
@@ -186,6 +230,20 @@ def run_tool_loop(
         return result
 
     for turn in range(1, max_tool_turns + 1):
+        # Cost guard: stop BEFORE issuing a request that would exceed the cap.
+        # Checked at the top of the turn so the guard bounds what we spend, not
+        # what we already spent. Prefix caching makes the check cheap to satisfy
+        # in practice -- measured on EXP-20260928-003, 90.7% of input tokens were
+        # cached at $0.007/M against $0.22/M regular.
+        if cost_rates is not None and _cost_so_far(usage_totals, cost_rates) >= max_cost_usd:
+            logger.warning(
+                f"Tool loop hit max_cost_usd={max_cost_usd} for role={role} "
+                f"after {turn - 1} turn(s) (spent "
+                f"${_cost_so_far(usage_totals, cost_rates):.4f})"
+            )
+            cost_exceeded = True
+            break
+
         kwargs = _base_kwargs()
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
@@ -261,15 +319,20 @@ def run_tool_loop(
                 }
             )
 
-    # Out of turns: ask for a final answer WITHOUT tools so the model cannot
-    # call another one and loop again.
-    logger.warning(f"Tool loop hit max_tool_turns={max_tool_turns} for role={role}")
+    # Out of turns OR out of money: ask for a final answer WITHOUT tools so the
+    # model cannot call another one and loop again. Either way the act was CUT
+    # OFF by a bound rather than finishing on its own, so both paths mark the
+    # result truncated -- an act stopped by cost is exactly as unattributable to
+    # the strategy as one stopped by turns.
+    if cost_exceeded:
+        logger.warning(
+            f"Tool loop stopped on cost for role={role} "
+            f"(cap ${max_cost_usd}, spent ${_cost_so_far(usage_totals, cost_rates or {}):.4f})"
+        )
+    else:
+        logger.warning(f"Tool loop hit max_tool_turns={max_tool_turns} for role={role}")
     response = _create(_base_kwargs(), f"tool_loop[{role}] final-answer")
     api_turns += 1
     result = _finalize(response)
-    # This act was CUT OFF, not finished: the answer came from the forced
-    # no-tools request above, so the result reflects the granted budget rather
-    # than the agent's own stopping point. Flagged so the export can report it
-    # instead of letting a truncated run pass as a clean measurement.
     result.truncated = True
     return result

@@ -195,7 +195,19 @@ class PricingTable:
 
     @staticmethod
     def get(model: str) -> Optional[dict]:
-        return PricingTable.PRICING.get(model)
+        """Return the rate card for *model*, honouring PRICING_MODEL_OVERRIDE.
+
+        The override exists because the budget-curve runs use a deliberately free
+        testing model (oc/space-bunny-free) whose genuine rate is $0. Without it
+        every cost column reads 0.00, a dollar cost cap can never bind, and RQ3
+        has no data at all -- which is exactly what happened to EXP-20260928-003.
+
+        Set PRICING_MODEL_OVERRIDE=deepseek-v4-flash to price those tokens with
+        the paid card this project reports on. That produces an ESTIMATE, not a
+        measurement, and `aggregate()` marks the version string so the CSV never
+        presents it as a real charge.
+        """
+        return PricingTable.PRICING.get(Config.PRICING_MODEL_OVERRIDE or model)
 
     @staticmethod
     def rates_for(model: str, window: str = "off_peak") -> dict:
@@ -294,6 +306,11 @@ class CostCalculator:
             pricing = PricingTable.get(inf.model)
             if pricing:
                 version = pricing.get("pricing_version", "")
+        # When an override priced this run, say so in the artefact. Otherwise the
+        # CSV would show a non-zero cost for a run served by a free model, and a
+        # reader would take an estimate for a real charge.
+        if Config.PRICING_MODEL_OVERRIDE:
+            version = f"{version}+priced-as-{Config.PRICING_MODEL_OVERRIDE}"
         return CostSummary(
             input_cost_usd=input_usd,
             output_cost_usd=output_usd,

@@ -35,7 +35,12 @@ class DirectStrategy:
         budget = ToolTurnBudget.from_config()
         task = AgentMessage(sender="orchestrator", receiver="direct", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_issue"])
         bb.log(task)
-        resp = self.team["direct"].act(task, bb, max_tool_turns=budget.share(1))
+        resp = self.team["direct"].act(
+            task,
+            bb,
+            max_tool_turns=budget.share(1),
+            max_cost_usd=budget.cost_share(1),
+        )
 
         # Under tool calling the agent edits files, so the authoritative patch is
         # the working-tree diff; otherwise fall back to the model's own text.
