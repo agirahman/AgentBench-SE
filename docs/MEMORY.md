@@ -148,6 +148,53 @@ Dijalankan dengan `REVISION_TOOL_TURNS=8`, `--instance-ids django__django-11001 
 
 Cap-hit `executor=4` di smoke test **milik act revisi** (act berjalan 11:24:57→11:25:07, cap di 11:25:05) — habis terpakai, tapi cukup untuk 1 edit. Bukti pemisahan act: `tools/analyze_act_edits.py`; atribusi cap: `tools/analyze_cap_attribution.py`.
 
+### 🔬 Kurva budget 40/100/200 — SEDANG BERJALAN (2026-09-29)
+
+**Keputusan user:** per-task budget (bukan per-act), cost cap sebagai pengaman, kurva 3 issue × 3 level, **model free dulu** dengan token dihargai rate card DeepSeek, **sekuensial** (bukan paralel) supaya 9router dan model free melayani satu request pada satu waktu.
+
+**Driver:** `tools/run_budget_curve.py` (27 run, 3 level × 3 issue × 3 strategi).
+**Monitor:** `tools/watch_curve_loop.py` (baris progres per interval) dan `tools/watch_budget_curve.py` (tabel lengkap).
+
+**Issue dipilih secara adversarial** — bukan yang sudah sukses semua:
+
+| Issue | Alasan dipilih |
+|---|---|
+| 11019 | gagal di **ketiga** strategi, dan ketiganya kena cap |
+| 11001 | review gagal: act revisi kelaparan 1 turn padahal reviewer sudah benar |
+| 10914 | kontrol yang sukses di ketiganya |
+
+**Konfigurasi tiap level:** `BUDGET_MODE=per_task`, `BUDGET_FLOOR_PER_ACT=10`, `REVISION_TOOL_TURNS=0` (di per-task tidak ada reserve terpisah), `COST_LIMIT_USD=3.0`, `PRICING_MODEL_OVERRIDE=deepseek-v4-flash`.
+
+**Preflight (1 run, 10914 direct, level 40) membuktikan plumbing-nya:**
+- `cost_usd_actual = $0.0731` — **bukan** $0.0000 → override pricing sampai ke kalkulator biaya, RQ3 punya data dolar meski modelnya gratis
+- `truncated = True`, `truncated_acts = 1` → field truncation merekam dirinya sendiri (adopsi dari harness SWE-bench)
+- `patch_status = VALID`, `experiment.yaml` mencatat semua knob kurva
+
+**Koreksi estimasi waktu:** laju terukur **10,9–13,7 s/turn** (bukan asumsi 3,5 menit/run). Kurva jadi **1–6 jam** dengan level 200 mendominasi, bukan ~2,5 jam.
+
+**Dasar riset (terverifikasi dari sumber primer):**
+
+| Sistem | Limit | Per apa |
+|---|---|---|
+| mini-SWE-agent (`step_limit`) | 250 step + $3 | per **task** |
+| SWE-agent | $3/instance, `per_instance_call_limit=0` | per **instance** |
+| OpenHands (`max_iterations`) | 500 | per **task** |
+| SWE-bench Pro | 200 turn | per **task** |
+
+**Tidak satu pun** membagi budget per agen — kita satu-satunya. Karena 1 turn kita ≈ 1,34 call, 250 step ≈ 186 turn kita (tetap 4,6× pool 40).
+
+**Harness SWE-bench melaporkan `resolved`/`unresolved`/`empty patch`/`error` sebagai hitungan terpisah** dan menyatakan eksplisit bahwa kegagalan "never remove anything from the total". EXP-003 kita meruntuhkan semuanya jadi satu angka 8/8/6 — itu kelemahan terbesar write-up saat itu, dan alasan field `truncated` sekarang ada.
+
+**METR:** jangan pilih satu angka budget, **ukur akurasi sebagai fungsi budget** dan laporkan titik 50%. Itu yang menggantikan "kenapa 40?" dengan pengukuran.
+
+⚠️ **Satu sitasi partner TERVERIFIKASI SALAH:** brief mengutip Olausson et al. (2023) sebagai "67% → 82% dengan execution feedback". Teks lengkap paper (ar5iv, 2,2 MB) **tidak memuat string `82%`**; keuntungan yang dilaporkan adalah **"up to 8%"**. Sudah dikoreksi di `docs/RESEARCH_VERIFIER_20260929.md` — **jangan kutip 67/82**. Tiga sitasi lain benar (Self-Debug +2–3%/+12%, Reflexion 91%, Self-Refine ~20%). `tools/verify_citations.py --self-test` mem-pin kasus ini.
+
+**Biaya terukur:** rata-rata **$0.0696/run** worst-case, **$0.0242** cache-aware — 2,3% / 0,8% dari cap $3. Jadi klaim tesis harus *"budget kita dipecah per-act"*, **bukan** "kita tidak punya cost cap".
+
+⚠️ **Semua run kita (termasuk EXP-003) memakai model GRATIS** (`oc/space-bunny-free`). Biaya $0 di CSV itu **akurat, bukan bug** — rate card $0 yang disengaja. Run final harus pakai model berbayar untuk RQ3.
+
+⚠️ **Jebakan median vs mean:** MEMORY mencatat review 291 K vs planning 140 K (2,08×, **median**); data yang sama memberi 276 K vs 211 K (1,31×, **mean**). Keduanya benar — tulis statistik mana yang dipakai di tabel tesis, atau dua dokumen sendiri akan tampak bertentangan.
+
 ---
 
 ## ⚙️ Konfigurasi Aktif (`.env`)
@@ -159,6 +206,10 @@ Cap-hit `executor=4` di smoke test **milik act revisi** (act berjalan 11:24:57�
 | `TOOLCALL_ENABLED` | `true` | edit-then-diff |
 | `TOTAL_TOOL_TURNS` | `40` | pool per strategi: direct 40; planning 20+20; review 13+13+14 |
 | `MAX_TOOL_TURNS` | `20` | fallback per-act, hanya jika TOTAL=0 |
+| `BUDGET_MODE` | `per_act` | `per_task` = mode referensi; kurva memakai per_task |
+| `BUDGET_FLOOR_PER_ACT` | `0` | hanya berlaku di per_task; kurva memakai 10 |
+| `COST_LIMIT_USD` | `3.0` | pengaman dolar per task (referensi SWE-agent $3) |
+| `PRICING_MODEL_OVERRIDE` | *(kosong)* | isi `deepseek-v4-flash` → token model gratis dihargai rate card berbayar (**estimasi**) |
 | `TOOL_OUTPUT_MAX_CHARS` | `2000` | cap per hasil tool, head+tail |
 | `MAX_REVISION_TURNS` | `1` | batas revisi |
 | `API_TIMEOUT` | `600` | dinaikkan dari 180 |
