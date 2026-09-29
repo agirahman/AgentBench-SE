@@ -136,6 +136,11 @@ def _save_experiment_config(
             "enabled": Config.TOOLCALL_ENABLED,
             "max_tool_turns": Config.MAX_TOOL_TURNS,
             "total_tool_turns": Config.TOTAL_TOOL_TURNS,
+            # Separate from total_tool_turns: only review's revision acts draw
+            # it, so review's total is total + this when non-zero. Recorded here
+            # because a run that used it is not directly comparable to one that
+            # did not (EXP-20260928-003 ran with 0).
+            "revision_tool_turns": Config.REVISION_TOOL_TURNS,
             "repo_dir": Config.TOOLCALL_REPO_DIR,
             "tools": [
                 {"agent": name, "tools": list(T.AGENT_TOOLS.get(name, T.TOOL_FUNCTIONS.keys()))}

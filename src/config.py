@@ -175,6 +175,14 @@ class Config:
     # instead of a total that is an accident of how many agents they have.
     # See agents/budget.py. Set to 0 to fall back to the legacy per-act cap.
     TOTAL_TOOL_TURNS = _get_int_env("TOTAL_TOOL_TURNS", 60)
+    # Extra allowance for review's revision acts, kept SEPARATE from the pool
+    # above so the base flow of every strategy stays equal (the like-for-like
+    # comparison) while a revision still has room to edit. EXP-20260928-003
+    # measured the failure this fixes: review's base acts spent the whole pool,
+    # the revision act was granted 1 turn, and the reviewer's correct diagnosis
+    # (django-11001: use re.DOTALL) could not be applied. 0 = legacy behaviour,
+    # where revisions draw the base remainder and get a floor of 1 turn.
+    REVISION_TOOL_TURNS = _get_int_env("REVISION_TOOL_TURNS", 0)
     # Cap on a single tool result before it enters the conversation. Every turn
     # re-sends the whole conversation, so this value multiplies by the number of
     # turns. Head and tail are both kept (see providers/tool_loop): the tail

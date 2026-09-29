@@ -87,3 +87,86 @@ def test_spend_ignores_negative_and_zero():
     assert budget.remaining == 40
     budget.spend(-5)
     assert budget.remaining == 40
+
+
+def test_base_pool_stays_equal_when_a_revision_reserve_exists():
+    """The reserve must not shrink the base flow, or the comparison breaks.
+
+    A revision is review-only; if it were paid for out of the base pool, review
+    would start every run with less room than direct and planning — measuring
+    the budget again, which is the bug the pool was introduced to fix.
+    """
+    for reserve in (0, 8, 20):
+        direct = ToolTurnBudget(total=40, revision_reserve=reserve)
+        assert direct.share(1) == 40
+
+        planning = ToolTurnBudget(total=40, revision_reserve=reserve)
+        planner = planning.share(2)
+        planning.spend(planner)
+        executor = planning.share(1)
+        assert (planner, executor) == (20, 20)
+
+        review = ToolTurnBudget(total=40, revision_reserve=reserve)
+        shares = []
+        for remaining in (3, 2, 1):
+            grant = review.share(remaining)
+            review.spend(grant)
+            shares.append(grant)
+        assert shares == [13, 13, 14]
+        assert review.remaining == 0
+
+
+def test_revision_reserve_is_not_starved_by_a_spent_base_pool():
+    """The measured failure: a spent base pool left the revision act 1 turn.
+
+    EXP-20260928-003, django-11001: the base acts used all 40 turns, so
+    ``share(2)`` returned the floor of 1. The revision's two tool calls were
+    both reads and no edit was made, so the reviewer's correct diagnosis
+    (re.DOTALL) was never applied. With a reserve the revision can still edit.
+    """
+    budget = ToolTurnBudget(total=40, revision_reserve=8)
+    for remaining in (3, 2, 1):
+        budget.spend(budget.share(remaining))
+    assert budget.remaining == 0
+
+    # 8 reserve split across the revision and the re-review that follows it.
+    revision_share = budget.share_revision(2)
+    assert revision_share == 4, "a revision that can only read cannot fix anything"
+    budget.spend_revision(revision_share)
+    re_review_share = budget.share_revision(1)
+    assert re_review_share == 4
+
+
+def test_revision_reserve_does_not_extend_the_base_pool():
+    """Spending the reserve must not hand turns back to the base acts."""
+    budget = ToolTurnBudget(total=40, revision_reserve=8)
+    budget.spend(40)
+    budget.spend_revision(4)
+    assert budget.remaining == 0
+    assert budget.share(1) == 1
+    assert budget.revision_used == 4
+    assert budget.revision_remaining == 4
+
+
+def test_zero_reserve_keeps_legacy_revision_behaviour():
+    """REVISION_TOOL_TURNS=0 must reproduce pre-reserve runs exactly.
+
+    Historical experiments (EXP-20260928-003) were produced this way, so the
+    fallback has to draw the base remainder and spend from it, not silently
+    switch to a reserve that does not exist.
+    """
+    budget = ToolTurnBudget(total=40, revision_reserve=0)
+    for remaining in (3, 2, 1):
+        budget.spend(budget.share(remaining))
+    assert budget.remaining == 0
+    assert budget.share_revision(2) == 1  # the floor, as measured in 11001
+
+    budget.spend_revision(1)
+    assert budget.remaining == -1, "legacy path must charge the base pool"
+
+
+def test_revision_never_grants_zero_even_with_exhausted_reserve():
+    budget = ToolTurnBudget(total=40, revision_reserve=2)
+    budget.spend_revision(5)
+    assert budget.share_revision(1) >= 1
+    assert budget.share_revision(2) >= 1

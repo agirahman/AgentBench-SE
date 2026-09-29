@@ -45,9 +45,13 @@ class ReviewStrategy:
         bb = Blackboard(issue=issue)
         inferences = []
 
-        # Three base acts share the strategy-wide pool: 60 -> 20 + 20 + 20.
-        # A revision act draws from whatever the earlier acts left unused, so
-        # the total stays bounded however many revisions run.
+        # Three base acts share the strategy-wide pool (40 -> 13 + 13 + 14), so
+        # the base flow costs exactly what direct's and planning's do. A revision
+        # act draws from a SEPARATE reserve (Config.REVISION_TOOL_TURNS) instead
+        # of the base pool: when it drew the base remainder, EXP-20260928-003
+        # showed it was granted the floor of 1 turn (django-11001), so the
+        # reviewer's correct diagnosis could not be applied and review lost an
+        # instance that direct and planning both resolved.
         budget = ToolTurnBudget.from_config()
 
         plan_task = AgentMessage(sender="orchestrator", receiver="planner", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_issue"])
@@ -100,14 +104,15 @@ class ReviewStrategy:
             while not approved and bb.revision < Config.MAX_REVISION_TURNS:
                 revision_task = AgentMessage(sender="orchestrator", receiver="executor", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_feedback"])
                 bb.log(revision_task)
-                # A revision is an extra act, but it does not get a fresh pool:
-                # it draws the remainder, split across itself and the re-review
-                # that must follow it. When the base acts used their whole
-                # share this grants the floor of 1 turn rather than nothing.
+                # A revision is an extra act, but it does not get a fresh base
+                # pool: it draws the revision reserve, split across itself and
+                # the re-review that must follow it. When no reserve is
+                # configured this falls back to the base remainder, which is the
+                # legacy behaviour (and the floor of 1 that starved 11001).
                 revision_resp = self.team["executor"].act(
-                    revision_task, bb, max_tool_turns=budget.share(2)
+                    revision_task, bb, max_tool_turns=budget.share_revision(2)
                 )
-                budget.spend(getattr(revision_resp.inference, "api_turns", 1))
+                budget.spend_revision(getattr(revision_resp.inference, "api_turns", 1))
                 inferences.append(revision_resp.inference)
                 # Capture this revision's own diff now, while it is still the
                 # working-tree state (diffs are cumulative against HEAD).
@@ -125,9 +130,9 @@ class ReviewStrategy:
                 re_review_task = AgentMessage(sender="orchestrator", receiver="reviewer", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_plan", "get_patch"])
                 bb.log(re_review_task)
                 re_review_resp = self.team["reviewer"].act(
-                    re_review_task, bb, max_tool_turns=budget.share(1)
+                    re_review_task, bb, max_tool_turns=budget.share_revision(1)
                 )
-                budget.spend(getattr(re_review_resp.inference, "api_turns", 1))
+                budget.spend_revision(getattr(re_review_resp.inference, "api_turns", 1))
                 inferences.append(re_review_resp.inference)
                 approved = _extract_verdict(re_review_resp.inference.response) == "APPROVED"
                 candidates.append((revised_patch, approved))

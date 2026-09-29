@@ -5,6 +5,10 @@
 **Active Branch:** `19/toolcall-commandcode`
 **Detail sesi terakhir:** lihat [`HANDOFF_20260928.md`](HANDOFF_20260928.md)
 
+> ⛔ **GATE — WAJIB KONFIRMASI USER:** Jangan jalankan run besar (50 issue / multi-jam)
+> tanpa persetujuan eksplisit dari user. Boleh tanpa konfirmasi: unit test, smoke test
+> kecil (≤3 issue, 1 strategi), dan pekerjaan kode/dokumentasi.
+
 ---
 
 ## 📋 Current Project State
@@ -24,7 +28,10 @@
 | **Konteks per turn** | ✅ Done | `TOOL_OUTPUT_MAX_CHARS=2000`, head+tail (dari 8000 head-only) |
 | **Korupsi patch** | ✅ **FIXED** | `_normalize_newlines` merusak diff yang mengandung literal `\n` (commit `3cbd9d1`) |
 | **Evaluasi EXP-003** | ✅ Done | Modal SWE-bench harness: **30/30 patch applied**, hasil di `EVAL_NOTE.md` |
-| **Reviewer oracle** | ⚠️ Terbatas | `run_tests` selalu gagal; reviewer hanya bisa menalar |
+| **Reviewer oracle** | ⚠️ Terbatas | `run_tests` selalu gagal; reviewer hanya bisa menalar. Spike 2026-09-29: test pre-existing lokal **murah (2–3 s) tapi tidak mendiskriminasi** — lihat `docs/SPIKE_ORACLE_20260929.md` |
+| **Reserve act revisi** | ✅ Done | `REVISION_TOOL_TURNS` — pool terpisah, base flow tetap setara 40/40/40 (default 0 = perilaku lama) |
+| **Race EXP-ID** | ✅ **FIXED** | Lock `O_CREAT\|O_EXCL` + deteksi lock basi; di Windows errno `EACCES`, bukan `EEXIST` |
+| **Split paralel** | ✅ Terverifikasi | `tools/_verify_split.py`: 26 + 24 = 50, overlap 0 |
 
 ---
 
@@ -102,6 +109,22 @@ Evaluasi via Modal SWE-bench harness. Detail: `results/EXP-20260928-003/EVAL_NOT
 
 **Temuan metodologis penting — tool call ≠ turn:**
 Model bisa mengeluarkan beberapa tool call paralel dalam satu turn HTTP. `total_tool_calls` (mis. 52) bisa melebihi budget (40) tanpa pelanggaran, karena budget dihitung per **turn**. Pakai `api_turns`/`total_turns` untuk klaim budget, **jangan** `total_tool_calls`. `total_turns=41` untuk direct = 40 turn tool + 1 turn jawaban final (di luar loop, by design).
+
+**⚠️ Temuan lanjutan (2026-09-29) — 5 dari 8 kegagalan EXP-003 terkonfound budget:**
+Pemetaan peringatan `MAX-TURNS` ke instance (`tools/analyze_cap_hits.py`, `tools/analyze_budget_confounds.py`) menunjukkan **6 dari 30 run kena cap, dan 5 di antaranya gagal**:
+
+| Instance | direct | planning | review | Cap hits (turn yang diberikan) |
+|---|---|---|---|---|
+| 10914 | OK | OK | OK | review:1 (revisi) |
+| 10924 | OK | OK | **FAIL** | review:**15** (executor dipotong) |
+| 11001 | OK | OK | **FAIL** | review:**1** (revisi) |
+| 11019 | **FAIL** | **FAIL** | **FAIL** | direct:**40**, planning:**33**, review:**3** |
+| 11283 | **FAIL** | **FAIL** | **FAIL** | — (kegagalan model murni) |
+| 5 lainnya | OK | OK | OK | — |
+
+**Implikasi:** angka 8/8/6 **bukan** perbandingan bersih. `11019` gagal di ketiganya dan ketiganya kena cap (termasuk `direct` yang memakai pool penuh 40) — jadi instance itu mengukur batas turn, bukan strategi. `11283` gagal di ketiganya **tanpa** cap-hit → itu kegagalan model yang sah (nested quoting, jebakan #8). Untuk klaim RQ1, laporkan 11019 sebagai instance terkonfound atau ulangi dengan budget lebih besar.
+
+**Bukti tambahan 10924:** executor membuat 3 edit terakhir di posisi 25–27 dari 28 tool call, lalu **dipotong**. Patch yang dinilai adalah pekerjaan yang belum selesai — dan reviewer tetap APPROVED (false approval). Terlihat di `tools/_act_trace.py`.
 
 ---
 

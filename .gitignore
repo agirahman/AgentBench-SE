@@ -54,3 +54,6 @@ docs/*
 !docs/RUNBOOK.md
 !docs/FRAMEWORK_FLOW_RESEARCH.md
 !docs/FRAMEWORK_FLOW_TECHNICAL.md
+
+# Local agent tooling (Command Code config + workstream briefs)
+.commandcode/

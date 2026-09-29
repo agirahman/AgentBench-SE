@@ -134,6 +134,7 @@ def tool_provider(monkeypatch):
     for mod in (base_mod, budget_mod, registry_mod, tools_mod, review_strategy):
         monkeypatch.setattr(mod.Config, "TOOLCALL_ENABLED", True)
         monkeypatch.setattr(mod.Config, "TOTAL_TOOL_TURNS", 40)
+        monkeypatch.setattr(mod.Config, "REVISION_TOOL_TURNS", 0)
     monkeypatch.setattr(
         "agents.base.load_prompt_or_default",
         lambda filename, default="": str(default),
@@ -172,3 +173,49 @@ def test_direct_is_not_starved_by_its_single_agent(issue, tool_provider):
     provider = BudgetRecordingProvider()
     DirectStrategy(provider).run(issue)
     assert provider.tool_turns == [("direct", 40)]
+
+
+def test_revision_act_gets_a_usable_share_from_the_reserve(issue, monkeypatch):
+    """The measured failure: review's revision act was granted 1 turn.
+
+    EXP-20260928-003, django-11001. The base flow spent the whole 40-turn pool,
+    so ``budget.share(2)`` for the revision returned the floor of 1. The revision
+    made two read_file calls and no edit, the re-review rejected the unchanged
+    patch, and review shipped the initial (rejected) patch while direct and
+    planning both resolved the issue with ``re.DOTALL``.
+
+    This pins the fix end-to-end through the strategy: with a reserve the
+    revision act must be granted more than the floor, and the base acts must
+    still add up to the same 40 turns the other strategies get.
+    """
+    from agents import base as base_mod
+    from agents import budget as budget_mod
+    from agents import registry as registry_mod
+    from agents import tools as tools_mod
+    from strategies import review_strategy
+
+    for mod in (base_mod, budget_mod, registry_mod, tools_mod, review_strategy):
+        monkeypatch.setattr(mod.Config, "TOOLCALL_ENABLED", True)
+        monkeypatch.setattr(mod.Config, "TOTAL_TOOL_TURNS", 40)
+        monkeypatch.setattr(mod.Config, "REVISION_TOOL_TURNS", 8)
+    monkeypatch.setattr(
+        "agents.base.load_prompt_or_default",
+        lambda filename, default="": str(default),
+    )
+
+    provider = BudgetRecordingProvider(reviewer_verdict='{"verdict": "NEEDS_REVISION"}')
+    ReviewStrategy(provider).run(issue)
+
+    granted = {role: [] for role, _ in provider.tool_turns}
+    for role, turns in provider.tool_turns:
+        granted.setdefault(role, []).append(turns)
+
+    base_total = granted["planner"][0] + granted["executor"][0] + granted["reviewer"][0]
+    assert base_total == 40, f"base flow must still total 40, got {base_total}"
+
+    # The revision act is the executor's SECOND call; the re-review follows it.
+    revision_grant = granted["executor"][1]
+    assert revision_grant > 1, (
+        f"revision was granted {revision_grant} turn(s) — the floor that starved "
+        f"django-11001; it cannot edit with that"
+    )
