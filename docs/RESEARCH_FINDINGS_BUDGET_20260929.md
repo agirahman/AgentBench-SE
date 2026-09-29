@@ -202,9 +202,38 @@ bound runaway runs the way the references do.
 **C. Add a cost cap (adopt now).**
 This is the biggest structural gap. SWE-agent and mini-SWE-agent both bound a run
 by dollars ($3), not turns. We bound turns and don't bound cost — so a strategy
-that spends 2× tokens for the same turns is unconstrained, and review already
-cost 2× planning's tokens (291K vs 140K). Add `COST_LIMIT_USD` alongside the turn
-pool. It also makes the RQ1 comparison fair, which is a thesis requirement.
+that spends 2× tokens for the same turns is unconstrained.
+
+**BUT — measured before recommending, and the measurement changes the framing.**
+Pricing our own tokens at the paid DeepSeek card (`tools/analyze_token_stats.py
+--price deepseek-v4-flash`):
+
+| Strategy | worst-case $/run | cache-aware $/run |
+|---|---|---|
+| direct | $0.0846 | $0.0341 |
+| planning | $0.0523 | $0.0143 |
+| review | $0.0720 | $0.0240 |
+| **mean** | **$0.0696 (2.3% of the $3 cap)** | **$0.0242 (0.8%)** |
+
+So a $3/task cap **would never bind** on this workload — we are 1–2 orders of
+magnitude below it. Two consequences:
+
+1. The cost cap is worth adding as a **runaway guard**, but it is **not** the
+   explanation for our budget behaviour. The thesis claim must be "our budget is
+   expressed per act", not "we have no cost cap" — the latter is true but
+   immaterial at our scale.
+2. **We currently have no measured cost data at all.** Every recorded experiment
+   used a deliberately-free testing model (`oc/space-bunny-free`,
+   `stealth/space-bunny-alpha`) whose $0 rate card is accurate, not a bug. All 21
+   cost columns read 0.00 for that reason. The figures above are an **estimate**
+   from real token counts, not a measurement. **RQ3 cannot be answered from the
+   runs so far** — the final run must use a priced model.
+
+**C2. State median vs mean explicitly (adopt now).** MEMORY.md reports planning
+140K vs review 291K tokens (2.08×); the same data gives means of 211K vs 276K
+(1.31×). Both are correct — the distributions are skewed (direct spans 22K–860K).
+A table that says only "tokens" invites a contradiction between our own documents.
+`tools/analyze_token_stats.py` prints both and labels the ratio.
 
 **D. Produce the accuracy-vs-budget curve (adopt for the thesis write-up).**
 Run the 10 django instances at 2-3 budget levels and plot resolution rate against
