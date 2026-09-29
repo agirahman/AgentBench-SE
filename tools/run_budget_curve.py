@@ -43,6 +43,7 @@ not all zero.
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 import time
@@ -119,11 +120,34 @@ def main() -> int:
 
     started = time.time()
     failures: list[int] = []
+    state_path = ROOT / "logs" / "budget_curve_state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+
     for idx, level in enumerate(levels, 1):
         cmd = build_cmd(level, dry_run=False)
         print("=" * 78)
         print(f"  LEVEL {level}  ({idx}/{len(levels)})   {len(ISSUES) * 3} runs")
         print("=" * 78, flush=True)
+
+        # State file, written BEFORE the level starts and cleared after it ends.
+        # Two jobs: the watcher needs to know which level is in flight (during a
+        # level the experiment directory has no config yet, because main.py
+        # writes experiment.yaml only at the end), and a sweep killed mid-flight
+        # leaves a record of what was running. The log file is not usable for
+        # this -- PowerShell's Tee-Object writes it as UTF-16, so a naive reader
+        # sees a null byte after every character and matches nothing.
+        state_path.write_text(
+            json.dumps({
+                "level": level,
+                "index": idx,
+                "of": len(levels),
+                "issues": ISSUES,
+                "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "finished": False,
+            }, indent=2),
+            encoding="utf-8",
+        )
+
         t0 = time.time()
         # No capture: the level's own log is the progress record, and a sweep
         # that swallows output cannot be monitored while it runs.
@@ -132,6 +156,16 @@ def main() -> int:
         print(f"\n  level {level} finished rc={rc} in {dt / 60:.1f} min\n", flush=True)
         if rc != 0:
             failures.append(level)
+
+    state_path.write_text(
+        json.dumps({
+            "finished": True,
+            "levels": levels,
+            "failures": failures,
+            "elapsed_minutes": (time.time() - started) / 60,
+        }, indent=2),
+        encoding="utf-8",
+    )
 
     print("=" * 78)
     print(f"  SWEEP DONE in {(time.time() - started) / 60:.1f} min")

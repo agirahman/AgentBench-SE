@@ -5,7 +5,7 @@ import time
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 import pandas as pd
 
@@ -144,6 +144,7 @@ def run_experiments(
     resume: bool = False,
     agents: list[dict[str, str]] | None = None,
     model: str = "",
+    on_experiment_start: Callable[[str, str], None] | None = None,
 ) -> tuple[pd.DataFrame, str]:
     """Execute experiments and dump results to a per-experiment folder.
 
@@ -157,6 +158,14 @@ def run_experiments(
         model: Actual configured model id (e.g. cmd/deepseek/deepseek-v4-flash).
             Used for resume keys and error rows so records never carry a
             provider name in place of a model id.
+        on_experiment_start: Called with (exp_dir, exp_id) as soon as the
+            directory exists, before the first run. The caller uses it to write
+            the configuration record up front. Without it the config was only
+            written AFTER every run finished, so a crash or a kill left a
+            directory full of patches with no record of the settings that
+            produced them -- and a multi-hour sweep is exactly where that
+            matters. Failures here are logged, never fatal: losing a metadata
+            write must not abort an experiment that is already running.
 
     Returns:
         (DataFrame, experiment_id) where DataFrame is the flattened results.csv
@@ -164,6 +173,14 @@ def run_experiments(
     effective_model = model or provider_name
     exp_id = generate_experiment_id()
     exp_dir = create_experiment_dir(base_dir, exp_id)
+    if on_experiment_start is not None:
+        try:
+            on_experiment_start(exp_dir, exp_id)
+        except Exception as exc:  # noqa: BLE001 - metadata must not kill a run
+            logger.warning(
+                f"Could not write the early config record for {exp_id}: "
+                f"{type(exc).__name__}: {exc}"
+            )
     Path(f"{exp_dir}/patches").mkdir(parents=True, exist_ok=True)
     pred_dir = Path(f"{exp_dir}/predictions")
     pred_dir.mkdir(parents=True, exist_ok=True)

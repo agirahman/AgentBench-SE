@@ -325,6 +325,19 @@ def main():
 
     Path(args.output).mkdir(parents=True, exist_ok=True)
 
+    def _write_early_config(exp_dir: str, exp_id: str) -> None:
+        """Record the configuration as soon as the experiment directory exists.
+
+        Previously this only happened after every run finished, so a crash, a
+        kill, or a full disk left a directory of patches with no record of the
+        settings that produced them -- and the longer the run, the more that
+        matters. A 6-hour sweep is exactly that case.
+        """
+        repos_actual = dict(Counter(issue.repo for issue in issues))
+        _save_experiment_config(
+            exp_dir, args, len(issues), strategy_names, exp_id, agents, repos_actual, agent_team
+        )
+
     df, exp_id = run_experiments(
         issues,
         strategies,
@@ -334,6 +347,7 @@ def main():
         resume=args.resume,
         agents=agents,
         model=provider.model,
+        on_experiment_start=_write_early_config,
     )
 
     # Save experiment.yaml to per-experiment folder
