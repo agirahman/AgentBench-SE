@@ -105,12 +105,16 @@ class ReviewStrategy:
                 revision_task = AgentMessage(sender="orchestrator", receiver="executor", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_feedback"])
                 bb.log(revision_task)
                 # A revision is an extra act, but it does not get a fresh base
-                # pool: it draws the revision reserve, split across itself and
-                # the re-review that must follow it. When no reserve is
-                # configured this falls back to the base remainder, which is the
-                # legacy behaviour (and the floor of 1 that starved 11001).
+                # pool: it draws the revision reserve. The split must account for
+                # EVERY act still to come, including later rounds — funding only
+                # this round would front-load the reserve and leave rounds 2..N on
+                # the floor of 1 turn, the same starvation this reserve fixes.
+                # Each round is 2 acts (revision + the re-review that must follow
+                # it), so the acts remaining are 2 per round, minus the re-review
+                # already counted for this round (the revision runs first).
+                rounds_left = max(1, Config.MAX_REVISION_TURNS - bb.revision)
                 revision_resp = self.team["executor"].act(
-                    revision_task, bb, max_tool_turns=budget.share_revision(2)
+                    revision_task, bb, max_tool_turns=budget.share_revision(2 * rounds_left)
                 )
                 budget.spend_revision(getattr(revision_resp.inference, "api_turns", 1))
                 inferences.append(revision_resp.inference)
@@ -129,8 +133,9 @@ class ReviewStrategy:
                 # shipped merely because it came later.
                 re_review_task = AgentMessage(sender="orchestrator", receiver="reviewer", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_plan", "get_patch"])
                 bb.log(re_review_task)
+                # The re-review counts as one of the remaining revision acts.
                 re_review_resp = self.team["reviewer"].act(
-                    re_review_task, bb, max_tool_turns=budget.share_revision(1)
+                    re_review_task, bb, max_tool_turns=budget.share_revision(max(1, 2 * rounds_left - 1))
                 )
                 budget.spend_revision(getattr(re_review_resp.inference, "api_turns", 1))
                 inferences.append(re_review_resp.inference)

@@ -86,6 +86,17 @@ class ToolTurnBudget:
     def share_revision(self, acts_remaining: int) -> int:
         """Turns to grant the next revision act, from the reserve only.
 
+        ``acts_remaining`` must count EVERY revision act still to run, including
+        those in later rounds. Each round costs two acts (the revision and the
+        re-review that must follow it), so a loop allowing ``R`` rounds has at
+        most ``2 * R`` revision acts left.
+
+        Passing only the current round's 2 acts front-loads the whole reserve
+        into round 1 and leaves later rounds on the floor of 1 turn — the same
+        starvation this reserve exists to fix, just moved to round 2. Measured
+        with tools/analyze_revision_budget.py: reserve=8 with 3 rounds allowed
+        grants 4+4 to round 1 and 1+1 to rounds 2 and 3.
+
         With no reserve configured this is the old behaviour — the base
         remainder, which is usually the floor of 1 — so historical runs stay
         reproducible.

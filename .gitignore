@@ -57,3 +57,6 @@ docs/*
 
 # Local agent tooling (Command Code config + workstream briefs)
 .commandcode/
+
+# Research source cache (re-fetchable via tools/research_fetch.py)
+.research_cache/

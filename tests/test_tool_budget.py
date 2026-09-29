@@ -170,3 +170,44 @@ def test_revision_never_grants_zero_even_with_exhausted_reserve():
     budget.spend_revision(5)
     assert budget.share_revision(1) >= 1
     assert budget.share_revision(2) >= 1
+
+
+def test_reserve_is_spread_over_all_remaining_rounds_not_front_loaded():
+    """Later revision rounds must not be starved by an eager first round.
+
+    The reserve is divided per act still to come. If the caller counts only the
+    current round's 2 acts, round 1 takes the whole reserve and rounds 2..N are
+    left on the floor of 1 turn — the same starvation the reserve was added to
+    fix (django-11001 was granted 1 turn and could not edit). With 3 rounds
+    allowed and a reserve of 24, every round must get the same 4-turn grant.
+    """
+    budget = ToolTurnBudget(total=40, revision_reserve=24)
+    grants = []
+    for rounds_left in (3, 2, 1):
+        rev = budget.share_revision(2 * rounds_left)
+        budget.spend_revision(rev)
+        grants.append(rev)
+        re_rev = budget.share_revision(max(1, 2 * rounds_left - 1))
+        budget.spend_revision(re_rev)
+
+    assert grants == [4, 4, 4], f"rounds got unequal grants: {grants}"
+    assert all(g > 1 for g in grants), "a round was left unable to edit"
+
+
+def test_reserve_sized_for_one_round_still_starves_the_rest():
+    """Documents the trade-off: a reserve funds exactly as many rounds as it pays for.
+
+    This is not a bug to fix but a bound to be aware of when choosing the value:
+    with MAX_REVISION_TURNS=3, a reserve of 8 leaves rounds 2 and 3 on the floor.
+    Recorded here so the number is a deliberate choice rather than a surprise.
+    """
+    budget = ToolTurnBudget(total=40, revision_reserve=8)
+    grants = []
+    for rounds_left in (3, 2, 1):
+        rev = budget.share_revision(2 * rounds_left)
+        budget.spend_revision(rev)
+        grants.append(rev)
+        budget.spend_revision(budget.share_revision(max(1, 2 * rounds_left - 1)))
+
+    assert grants[0] == 1, "8 turns over 6 acts leaves the first round on the floor"
+    assert grants == [1, 1, 2]

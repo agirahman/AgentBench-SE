@@ -219,3 +219,43 @@ def test_revision_act_gets_a_usable_share_from_the_reserve(issue, monkeypatch):
         f"revision was granted {revision_grant} turn(s) — the floor that starved "
         f"django-11001; it cannot edit with that"
     )
+
+
+def test_every_revision_round_gets_a_usable_grant(issue, monkeypatch):
+    """With several rounds allowed, no round may fall to the floor of 1 turn.
+
+    Funding only the current round front-loads the reserve, so round 2 onward
+    cannot edit — the same starvation the reserve was added to fix, just moved
+    later. The reserve is sized here for 3 rounds (24 = 3 rounds x 2 acts x 4).
+    """
+    from agents import base as base_mod
+    from agents import budget as budget_mod
+    from agents import registry as registry_mod
+    from agents import tools as tools_mod
+    from strategies import review_strategy
+
+    for mod in (base_mod, budget_mod, registry_mod, tools_mod, review_strategy):
+        monkeypatch.setattr(mod.Config, "TOOLCALL_ENABLED", True)
+        monkeypatch.setattr(mod.Config, "TOTAL_TOOL_TURNS", 40)
+        monkeypatch.setattr(mod.Config, "REVISION_TOOL_TURNS", 24)
+        monkeypatch.setattr(mod.Config, "MAX_REVISION_TURNS", 3)
+    monkeypatch.setattr(
+        "agents.base.load_prompt_or_default",
+        lambda filename, default="": str(default),
+    )
+
+    # Always rejects, so all 3 rounds actually run.
+    provider = BudgetRecordingProvider(reviewer_verdict='{"verdict": "NEEDS_REVISION"}')
+    ReviewStrategy(provider).run(issue)
+
+    executor_grants = [t for role, t in provider.tool_turns if role == "executor"]
+    assert len(executor_grants) == 4, (
+        f"expected 1 base + 3 revision acts, got {executor_grants}"
+    )
+    revision_grants = executor_grants[1:]
+    assert all(g > 1 for g in revision_grants), (
+        f"a revision round was left unable to edit: {revision_grants}"
+    )
+    assert len(set(revision_grants)) == 1, (
+        f"rounds got unequal grants, so later rounds are penalised: {revision_grants}"
+    )
