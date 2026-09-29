@@ -1,4 +1,4 @@
-import json
+import re
 
 from config import Config
 from models.issue import Issue
@@ -13,14 +13,56 @@ from agents.tools import ensure_repo_root, reset_working_tree, finalize_patch
 from evaluation.cost import CostCalculator
 
 
+# The reviewer is asked to end with a JSON object, but it does not always comply:
+# it may wrap the JSON in prose ("The patch is verified correct...\n\n{...}"), or
+# emit slightly malformed JSON (a missing comma deep inside a 600-char field).
+# Whole-string json.loads() therefore fails on responses that DO carry a verdict,
+# and the old 50-character fallback then misread them.
+_VERDICT_RE = re.compile(r'"verdict"\s*:\s*"([A-Z_]+)"')
+
+# A rejection phrased as a negated approval ("This is not APPROVED because...").
+# The keyword fallback must not read that as consent. Only a negation directly in
+# front of the word counts: "no issues, so APPROVED" is still an approval, while
+# "cannot be APPROVED" is not.
+_NEGATED_APPROVAL_RE = re.compile(
+    r"\b(?:not|never|isn'?t|aren'?t|wasn'?t|weren'?t|cannot|can'?t)\s+"
+    r"(?:\w+\s+){0,2}APPROVED\b",
+    re.I,
+)
+
+
 def _extract_verdict(feedback: str) -> str:
+    """Read the reviewer's verdict, tolerating prose framing and malformed JSON.
+
+    Measured failure modes in the recorded experiments:
+
+    * prose THEN json (EXP-20260927-005, EXP-20260929-022 django-11001/review).
+      ``json.loads`` fails on the whole string, the first 50 characters are prose,
+      so the old fallback read NEEDS_REVISION while the reviewer had said
+      APPROVED -- causing a needless revision round.
+    * malformed JSON (EXP-20260928-001, django-10924/review: "Expecting ','
+      delimiter: line 2 column 613"). ``json.loads`` fails, but the verdict field
+      itself is intact and parseable by regex.
+    * prose containing the word "APPROVED" before a rejection. The old fallback
+      tested ``"APPROVED" in feedback.upper()[:50]``, so a rejection phrased
+      "This is not APPROVED because..." read as an approval, and an unreviewed
+      patch would ship. That direction is the dangerous one.
+
+    Strategy: take the LAST verdict literal in the text (the final message is the
+    authoritative one), which is insensitive to prose, framing and unrelated JSON
+    breakage. Only when no verdict literal exists at all do we fall back to the
+    keyword scan, and then the default is NEEDS_REVISION -- refusing a patch is
+    safe, shipping an unreviewed one is not.
+    """
     if not feedback:
         return "NEEDS_REVISION"
-    try:
-        data = json.loads(feedback)
-        return data.get("verdict", "NEEDS_REVISION")
-    except json.JSONDecodeError:
-        pass
+    matches = _VERDICT_RE.findall(feedback)
+    if matches:
+        return matches[-1]
+    # No verdict literal. A keyword scan is all that is left, and it must not
+    # approve a rejection that merely mentions the word.
+    if _NEGATED_APPROVAL_RE.search(feedback):
+        return "NEEDS_REVISION"
     return "APPROVED" if "APPROVED" in feedback.upper()[:50] else "NEEDS_REVISION"
 
 

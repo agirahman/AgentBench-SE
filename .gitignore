@@ -67,6 +67,10 @@ docs/*
 !docs/SPIKE_ORACLE_20260929.md
 !docs/PARALLEL_RUN_20260929.md
 
+# Session handoffs: the first thing the next session reads, so losing them to a
+# scratch-files ignore rule would cost more than it saves.
+!docs/HANDOFF_*.md
+
 # Local agent tooling (Command Code config + workstream briefs)
 .commandcode/
 

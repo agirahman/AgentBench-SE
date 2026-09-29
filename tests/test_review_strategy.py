@@ -38,6 +38,69 @@ def test_extract_verdict_defaults_to_revision_for_invalid_json():
     assert _extract_verdict("not-json") == "NEEDS_REVISION"
 
 
+# ---------------------------------------------------------------------------
+# Verdict extraction must survive the shapes the reviewer ACTUALLY produced.
+# Each string below is taken from a recorded run, so these are regressions for
+# observed misreads, not hypothetical ones.
+# ---------------------------------------------------------------------------
+
+def test_extract_verdict_reads_json_after_prose():
+    """EXP-20260929-022 django-11001/review: the reviewer said APPROVED, but only
+    after a paragraph of prose. json.loads() failed on the whole string and the
+    50-char fallback saw prose, so the run took a needless revision round."""
+    response = (
+        "The patch is verified correct against the actual source.\n\n"
+        '**Mechanism confirmed from the code:**\n\n'
+        'Old regex `r\'(.*)\\s(ASC|DESC)(.*)\'` had no DOTALL...\n\n'
+        '{\n  "review_summary": "Verified in compiler.py",\n'
+        '  "issues_found": ["None"],\n'
+        '  "verdict": "APPROVED"\n}'
+    )
+    assert _extract_verdict(response) == "APPROVED"
+
+
+def test_extract_verdict_reads_verdict_from_malformed_json():
+    """EXP-20260928-001 django-10924/review: json.loads() raised
+    "Expecting ',' delimiter: line 2 column 613" -- a missing comma deep inside a
+    long field -- yet the verdict literal was intact."""
+    response = (
+        '{\n  "review_summary": "Verified the mechanism in source"\n'
+        '  "issues_found": ["none"],\n  "verdict": "APPROVED"\n}'
+    )
+    assert _extract_verdict(response) == "APPROVED"
+
+
+def test_extract_verdict_prefers_the_last_verdict():
+    """The final message is authoritative: an early mention must not win."""
+    response = (
+        'I initially wrote "verdict": "APPROVED" but on re-reading the diff\n'
+        'the guard is inverted, so the final answer is\n'
+        '{"verdict": "NEEDS_REVISION"}'
+    )
+    assert _extract_verdict(response) == "NEEDS_REVISION"
+
+
+def test_extract_verdict_does_not_approve_a_negated_mention():
+    """The dangerous direction: a rejection that mentions APPROVED must not read
+    as approval. The old fallback tested `"APPROVED" in text[:50]`, so a reviewer
+    opening with "This is not APPROVED..." would ship an unreviewed patch."""
+    response = "This is not APPROVED: the guard is inverted, so ordering breaks."
+    assert _extract_verdict(response) == "NEEDS_REVISION"
+
+
+def test_extract_verdict_still_approves_when_negation_is_not_of_the_verdict():
+    """Guard against over-correcting: the negation rule must only fire on a
+    negated APPROVED, not on any sentence that happens to contain a negation."""
+    assert _extract_verdict("No issues found. APPROVED.") == "APPROVED"
+    assert _extract_verdict("I cannot find any problem; APPROVED") == "APPROVED"
+
+
+def test_extract_verdict_empty_and_missing_verdict_default_to_revision():
+    assert _extract_verdict("") == "NEEDS_REVISION"
+    # JSON that parses but carries no verdict: refuse rather than assume approval.
+    assert _extract_verdict('{"review_summary": "looks fine"}') == "NEEDS_REVISION"
+
+
 class NeedsRevisionProvider(DummyProvider):
     def generate(self, prompt, role=""):
         self.calls.append((role, prompt))

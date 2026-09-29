@@ -1,13 +1,18 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-09-29 03:00 WIB
-**Status:** `EXP-20260928-003` **sudah dievaluasi** (Modal): direct 8/10, planning 8/10, review 6/10
+**Last Updated:** 2026-09-29 21:40 WIB
+**Status:** Kurva budget **2 dari 3 level selesai** (40 ✅, 100 ✅ 8/9 usable, 200 ❌ abort). Evaluasi Modal level 100 **belum dijalankan**.
 **Active Branch:** `19/toolcall-commandcode`
-**Detail sesi terakhir:** lihat [`HANDOFF_20260928.md`](HANDOFF_20260928.md)
+**Detail sesi terakhir:** lihat [`HANDOFF_20260929.md`](HANDOFF_20260929.md)
 
 > ⛔ **GATE — WAJIB KONFIRMASI USER:** Jangan jalankan run besar (50 issue / multi-jam)
 > tanpa persetujuan eksplisit dari user. Boleh tanpa konfirmasi: unit test, smoke test
 > kecil (≤3 issue, 1 strategi), dan pekerjaan kode/dokumentasi.
+
+> ⚠️ **KOREKSI PENTING (2026-09-29 malam):** klaim lama di dokumen ini — *"perbaikan act
+> revisi BEKERJA, 3× edit_file"* — **SALAH**. Analisis ulang (`tools/analyze_run_anatomy.py`)
+> membuktikan act revisi membuat **0 edit di SEMUA run** (level 40 dan 100). Tiga edit yang
+> dulu kuklaim itu milik **act pertama (base)**, bukan act revisi. Lihat §"Koreksi act revisi".
 
 ---
 
@@ -23,15 +28,19 @@
 | **Budget tool-turn** | ✅ Done | `agents/budget.py` — total sama per strategi, sekarang **40** |
 | **Pre-flight validator** | ✅ Done | `tools/preflight_modal.py` — replikasi kontrak Modal secara lokal |
 | **Rate-limit handling** | ✅ Done | Backoff 429 + circuit breaker |
-| **Test suite** | ✅ Done | **213 lulus** (dari 199) |
-| **Retry vs budget** | ✅ **FIXED** | Retry per-request di dalam loop (commit `dfc9fa8`) |
+| **Test suite** | ✅ Done | **283 lulus** (dari 274) |
+| **Retry vs budget** | ✅ **FIXED** | Retry per-request di dalam tool loop (commit `dfc9fa8`) |
 | **Konteks per turn** | ✅ Done | `TOOL_OUTPUT_MAX_CHARS=2000`, head+tail (dari 8000 head-only) |
 | **Korupsi patch** | ✅ **FIXED** | `_normalize_newlines` merusak diff yang mengandung literal `\n` (commit `3cbd9d1`) |
 | **Evaluasi EXP-003** | ✅ Done | Modal SWE-bench harness: **30/30 patch applied**, hasil di `EVAL_NOTE.md` |
 | **Reviewer oracle** | ⚠️ Terbatas | `run_tests` selalu gagal; reviewer hanya bisa menalar. Spike 2026-09-29: test pre-existing lokal **murah (2–3 s) tapi tidak mendiskriminasi** — lihat `docs/SPIKE_ORACLE_20260929.md` |
-| **Reserve act revisi** | ✅ Done | `REVISION_TOOL_TURNS` — pool terpisah, base flow tetap setara 40/40/40 (default 0 = perilaku lama) |
+| **Reserve act revisi** | ⚠️ **BELUM TERBUKTI** | Plumbing jalan (act dipanggil, executor yang eksekusi), tapi **0 edit di semua run**. Akar: `share()` di per_task tidak mereservasi untuk act revisi |
+| **Verdict parsing** | ✅ **FIXED** | `_extract_verdict` tahan prosa + JSON rusak + negasi; 94 respons diaudit, 0 mismatch |
 | **Race EXP-ID** | ✅ **FIXED** | Lock `O_CREAT\|O_EXCL` + deteksi lock basi; di Windows errno `EACCES`, bukan `EEXIST` |
-| **Split paralel** | ✅ Terverifikasi | `tools/_verify_split.py`: 26 + 24 = 50, overlap 0 |
+| **Split paralel** | ✅ Terverifikasi | `tools/verify_split.py`: 26 + 24 = 50, overlap 0 |
+| **`--resume`** | ✅ **FIXED** | Dulu selalu membuat direktori baru (inert); sekarang `--exp-id` + `--resume` benar-benar melanjutkan |
+| **Config awal run** | ✅ **FIXED** | `experiment.yaml` dulu ditulis setelah run selesai → crash = config hilang; sekarang `on_experiment_start` |
+| **Kurva budget** | ⚠️ 2/3 level | 40 ✅ (dievaluasi), 100 ✅ 8/9 (belum dievaluasi), 200 ❌ abort health check |
 
 ---
 
@@ -136,8 +145,15 @@ Dijalankan dengan `REVISION_TOOL_TURNS=8`, `--instance-ids django__django-11001 
 | Verdict | NEEDS_REVISION → NEEDS_REVISION | NEEDS_REVISION → **APPROVED** |
 | Fix di patch | `r'(.*)[^\S\n](ASC\|DESC)(.*)'` ❌ | `r'(.*)\s(ASC\|DESC)(.*)', re.DOTALL` ✅ |
 | Turn act revisi | **1** (kelaparan) | **4** (`8//2`) |
-| Edit act revisi | 0 edit (2 read) | **1 edit** |
+| Edit act revisi | 0 edit (2 read) | **1 edit** (ke file TEST — di-strip harness, lihat catatan) |
 | Preflight `git apply` | — | **PASS** |
+
+> ⚠️ **Nuansa (ditemukan 2026-09-29 malam):** satu edit act revisi di smoke test ini
+> menyentuh `tests/ordering/tests.py` — file **test**, yang **di-strip harness** sebelum
+> evaluasi. Jadi edit itu **tidak mungkin** mempengaruhi hasil resolved. Klaim
+> *"tanpa reserve, temuan reviewer tidak akan pernah dieksekusi"* tetap benar sebagai
+> pernyataan tentang mekanisme, tapi **bukan** penjelasan kenaikan skor.
+> Verifikasi: `python tools/analyze_run_anatomy.py --exp EXP-20260929-001`.
 
 **Rantai revisi terbukti utuh** (urutan pesan via `tools/analyze_review_sequence.py`):
 1. `orchestrator → reviewer [get_plan,get_patch]` → MSG 7: `NEEDS_REVISION`. Temuan nyata: *"The added test imports RawSQL from `django.db.models`, but `RawSQL` is not re-exported there… The test module will fail at import/collection time, so the regression test does not run."*
@@ -175,16 +191,26 @@ Cap-hit `executor=4` di smoke test **milik act revisi** (act berjalan 11:24:57�
 
 **2/3 resolved untuk KETIGA strategi — seri untuk pertama kalinya.** 9/9 patch lolos kontrak `git apply` Modal; 9/9 `patch_applied: true`. Biaya 9 run: **$0.5724** ($0.0636/run; termahal $0.1584 vs cap $3 → guard tidak pernah menyala).
 
-**Temuan utama: perbaikan act revisi BEKERJA.** `11001/review` sekarang resolved. Verifikasi rantai (`tools/verify_review_11001_resolved.py`):
+#### ⚠️ KOREKSI act revisi (2026-09-29 malam) — klaim lama SALAH
 
-| Bukti | EXP-003 (per_act) | Level 40 (per_task) |
+Klaim lama: *"perbaikan act revisi BEKERJA: 3× `edit_file` di act revisi"*. **Itu salah**, dan analisis ulang membuktikannya.
+
+**Metode yang benar** (`tools/analyze_run_anatomy.py`): act berjalan dalam urutan tetap (planner → executor → reviewer → executor → reviewer), jadi **panggilan reviewer pertama menandai akhir act executor BASE**, dan setiap panggilan executor setelahnya adalah act REVISI.
+
+| Bukti | Level 40 | Level 100 |
 |---|---|---|
-| Urutan act | plan→exec→review→**revisi 1 turn**→re-review | plan→exec→review→**revisi (executor)**→re-review |
-| Edit act revisi | **0** (2× read saja) | **3× `edit_file`** (#13, #19, #20 dari 60 call) |
-| Verdict akhir | NEEDS_REVISION | **APPROVED** |
-| Hasil | ❌ gagal | **✅ resolved** |
+| Run review yang benar-benar menjalankan revisi | 2 dari 3 | 1 dari 3 |
+| **Edit oleh act revisi** | **0** | **0** |
+| Edit oleh act BASE | 3 (11001) / 2 (11019) | 4 (11001) |
+| Turn yang diberikan ke act revisi | **1** (cap) | cukup, tapi tetap 0 edit |
 
-Urutan pesan membuktikan act revisi dieksekusi **executor** (MSG 9: `orchestrator → executor [get_feedback]`), bukan reviewer — sesuai desain. Tool call per agent: planner 9, executor 16 (3 edit), reviewer 35.
+Tiga edit `edit_file` di `11001/review` (call #13, #19, #20) semuanya terjadi **sebelum** panggilan reviewer pertama → itu act **BASE**. Yang resolved adalah patch act base; act revisi hanya sempat 2× `grep` (level 40) atau 6 call read/test/diff tanpa edit (level 100).
+
+**Kenapa 11001 resolved padahal klaimnya salah:** act BASE kebetulan menghasilkan regex yang benar (`re.DOTALL`) di run ini, sedangkan di EXP-003 act base menghasilkan yang salah. **Revisi bukan penyebabnya** — jadi kenaikan 6/10 → 2/3 **bukan bukti** bahwa perbaikan reserve bekerja.
+
+**Akar masalahnya ada di `budget.py`:** di mode `per_task`, `share()` hanya menyisakan floor untuk **act base** yang belum jalan. Act revisi bukan bagian base flow, jadi **tidak ada yang direservasi untuknya**. Di pool 40 act base bisa menghabiskan semuanya → revisi jatuh ke floor 1 turn. Di pool 100 masih ada sisa, tapi tetap tidak mengedit.
+
+**Status jujur:** perbaikan reserve **belum terbukti bekerja**. Yang terbukti hanya plumbing-nya (act revisi benar-benar dipanggil, `inference_count` naik, executor yang menjalankannya — bukan reviewer).
 
 **11019 masih gagal di ketiganya (`TESTS_ERROR`)** — konsisten dengan temuan lama bahwa instance ini mengukur batas budget, bukan strategi. Di level 40 review masih `truncated` di 11001 **dan** 11019 (pool 40 harus menutup 5 act review: plan, exec, review, revisi, re-review). Level 100/200 menguji apakah pool lebih besar mengubahnya.
 
@@ -203,6 +229,67 @@ Urutan pesan membuktikan act revisi dieksekusi **executor** (MSG 9: `orchestrato
 - `patch_status = VALID`, `experiment.yaml` mencatat semua knob kurva
 
 **Koreksi estimasi waktu:** laju terukur **10,9–13,7 s/turn** (bukan asumsi 3,5 menit/run). Kurva jadi **1–6 jam** dengan level 200 mendominasi, bukan ~2,5 jam.
+
+#### ✅ HASIL LEVEL 100 (per_task, floor 10) — `EXP-20260929-022` — **BELUM DIEVALUASI MODAL**
+
+Sweep selesai **240,8 menit** untuk 9 run. **8 dari 9 run usable**; satu mati karena provider.
+
+| Instance | direct | planning | review |
+|---|---|---|---|
+| 10914 | ✅ VALID (27 turn) | ✅ VALID (17) | ✅ VALID (13) |
+| 11001 | ✅ VALID (8) | ✅ VALID (9) | ✅ VALID (9) |
+| 11019 | ✅ VALID (54) | ✅ VALID (7) | ❌ **TIMEOUT — patch KOSONG** |
+
+**`11019/review` mati karena 502 provider** (`fetch failed (cause: ENOTFOUND ... opencode.ai)`), `api_turns=1`, patch 0 karakter. Ini **bukan** kegagalan strategi — ini kegagalan infrastruktur, dan **harus dilaporkan terpisah** (persis konvensi harness SWE-bench: `error` dihitung sendiri, tidak dihapus dari total). Terdeteksi oleh `tools/check_sweep_state.py`.
+
+**Truncation di level 100: 0 dari 8 run yang berguna.** Di level 40 ada **2** (`11001/review`, `11019/review`). Jadi pool 100 memang menghilangkan cap-hit — tapi lihat koreksi act revisi di atas: hilangnya truncation **tidak** membuat revisi mengedit.
+
+#### ❌ LEVEL 200 — TIDAK PERNAH JALAN
+
+```
+level 40  finished rc=0 in  80.1 min
+level 100 finished rc=0 in 240.8 min
+Health check failed — aborting
+level 200 finished rc=0 in   1.9 min   ← nol data
+```
+
+`main.py:298-302` memanggil `provider.health_check()` dan **return lebih awal** kalau gagal. Health check (`opencode_provider.py:67`) menembak `models.list()` lalu satu completion; provider sedang tidak sehat saat itu. **Tidak ada direktori eksperimen yang dibuat** → 0 patch, 0 data.
+
+**Total sweep: 322,8 menit (5,4 jam).** Bukan 2,5 jam seperti estimasi awal.
+
+**Cara menjalankan ulang hanya level 200** (driver mendukungnya):
+```bash
+python tools/run_budget_curve.py --levels 200
+# atau untuk melanjutkan sweep yang terputus:
+python tools/run_budget_curve.py --skip 40 100
+```
+**Sebelum itu, verifikasi provider sehat** — kalau tidak, abort lagi dalam 2 menit.
+
+#### 🐞 Bug verdict parsing — DIPERBAIKI (satu-satunya bug yang mengubah hasil eksperimen)
+
+`_extract_verdict` lama melakukan `json.loads(feedback)` pada **seluruh string**, dan kalau gagal memakai `"APPROVED" in feedback.upper()[:50]`. Reviewer tidak selalu menuruti instruksi "akhiri dengan JSON": kadang **prosa dulu, JSON belakangan**, kadang JSON-nya sedikit rusak.
+
+| Mode gagal | Terjadi di | Efek |
+|---|---|---|
+| **False revision** — prosa dulu, JSON belakangan | EXP-20260927-005, **EXP-20260929-022 (11001/review)** | Reviewer bilang APPROVED, dibaca NEEDS_REVISION → ronde revisi sia-sia |
+| **False approval** — penolakan yang 50 karakter pertamanya memuat "APPROVED" | Belum teramati, tapi kodenya mengizinkan | Patch belum-terverifikasi ikut terkirim |
+
+**Perbaikan:** regex `"verdict"\s*:\s*"([A-Z_]+)"` mengambil verdict **terakhir** di teks (tahan prosa & JSON rusak), plus regex negasi (`not APPROVED`) supaya fallback kata kunci tidak menyetujui penolakan. Default tetap **NEEDS_REVISION** — menolak aman, mengirim patch belum-terverifikasi tidak.
+
+**Verifikasi:** `python tools/analyze_run_anatomy.py --verdicts` → **94 respons diaudit, 0 mismatch** (sebelumnya 3). 7 test baru di `tests/test_review_strategy.py`, memakai teks asli dari data.
+
+#### 🧹 Konsolidasi tooling
+
+22 skrip diagnostik sekali-pakai dihapus, diganti **2 tool permanen**:
+
+| Tool | Fungsi |
+|---|---|
+| `tools/analyze_run_anatomy.py` | Anatomi per-run: urutan act, edit base vs revisi, verdict + mismatch, retry per jenis. `--verdicts` untuk audit parser saja, `--all` untuk semua eksperimen |
+| `tools/check_sweep_state.py` | Status tiap level: predictions, patch kosong, error provider, timing sweep (membuat abort 1,9 menit terlihat) |
+
+#### ⏱️ Retry — angka sebenarnya
+
+Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit delay`**, yaitu jeda sengaja antar-run, **bukan** retry). Angka benar dari log sweep: **10 baris retry**, **2 di antaranya 502 bad gateway sungguhan**. Level 100: 6 model-stall + 5 provider-error.
 
 **3 bug ditemukan saat memantau** (commit `90effea`, semua ada test):
 1. `experiment.yaml` ditulis **setelah** run selesai → crash = konfigurasi hilang, tidak reproducible. Diperbaiki dengan `on_experiment_start` callback (config ditulis sebelum run pertama).
@@ -248,10 +335,14 @@ Urutan pesan membuktikan act revisi dieksekusi **executor** (MSG 9: `orchestrato
 | `COST_LIMIT_USD` | `3.0` | pengaman dolar per task (referensi SWE-agent $3) |
 | `PRICING_MODEL_OVERRIDE` | *(kosong)* | isi `deepseek-v4-flash` → token model gratis dihargai rate card berbayar (**estimasi**) |
 | `TOOL_OUTPUT_MAX_CHARS` | `2000` | cap per hasil tool, head+tail |
-| `MAX_REVISION_TURNS` | `1` | batas revisi |
+| `MAX_REVISION_TURNS` | `1` | batas ronde revisi |
 | `API_TIMEOUT` | `600` | dinaikkan dari 180 |
 | `PROMPT_CACHE_LAYOUT` | `true` | prefix caching terbukti nyata (~90% hit) |
 | `SOURCE_CONTEXT_ENABLED` | `false` | agen eksplorasi pakai tool |
+
+> **Catatan:** `.env` saat ini `BUDGET_MODE=per_act`, `BUDGET_FLOOR_PER_ACT=0`,
+> `REVISION_TOOL_TURNS=8`. Driver kurva **menimpa** nilai-nilai ini per level lewat
+> `run_with_env.py --set`, jadi `.env` tidak berubah saat sweep.
 
 ---
 
@@ -268,6 +359,11 @@ Urutan pesan membuktikan act revisi dieksekusi **executor** (MSG 9: `orchestrato
 6. **Hash repo harus 40 karakter** — cache di `datasets/repos/<owner>/<name>/<commit>`.
 7. **Working tree kotor saat run itu normal** — strategi berbagi satu repo per issue, jadi `git apply --check` gagal di tengah run.
 8. **PowerShell 5.1** tidak mendukung `&&`; kutip bersarang sering gagal parse (tulis ke `.ps1` lalu `-File`). Output `python` yang di-redirect sering jadi UTF-16 — baca filenya, jangan andalkan stdout.
+9. **`Tee-Object`/redirect PowerShell menulis UTF-16LE** — Python yang membacanya sebagai UTF-8 mendapat byte null di setiap karakter lain (`B U D G E T`), sehingga **regex tidak pernah cocok**. Deteksi BOM `\xff\xfe` sebelum decode. Ini pernah membuat watcher melaporkan "1/9" saat 7 run sudah selesai.
+10. **Jangan percaya `patch_status=VALID` sebagai "resolved"** — VALID hanya berarti patch well-formed dan lolos `git apply`. Resolved hanya bisa ditentukan Modal.
+11. **Verifikasi atribusi act sebelum mengklaim penyebab.** Sempat kuklaim "act revisi mengedit 3×" padahal itu act base — karena `tool_calls.jsonl` tidak memisahkan act. Batas act harus direkonstruksi dari urutan role (reviewer pertama = akhir act executor base). Lihat `tools/analyze_run_anatomy.py`.
+12. **`json.loads()` pada seluruh respons model rapuh** — model membungkus JSON dengan prosa atau menghasilkan JSON sedikit rusak. Ekstraksi harus tahan terhadap keduanya, dan default-nya harus **menolak** (aman), bukan menyetujui.
+13. **Health check bisa membatalkan run berjam-jam dalam 2 menit** — dan tetap keluar `rc=0`, jadi sweep menganggapnya sukses. Selalu cek `predictions/*.jsonl` per level, jangan percaya exit code saja.
 
 ---
 
@@ -281,8 +377,11 @@ Urutan pesan membuktikan act revisi dieksekusi **executor** (MSG 9: `orchestrato
 | `src/agents/tools.py` | Definisi tool + guard (termasuk `[tests unavailable]`) |
 | `tools/run_with_env.py` | **Wrapper wajib** — membuat `.env` menang |
 | `tools/preflight_modal.py` | Replikasi kontrak `git apply` Modal secara lokal |
-| `docs/HANDOFF_20260928.md` | **Detail sesi terakhir + plan berikutnya** |
+| `docs/HANDOFF_20260929.md` | **Detail sesi terakhir + plan berikutnya** |
+| `docs/HANDOFF_20260928.md` | Sesi sebelumnya (latar bug retry-reset-budget) |
 | `docs/RUNBOOK.md` | Prosedur menjalankan eksperimen |
+| `tools/analyze_run_anatomy.py` | Anatomi per-run: act, edit base vs revisi, verdict, retry |
+| `tools/check_sweep_state.py` | Status per level kurva; mendeteksi level yang abort |
 
 ---
 
@@ -308,4 +407,10 @@ Urutan pesan membuktikan act revisi dieksekusi **executor** (MSG 9: `orchestrato
 
 ---
 
-**Last working state:** commit `3cbd9d1` + `bca32eb` — 213 test lulus, retry per-request terpasang, budget 40 setara, `TOOL_OUTPUT_MAX_CHARS=2000`, korupsi patch diperbaiki, EXP-20260928-003 30/30 patch APPLYABLE **dan sudah dievaluasi** (direct 8/10, planning 8/10, review 6/10; `results/EXP-20260928-003/EVAL_NOTE.md`).
+**Last working state:** commit `de3c12e` + `ee145e7` — **283 test lulus**. Kurva budget 2 dari 3 level: level 40 dievaluasi Modal (**2/3 ketiga strategi**, `11019` gagal di ketiganya), level 100 punya 8/9 run usable (**belum dievaluasi**), level 200 **abort** (health check).
+
+**Langkah berikutnya (prioritas):**
+1. **Evaluasi Modal level 100** — datanya sudah di disk, ~5 menit, gratis. Ini menjawab apakah kurva sudah datar di dua titik.
+2. **Perbaiki `budget.py`** agar act revisi benar-benar direservasi (di `per_task`, `share()` hanya menyisakan floor untuk act base).
+3. **Jalankan ulang level 200** hanya kalau evaluasi level 100 menunjukkan kurva masih naik.
+4. Putuskan model berbayar (`deepseek-v4-flash`) untuk run final — RQ3 butuh biaya nyata, bukan estimasi. Jalankan **off-peak** (harga 2× saat peak).
