@@ -12,7 +12,7 @@ from providers.system_prompts import (
     READONLY_TOOL_SYSTEM_PROMPT,
     EDITING_ROLES as _EDITING_ROLES,
 )
-from utils.prompt_loader import load_prompt_or_default, load_prompt
+from utils.prompt_loader import load_prompt_or_default, load_prompt, prompt_exists
 
 # Loaded once; identical long prefix prepended to every request when the
 # cache-friendly layout is enabled. Kept out of per-instance template so the
@@ -78,7 +78,10 @@ class BaseAgent(ABC):
             )
             variant = f"{stem}_tools.md"
             loaded = load_prompt_or_default(variant, "")
-            if not loaded:
+            # Ask the filesystem, not the loader: the loader also returns "" when a
+            # test has stubbed it out, and reporting that as "file missing" sends
+            # the reader after a file that is present.
+            if not prompt_exists(variant):
                 warnings.warn(
                     f"PROMPT VARIANT MISSING: agent '{self.name}' is running with "
                     f"tools but '{variant}' does not exist, so it falls back to "

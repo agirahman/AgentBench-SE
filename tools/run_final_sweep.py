@@ -27,13 +27,18 @@ What is deliberately different from the earlier 3-issue runs
    cannot spend without bound on a paid route. The 3-issue RQ3 run used $1.00,
    which was also non-binding; $3 matches the reference.
 
-3. ACT_TIMEOUT_SECONDS=1800.
+3. ACT_TIMEOUT_SECONDS=3600 per act.
 
    A turn budget does not bound duration: with the rate-limit backoff schedule one
-   request can sleep 180s before failing, and a 40-turn act is 41 requests. A
-   single review run was measured at 5,992 s (100 minutes). At 150 runs that is
-   hours of pure waiting, and the rate-limit breaker cannot catch it because the
-   backoff happens inside the tool loop.
+   request can sleep 180s before failing, and a 200-turn act is 201 requests. A
+   single review run was measured at 5,992 s (100 minutes, a 502). This bounds the
+   pathological case while leaving room for an honest long act -- at pool 100 the
+   worst healthy act ran long enough that a 1800s bound would have truncated it.
+
+   NOTE: this is PER ACT, and a review run has up to 3 + 2 x MAX_REVISION_ROUNDS
+   acts (11 with 4 rounds), so a single pathological review run can occupy hours.
+   There is no overall time budget; the savepoint per run means an interrupted sweep
+   can be continued with --resume instead of being restarted.
 
 Cost and time
 -------------
@@ -90,11 +95,26 @@ MODEL = "cbai/deepseek-v4.1-flash"
 TOTAL_TURNS = 200
 #: Turns review sets aside for revising, carved out of TOTAL_TURNS.
 #:
-#: 32 = 4 rounds x 8 turns. Sized from the measured need: in the pilot, acts that
-#: successfully edited used 6-17 turns, so 4 turns per act (the old reserve=8 split
-#: across 2 acts) could never revise anything -- the revision act spent all 4
-#: reading and made 0 edits, and the re-review then approved the unchanged patch.
-REVISION_TURNS = 32
+#: 48 = 4 rounds x 2 acts x 6 turns. The 6 is MEASURED, not chosen: in pilot
+#: EXP-20260930-415 the revision act that actually changed the patch used 6 turns
+#: (2 edits); acts that edited successfully elsewhere used 6-17. A smaller grant
+#: reads files and runs out before editing, which is how the "revision" was
+#: decorative for two earlier experiments.
+#:
+#: An earlier value of 32 was documented as "4 rounds x 8" -- which is arithmetically
+#: impossible: 4 rounds x 2 acts x 8 turns = 64, not 32. At 32 the split for 4 rounds
+#: is 4+4 per round, below the measured 6, so every round would have run out of turns
+#: mid-edit. tools/verify_revision_rounds.py checks this before a sweep.
+REVISION_TURNS = 48
+#: How many revise-and-re-review rounds the reserve above is sized for.
+#:
+#: This MUST be passed explicitly. It was not, and `.env` had MAX_REVISION_TURNS=1,
+#: so a sweep would have run ONE round while the reserve was documented as "4 rounds
+#: x 8" -- measuring a configuration nobody chose, with the arm under-revising.
+#: check_budget_fairness.py could not catch it because it simulates one round, and
+#: the round count is not part of the turn total it verifies. Found by a partner
+#: audit (docs/AUDIT_SCALE_PARTNER.md, area 4 blocker).
+MAX_REVISION_ROUNDS = 4
 #: Guaranteed turns for each act still to come, in per_task mode.
 FLOOR = 10
 #: Dollar backstop per task -- the reference implementations' value ($3).
@@ -147,7 +167,13 @@ def select_issues(limit: int | None) -> list[str]:
     return usable
 
 
-def build_cmd(issues: list[str], strategies: list[str], dry_run: bool) -> list[str]:
+def build_cmd(
+    issues: list[str],
+    strategies: list[str],
+    dry_run: bool,
+    resume: bool = False,
+    exp_id: str | None = None,
+) -> list[str]:
     cmd = [
         sys.executable,
         str(ROOT / "tools" / "run_with_env.py"),
@@ -156,8 +182,12 @@ def build_cmd(issues: list[str], strategies: list[str], dry_run: bool) -> list[s
         "--set", "BUDGET_MODE=per_task",
         "--set", f"BUDGET_FLOOR_PER_ACT={FLOOR}",
         # The reserve that makes the review arm measure review+revision. Carved
-        # out of TOTAL_TOOL_TURNS, so every strategy still gets 40 turns.
+        # out of TOTAL_TOOL_TURNS, so every strategy still gets 200 turns.
         "--set", f"REVISION_TOOL_TURNS={REVISION_TURNS}",
+        # MUST be explicit. Left to .env this was 1, so review ran a single revision
+        # round while the reserve was documented as 4 -- the arm under-revised and
+        # nobody could tell from the turn totals. See MAX_REVISION_ROUNDS above.
+        "--set", f"MAX_REVISION_TURNS={MAX_REVISION_ROUNDS}",
         "--set", f"COST_LIMIT_USD={COST_LIMIT_USD}",
         "--set", f"ACT_TIMEOUT_SECONDS={ACT_TIMEOUT_SECONDS}",
         "--provider", "opencode",
@@ -165,6 +195,19 @@ def build_cmd(issues: list[str], strategies: list[str], dry_run: bool) -> list[s
         "--instance-ids", *issues,
         "--rate-limit", "2.0",
     ]
+    # Resume support. Without these two flags a restart creates a NEW experiment
+    # directory and re-runs all 150 runs -- the completed work is on disk but never
+    # reused, which at ~14 hours and ~$7-11 is the most expensive possible failure
+    # mode. The runner already implements the skip (runner.py:742-750) and main.py
+    # already exposes the flags (main.py:64-80); this wrapper simply was not passing
+    # them through. Found by a partner audit (docs/AUDIT_OPS_PARTNER.md, blocker B1).
+    #
+    # --exp-id is REQUIRED for --resume to mean anything: without it there is no
+    # existing directory to continue.
+    if resume:
+        if not exp_id:
+            raise ValueError("--resume needs --exp-id: there is no directory to resume")
+        cmd += ["--resume", "--exp-id", exp_id]
     if dry_run:
         cmd.append("--dry-run")
     return cmd
@@ -181,7 +224,17 @@ def main() -> int:
     ap.add_argument("--strategies", nargs="*", default=["direct", "planning", "review"])
     ap.add_argument("--issues", nargs="*", default=None,
                     help="explicit instance ids (overrides --limit)")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue an interrupted sweep instead of starting a new one; "
+                         "requires --exp-id")
+    ap.add_argument("--exp-id", default=None,
+                    help="the experiment directory to continue (e.g. EXP-20261001-001)")
     args = ap.parse_args()
+
+    if args.resume and not args.exp_id:
+        print("ERROR: --resume needs --exp-id, otherwise there is nothing to continue.",
+              file=sys.stderr)
+        return 2
 
     if args.issues:
         issues = args.issues
@@ -208,6 +261,9 @@ def main() -> int:
     print(f"  budget     : per_task, total {TOTAL_TURNS} turns per strategy")
     print(f"               direct {TOTAL_TURNS} | planning {TOTAL_TURNS} | "
           f"review {TOTAL_TURNS - REVISION_TURNS}+{REVISION_TURNS} = {TOTAL_TURNS}")
+    print(f"  revision   : up to {MAX_REVISION_ROUNDS} rounds, "
+          f"{REVISION_TURNS} turns reserved "
+          f"({REVISION_TURNS // (2 * MAX_REVISION_ROUNDS)} per act)")
     print(f"  reference  : SWE-bench Pro 200 / mini-SWE-agent 250 / OpenHands 500")
     print(f"               (per task; ours was 40 = 5-12x tighter than all of them)")
     print(f"  cost cap   : ${COST_LIMIT_USD:.2f} per task (backstop, reference value)")
@@ -221,10 +277,31 @@ def main() -> int:
     print(f"               each tool result. Written to artifacts/<instance>/<strategy>/")
     print(f"               trajectory.jsonl (and trajectory.md to read directly).")
     print()
-    print("  Check first: python tools/preflight_repos.py")
-    print()
 
-    cmd = build_cmd(issues, strategies, args.dry_run)
+    # Gate on the preflight instead of printing a reminder. A dirty checkout makes
+    # `git diff` capture changes the agent did not make, which reads in the results
+    # as the agent solving the issue. That is not a visible failure -- it inflates
+    # the scores -- so it has to be blocked before the sweep, not noticed after.
+    # (A partner audit found the state changing between two preflights 25 minutes
+    # apart while the script only printed a reminder.)
+    if not args.dry_run:
+        preflight = ROOT / "tools" / "preflight_repos.py"
+        print("  Running preflight (dirty checkouts would inflate the scores)...")
+        rc = subprocess.call(
+            [sys.executable, str(preflight), "--quiet"],
+            cwd=str(ROOT),
+        )
+        if rc != 0:
+            print()
+            print("  PREFLIGHT FAILED -- not starting the sweep.")
+            print("  Fix with: python tools/clean_repos.py")
+            print("  (Skipping this check would let an agent's patch be credited with")
+            print("   changes that were already in the working tree.)")
+            return 1
+        print("  Preflight OK.")
+        print()
+
+    cmd = build_cmd(issues, strategies, args.dry_run, args.resume, args.exp_id)
     if args.dry_run:
         print("Command:")
         print("  " + " ".join(cmd[1:]))
@@ -243,9 +320,44 @@ def main() -> int:
         "budget_floor_per_act": FLOOR,
         "cost_limit_usd": COST_LIMIT_USD,
         "act_timeout_seconds": ACT_TIMEOUT_SECONDS,
+        "resumed_from": args.exp_id if args.resume else None,
     }
     state_path = ROOT / "logs" / "sweep_started.json"
+
+    # NEVER overwrite a previous attempt's bill window. The window is what lets
+    # `read_actual_bill.py --compare` reconcile our accounting against the real
+    # 9router bill, and an overwritten window means the money already spent cannot
+    # be checked. A resumed attempt therefore APPENDS, and the earlier attempt's
+    # window stays readable. Found by a partner audit
+    # (docs/AUDIT_OPS_PARTNER.md, blocker B2): the write was unconditional.
     state_path.parent.mkdir(parents=True, exist_ok=True)
+    if state_path.exists() and args.resume:
+        try:
+            previous = json.loads(state_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            previous = {}
+        history = previous.get("attempts") or []
+        # Fold the previous top-level attempt into the history if it is not there.
+        if previous.get("started_utc") and not any(
+            a.get("started_utc") == previous.get("started_utc") for a in history
+        ):
+            history.append({
+                k: previous.get(k) for k in
+                ("started_utc", "finished_utc", "elapsed_minutes", "rc", "resumed_from")
+            })
+        state["attempts"] = history
+    elif state_path.exists():
+        # A fresh (non-resume) sweep still must not silently destroy the record of a
+        # previous one; keep it under a dated backup.
+        backup = state_path.with_name(
+            f"sweep_started.{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
+        )
+        try:
+            backup.write_text(state_path.read_text(encoding="utf-8"), encoding="utf-8")
+            print(f"  previous bill window archived: {backup.name}")
+        except OSError as exc:
+            print(f"  WARNING: could not archive the previous window: {exc}")
+
     state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
     print(f"  bill window starts: {state['started_utc']}")

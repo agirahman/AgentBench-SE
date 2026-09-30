@@ -121,7 +121,19 @@ class ToolTurnBudget:
         # looked like a finding ("the patch was already correct") for two
         # experiments before it was measured. Warn instead of discovering it
         # again from a 150-run sweep.
-        if self.mode == "per_task" and self.total > 0 and self.revision_reserve <= 0:
+        #
+        # Only warn when the reserve is zero BECAUSE THE CONFIG SAYS SO. Direct and
+        # planning pass ``with_revisions=False`` and legitimately have no reserve --
+        # they run no revision act, so there is nothing to starve. Warning there
+        # printed "REVISION_TOOL_TURNS=0" on 100 of 150 sweep runs while the setting
+        # was 48, and a warning whose own message is false is worse than silence: it
+        # trains the reader to ignore the one case that matters.
+        if (
+            self.mode == "per_task"
+            and self.total > 0
+            and self.revision_reserve <= 0
+            and Config.REVISION_TOOL_TURNS <= 0
+        ):
             warnings.warn(
                 "BUDGET_MODE=per_task with REVISION_TOOL_TURNS=0: the base acts "
                 "consume the whole pool, so any revision act will be granted the "

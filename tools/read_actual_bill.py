@@ -137,26 +137,15 @@ def main() -> int:
         if not target.exists():
             print(f"  not found: {target}")
         else:
-            stats = json.loads(target.read_text(encoding="utf-8"))
-            ours = None
-            for key in ("total_cost_usd", "total_cost", "cost_usd"):
-                if key in stats:
-                    ours = float(stats[key])
-                    break
-            if ours is None:
-                # Try the per-strategy breakdown.
-                strat = stats.get("strategies") or stats.get("per_strategy") or {}
-                vals = [v.get("total_cost_usd", 0.0) for v in strat.values()
-                        if isinstance(v, dict)]
-                ours = sum(vals) if vals else None
+            ours, how = _our_total_cost(target)
             if ours is None:
                 print(f"  no cost field found in {target.name}; keys: "
-                      f"{list(stats.keys())[:12]}")
+                      f"{list(json.loads(target.read_text(encoding='utf-8')).keys())[:12]}")
             else:
                 delta = ours - total
                 pct = (delta / total * 100) if total else 0.0
                 print(f"  actual bill (9router)  : ${total:.6f}")
-                print(f"  our computed cost      : ${ours:.6f}")
+                print(f"  our computed cost      : ${ours:.6f}   [{how}]")
                 print(f"  difference             : ${delta:+.6f}  ({pct:+.2f}%)")
                 print()
                 if abs(pct) > 25:
@@ -169,6 +158,75 @@ def main() -> int:
                     print("  agreement within 10% -- the card reproduces this run.")
     con.close()
     return 0
+
+
+def _our_total_cost(stats_path: Path) -> tuple[float | None, str]:
+    """Our own total cost for an experiment, and where it came from.
+
+    The per-run CSV is authoritative: it has one row per run with
+    ``cost_usd_actual``. ``generation_statistics.json`` only carries MEANS
+    (``summary.<strategy>.mean_cost_usd_actual``), so a total derived from it needs
+    the run count per strategy, which the statistics file does not state.
+
+    Both shapes are tried, cheapest-to-read first, because this used to look only
+    for a top-level ``total_cost_usd`` that no artefact has ever written -- so
+    ``--compare`` printed "no cost field found" on every experiment (verified on
+    8 of them), and the RQ3 cross-check against the real bill could not run at all.
+    Found by a partner audit (docs/AUDIT_OPS_PARTNER.md, blocker B4).
+    """
+    # 1. The per-run CSV: sum the actual-cost column.
+    csv_path = stats_path.with_name("generation_result.csv")
+    if csv_path.exists():
+        import csv
+
+        try:
+            with csv_path.open(encoding="utf-8", newline="") as fh:
+                rows = list(csv.DictReader(fh))
+        except (OSError, csv.Error):
+            rows = []
+        for column in ("cost_usd_actual", "cost_usd_offpeak", "cost_usd_peak"):
+            if rows and column in rows[0]:
+                try:
+                    vals = [float(r[column]) for r in rows
+                            if r.get(column) not in (None, "")]
+                except (TypeError, ValueError):
+                    continue
+                if vals:
+                    return sum(vals), f"{len(vals)} rows from {csv_path.name}:{column}"
+
+    # 2. Fall back to the statistics file: a top-level total, else means x counts.
+    if stats_path.name != "generation_statistics.json" or not stats_path.exists():
+        return None, ""
+    try:
+        stats = json.loads(stats_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, ""
+
+    for key in ("total_cost_usd", "total_cost", "cost_usd"):
+        if key in stats:
+            try:
+                return float(stats[key]), f"{key} (top level)"
+            except (TypeError, ValueError):
+                pass
+
+    # Means are not totals. Reconstruct with the per-strategy run count when the
+    # file states one, and refuse rather than guess a count.
+    summary = stats.get("summary") or {}
+    counts = stats.get("run_counts") or stats.get("n_runs") or {}
+    total_cost = 0.0
+    used = 0
+    for name, block in summary.items():
+        if not isinstance(block, dict):
+            continue
+        mean = block.get("mean_cost_usd_actual")
+        n = counts.get(name) if isinstance(counts, dict) else None
+        if mean is None or not n:
+            return None, ""
+        total_cost += float(mean) * float(n)
+        used += 1
+    if used:
+        return total_cost, f"{used} strategies: mean_cost_usd_actual x run count"
+    return None, ""
 
 
 if __name__ == "__main__":

@@ -122,6 +122,74 @@ def test_a_present_tool_prompt_does_not_warn():
     )
 
 
+def test_no_false_alarm_when_the_loader_is_stubbed(monkeypatch):
+    """A stubbed loader must not be reported as a missing FILE.
+
+    Six tests replace ``load_prompt_or_default`` with a stub that returns the
+    default, to keep real prompt text out of their assertions. The warning used to
+    fire on that stub, so the suite printed "executor_tools.md does not exist" for a
+    file that has been in the repo since a804e66 -- and the natural reading of that
+    message is "the executor is running a non-tool prompt", which would be a
+    catastrophic defect. It is not. A warning that sends the reader after a
+    nonexistent bug is worse than no warning, because the next real one gets ignored.
+    """
+    from agents.base import BaseAgent
+
+    class _Agent(BaseAgent):
+        name = "executor"
+        prompt_file = "executor.md"
+        default_template = "base"
+
+        def _render(self, task, context, template):
+            return template
+
+    agent = _Agent.__new__(_Agent)
+    agent.prompt_file = "executor.md"
+    agent.template = "base"
+    agent._tool_template_cache = None
+
+    # Simulate the test-stub situation: the loader returns nothing, but the file is
+    # on disk. The warning must stay silent.
+    monkeypatch.setattr(
+        "agents.base.load_prompt_or_default", lambda filename, default="": str(default)
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        agent._tool_template()
+
+
+def test_the_warning_still_fires_for_a_genuinely_absent_file(monkeypatch, tmp_path):
+    """The filesystem check must not silence the REAL case.
+
+    Guards the opposite error: making the warning quiet is only correct if a truly
+    missing variant still reports.
+    """
+    from agents import base as base_mod
+    from utils import prompt_loader
+
+    monkeypatch.setattr(prompt_loader, "PROMPT_DIR", tmp_path)
+    monkeypatch.setattr(base_mod, "prompt_exists", lambda filename: False)
+
+    class _Agent(base_mod.BaseAgent):
+        name = "ghost"
+        prompt_file = "ghost.md"
+        default_template = "base"
+
+        def _render(self, task, context, template):
+            return template
+
+    agent = _Agent.__new__(_Agent)
+    agent.prompt_file = "ghost.md"
+    agent.template = "base"
+    agent._tool_template_cache = None
+
+    with pytest.warns(UserWarning, match="PROMPT VARIANT MISSING"):
+        result = agent._tool_template()
+
+    assert result == "base", "a missing file must still return a usable template"
+
+
 # ------------------------------------------------------ the planner prompt itself
 def test_the_planner_tool_prompt_demands_reading_code_first():
     """The specific instruction whose absence caused 0 tool calls.

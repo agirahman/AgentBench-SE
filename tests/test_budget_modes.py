@@ -260,13 +260,22 @@ def test_no_reserve_keeps_the_legacy_starved_behaviour():
     assert b.share_revision(2) == 1  # the floor: one call, no room to edit
 
 
-def test_per_task_without_a_reserve_warns_that_revisions_will_starve():
+def test_per_task_without_a_reserve_warns_that_revisions_will_starve(monkeypatch):
     """Forgetting the reserve must be LOUD.
 
     A silent 1-turn revision produces a plausible-looking run whose review arm
     cannot revise anything -- the failure mode that cost EXP-20260928-003 an
     instance and went unnoticed for two more experiments.
+
+    The condition is the CONFIG being zero, not the caller passing zero: direct and
+    planning legitimately build a budget with no reserve because they run no revision
+    act, and warning there printed "REVISION_TOOL_TURNS=0" on 100 of 150 sweep runs
+    while the setting was 48. The warning therefore reads Config, so this test sets
+    Config to zero -- the actual misconfiguration.
     """
+    from agents import budget as budget_mod
+
+    monkeypatch.setattr(budget_mod.Config, "REVISION_TOOL_TURNS", 0)
     with pytest.warns(UserWarning, match="REVISION_TOOL_TURNS"):
         ToolTurnBudget(total=40, mode="per_task", floor=10, revision_reserve=0)
 
