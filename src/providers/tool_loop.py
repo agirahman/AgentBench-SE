@@ -99,6 +99,7 @@ def run_tool_loop(
     tools: Optional[list] = None,
     max_tool_turns: Optional[int] = None,
     max_cost_usd: Optional[float] = None,
+    max_wall_seconds: Optional[float] = None,
     repo_root: Optional[str] = None,
     temperature: Optional[float] = None,
     timeout: Optional[int] = None,
@@ -126,9 +127,25 @@ def run_tool_loop(
     marks the result truncated, because an act stopped for cost was cut off for
     exactly the same reason as one stopped for turns: the bound, not the model's
     own judgement, decided where it ended.
+
+    ``max_wall_seconds`` bounds the act in WALL-CLOCK time, which the turn and
+    cost guards do not. A turn budget does not bound duration when every request
+    retries: with RATE_LIMIT_BACKOFF_BASE=60 and MAX_RETRIES=3, one request can
+    wait 60+120 = 180 s before failing, so a 40-turn act could spend over an hour
+    in backoff alone and a three-act strategy over three. Measured: a single
+    review run took 5,992 s (100 min) at pool 40. Across 150 runs that is hours
+    of pure sleeping, and the rate-limit circuit breaker never trips because the
+    backoff happens INSIDE this loop and never surfaces as a failure to the
+    runner. ``None`` keeps the previous unbounded behaviour.
     """
     tools = tools or TOOL_SCHEMAS
     max_tool_turns = max_tool_turns or Config.MAX_TOOL_TURNS
+    # Default the wall-clock bound from config so all three providers inherit it
+    # without each having to thread a new parameter through. Explicit argument
+    # wins; 0 disables.
+    if max_wall_seconds is None:
+        configured = getattr(Config, "ACT_TIMEOUT_SECONDS", 0) or 0
+        max_wall_seconds = configured if configured > 0 else None
     temperature = Config.TEMPERATURE if temperature is None else temperature
     timeout = Config.API_TIMEOUT if timeout is None else timeout
     max_tokens = Config.MAX_TOKENS if max_tokens is None else max_tokens
@@ -149,6 +166,7 @@ def run_tool_loop(
     capped = max_cost_usd is not None
     cost_rates = PricingTable.rates_for(model, "off_peak") if capped else None
     cost_exceeded = False
+    wall_exceeded = False
 
     # Always sync the sandbox to THIS instance's repo root. Passing None resets
     # it to the shared base — never silently reuse a previous instance's root.
@@ -230,6 +248,22 @@ def run_tool_loop(
         return result
 
     for turn in range(1, max_tool_turns + 1):
+        # Wall-clock guard: stop BEFORE starting a turn that would run past the
+        # act's time bound. The turn and cost guards cannot bound duration -- with
+        # retries, one request may sit in backoff for minutes -- so without this a
+        # run can hang for hours while making no progress and never tripping the
+        # runner's rate-limit breaker, which only sees failures that surface.
+        if max_wall_seconds is not None:
+            elapsed_wall = time.perf_counter() - t0
+            if elapsed_wall >= max_wall_seconds:
+                logger.warning(
+                    f"Tool loop hit max_wall_seconds={max_wall_seconds:.0f} for "
+                    f"role={role} after {turn - 1} turn(s) "
+                    f"({elapsed_wall:.0f}s elapsed) -- stopping"
+                )
+                wall_exceeded = True
+                break
+
         # Cost guard: stop BEFORE issuing a request that would exceed the cap.
         # Checked at the top of the turn so the guard bounds what we spend, not
         # what we already spent. Prefix caching makes the check cheap to satisfy
@@ -319,12 +353,17 @@ def run_tool_loop(
                 }
             )
 
-    # Out of turns OR out of money: ask for a final answer WITHOUT tools so the
-    # model cannot call another one and loop again. Either way the act was CUT
-    # OFF by a bound rather than finishing on its own, so both paths mark the
-    # result truncated -- an act stopped by cost is exactly as unattributable to
-    # the strategy as one stopped by turns.
-    if cost_exceeded:
+    # Out of turns, out of money, or out of time: ask for a final answer WITHOUT
+    # tools so the model cannot call another one and loop again. Either way the act
+    # was CUT OFF by a bound rather than finishing on its own, so all paths mark the
+    # result truncated -- an act stopped by cost or by the clock is exactly as
+    # unattributable to the strategy as one stopped by turns.
+    if wall_exceeded:
+        logger.warning(
+            f"Tool loop stopped on wall clock for role={role} "
+            f"(bound {max_wall_seconds:.0f}s, elapsed {time.perf_counter() - t0:.0f}s)"
+        )
+    elif cost_exceeded:
         logger.warning(
             f"Tool loop stopped on cost for role={role} "
             f"(cap ${max_cost_usd}, spent ${_cost_so_far(usage_totals, cost_rates or {}):.4f})"

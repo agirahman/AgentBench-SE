@@ -151,6 +151,23 @@ def classify_summary(
     resolved_ids = set(summary.get("resolved_ids", []))
     error_ids = set(summary.get("error_ids", []))
 
+    # Deduplicate by instance id, keeping the LAST row, before counting anything.
+    #
+    # A retried instance appends a second row to the savepoint, so the file can
+    # hold the same instance twice. The harness deduplicates before evaluating
+    # (it builds a dict), but this function iterated the raw list -- so a retried
+    # instance incremented BOTH resolved_count and the number of rows while
+    # total_count came from the harness's deduplicated count. Two populations,
+    # one ratio: measured at 150% for one duplicate and 200% for a single-instance
+    # file. The headline number of the thesis could exceed 100%.
+    #
+    # Last row wins because that is the newest attempt, matching _merge_csv_rows
+    # in the runner and the harness's own dict build.
+    deduped: dict = {}
+    for pred in predictions_list:
+        deduped[pred[KEY_INSTANCE_ID]] = pred
+    predictions_list = list(deduped.values())
+
     # Prefer the harness's own submitted count; fall back to what we sent.
     total_count = summary.get("submitted_instances") or len(predictions_list)
 
@@ -180,6 +197,19 @@ def classify_summary(
             results.append(row)
         else:
             results.append(enrich_instance_result(inst_id, False, log_dir))
+
+    # Arithmetic guard. resolved_count can never exceed the number of graded
+    # instances, so if it does, the classification is wrong and the headline rate
+    # is nonsense. Failing loudly here is better than emitting a rate above 100%
+    # that a reader might quote: the duplicate-row bug produced exactly that and
+    # was only caught by inspecting the output by hand.
+    if resolved_count > total_count:
+        raise AssertionError(
+            f"classification error: resolved={resolved_count} exceeds "
+            f"total={total_count}. This means an instance was counted more than "
+            f"once; refusing to report a rate above 100%."
+        )
+
     return results, resolved_count, total_count, len(empty_ids), len(error_ids)
 
 

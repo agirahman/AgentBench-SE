@@ -195,6 +195,15 @@ class Config:
     # read-only act (reviewer) to read the plan and the patch and return a
     # verdict, while freeing the executor from the even-split cap.
     BUDGET_FLOOR_PER_ACT = _get_int_env("BUDGET_FLOOR_PER_ACT", 0)
+    # Wall-clock bound for a single act, in seconds. The turn and cost guards do
+    # not bound DURATION: a request that hits a rate limit sleeps
+    # RATE_LIMIT_BACKOFF_BASE * 2^(n-1) capped at RATE_LIMIT_BACKOFF_MAX before
+    # retrying, so a 40-turn act could spend over an hour in backoff alone.
+    # Measured: one review run took 5,992 s (100 min) at pool 40, and 150 runs of
+    # that shape is hours of pure waiting. The rate-limit breaker does not catch it
+    # because the backoff happens inside the tool loop and never surfaces as a
+    # failure to the runner. 0 = unbounded (the previous behaviour).
+    ACT_TIMEOUT_SECONDS = _get_int_env("ACT_TIMEOUT_SECONDS", 1800)
     # Price every run with this model's rate card, whatever model actually served
     # it. Needed because the budget-curve runs use a free testing model whose real
     # rate is $0: without this, all 21 cost columns read 0.00, a dollar cap can

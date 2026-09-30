@@ -110,3 +110,79 @@ def test_no_empty_patches_leaves_both_rates_identical():
     _results, resolved, total, empty, errors = classify_summary(summary, preds, None)
     assert (resolved, total, empty, errors) == (2, 3, 0, 0)
     assert resolved / (total - empty - errors) == resolved / total
+
+
+def test_a_retried_instance_is_not_counted_twice():
+    """A duplicate savepoint row must not produce a rate above 100%.
+
+    A retry after a failure appends a second row for the same instance. The
+    harness deduplicates before evaluating (it builds a dict), but the classifier
+    iterated the raw list: a retried instance incremented BOTH the numerator and
+    the number of rows, while the denominator came from the harness's deduplicated
+    count. Two populations, one ratio -- measured at 150% for a single duplicate.
+
+    This is the headline number of the thesis, so the failure mode is a rate above
+    100% appearing in a results file.
+    """
+    summary = {
+        "submitted_instances": 2,
+        "resolved_ids": ["django__django-10914", "django__django-11019"],
+        "unresolved_ids": [],
+        "empty_patch_ids": [],
+        "error_ids": [],
+    }
+    # 11019 appears twice: first a dead attempt, then the retry that resolved it.
+    preds = _preds(
+        ("django__django-10914", "diff a"),
+        ("django__django-11019", ""),
+        ("django__django-11019", "diff b"),
+    )
+    results, resolved, total, empty, errors = classify_summary(summary, preds, None)
+
+    assert total == 2, "the denominator must be the harness's deduplicated count"
+    assert resolved == 2
+    assert resolved <= total, "resolved can never exceed the graded total"
+    assert resolved / total <= 1.0
+    assert len(results) == 2, f"one row per instance expected, got {len(results)}"
+    ids = [r["instance_id"] for r in results]
+    assert len(ids) == len(set(ids)), f"instance appears more than once: {ids}"
+
+
+def test_the_last_row_wins_for_a_retried_instance():
+    """The newer attempt is the one to report, matching the runner's CSV merge."""
+    summary = {
+        "submitted_instances": 1,
+        "resolved_ids": ["django__django-11019"],
+        "unresolved_ids": [],
+        "empty_patch_ids": [],
+        "error_ids": [],
+    }
+    preds = _preds(
+        ("django__django-11019", ""),          # first attempt: dead
+        ("django__django-11019", "diff good"),  # retry: the real answer
+    )
+    results, resolved, total, _empty, _errors = classify_summary(summary, preds, None)
+
+    assert (resolved, total) == (1, 1)
+    assert len(results) == 1
+    # The dead first attempt must not mark the instance as an empty patch.
+    assert results[0]["failure_reason"] != "EMPTY_PATCH"
+
+
+def test_classifier_refuses_to_report_a_rate_above_100_percent():
+    """A guard, not a fix: if the arithmetic breaks again, fail instead of emitting.
+
+    A rate above 100% is nonsense that a reader might still quote. The duplicate
+    bug produced one and was caught only by inspecting the output by hand, so the
+    invariant is asserted rather than trusted.
+    """
+    summary = {
+        "submitted_instances": 1,
+        "resolved_ids": ["a", "b"],  # harness claims 2 resolved but submitted 1
+        "unresolved_ids": [],
+        "empty_patch_ids": [],
+        "error_ids": [],
+    }
+    preds = _preds(("a", "diff a"), ("b", "diff b"))
+    with pytest.raises(AssertionError, match="exceeds"):
+        classify_summary(summary, preds, None)

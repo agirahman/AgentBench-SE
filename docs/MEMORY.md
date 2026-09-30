@@ -1,9 +1,9 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-09-30 18:15 WIB
-**Status:** **RQ3 (model berbayar) SELESAI** — kurva DATAR di tiga titik (40, 100, berbayar). 11019 terbukti **kegagalan kapabilitas nyata** (gold patch lulus 1/1). Biaya nyata terverifikasi dari bill.
+**Last Updated:** 2026-09-30 18:55 WIB
+**Status:** **Persiapan run 50 issue.** Audit kesiapan oleh 2 partner menemukan **2 BLOCKER** — keduanya sudah diperbaiki + teruji. **BLOCKER kritis ketiga ditemukan sendiri: act revisi kelaparan budget** (0 edit selama 3 eksperimen). 323 test lulus.
 **Active Branch:** `19/toolcall-commandcode`
-**Detail sesi terakhir:** [`HANDOFF_20260929.md`](HANDOFF_20260929.md) · [`AUDIT_PIPELINE_20260930.md`](AUDIT_PIPELINE_20260930.md)
+**Detail sesi terakhir:** [`HANDOFF_20260929.md`](HANDOFF_20260929.md) · [`AUDIT_RUN_READINESS.md`](AUDIT_RUN_READINESS.md) · [`AUDIT_DATA_INTEGRITY.md`](AUDIT_DATA_INTEGRITY.md) · [`AUDIT_PIPELINE_20260930.md`](AUDIT_PIPELINE_20260930.md)
 
 > ⛔ **GATE — WAJIB KONFIRMASI USER:** Jangan jalankan run besar (50 issue / multi-jam)
 > tanpa persetujuan eksplisit dari user. Boleh tanpa konfirmasi: unit test, smoke test
@@ -372,7 +372,63 @@ akuntansi kita $0,298440 → **selisih 1,2%**. Rate card terverifikasi di skala 
 **patch-nya ada dan besar** (7.252 / 5.481 / 3.106 byte) — bukan lagi "tidak ada patch".
 Ketiganya `patch_applied=True`, `failure_reason=TESTS_ERROR`.
 
-##### ✅ 11019 BISA DINILAI — kegagalannya NYATA (gold patch check)
+##### ✅ AUDIT KESIAPAN RUN 50 (2026-09-30) — 3 BLOCKER, semua diperbaiki
+
+Dua partner di-delegasikan audit paralel (read-only): **p7** = jalur RUN, **p8** =
+integritas data/evaluasi. Laporan: `AUDIT_RUN_READINESS.md`, `AUDIT_DATA_INTEGRITY.md`.
+
+**Konvergensi kuat:** kedua partner **independen** menemukan BLOCKER `--resume`
+yang sama. Itu bukan noise — itu bukti.
+
+| # | Temuan | Tingkat | Bukti | Status |
+|---|---|---|---|---|
+| 1 | `--resume` **menghapus** baris lama dari CSV + manifest | **BLOCKER** | Dua partner independen; 3 issue → resume 5 issue → CSV tinggal 2 baris | ✅ **FIXED** |
+| 2 | Backoff rate-limit tak terbatas → satu act bisa menggantung ~2 jam | **BLOCKER** | Run nyata 5.992 s (100 menit); `RATE_LIMIT_CONSECUTIVE_LIMIT` tidak menangkap karena backoff di **dalam** tool loop | ✅ **FIXED** |
+| 3 | **Act revisi kelaparan budget** — 0 edit di 3 eksperimen | **BLOCKER** | `max_tool_turns=1 for role=executor` di log; ditemukan sendiri | ✅ **FIXED** |
+| 4 | Semua kegagalan non-TIMEOUT dilabeli `EMPTY_PATCH`; run mati terbaca `COMPLETED` | SERIUS | `observability.py:11-16` | ✅ **FIXED** |
+| 5 | Retry instance dihitung **dua kali** → rate bisa >100% | **BLOCKER** | p8 eksekusi: 150% terukur | ✅ **FIXED** |
+| 6 | Tidak ada pemeriksaan kelengkapan 150 | MINOR | `runner.py` tidak pernah bandingkan jumlah | ✅ **FIXED** |
+| 7 | 10 instance cache kotor sebelum run | MINOR | `reset_working_tree()` dipanggil per strategi, jadi aman selama run | ⚠️ perlu dibersihkan |
+
+**BLOCKER #3 — temuan terpenting, dan aku menemukannya sendiri:**
+
+`share_revision()` di mode `per_task` **mengabaikan reserve** dengan alasan "pool cukup
+besar". Alasan itu **salah secara desain**: act base **terakhir** mendapat `share(1)` =
+seluruh sisa, jadi pool **kosong tepat saat revisi mulai** → revisi dapat floor **1 turn**
+→ tidak bisa edit.
+
+Terukur: `11019/review` level 40 → `max_tool_turns=1 for role=executor`, revisi 0 edit.
+Ini menjelaskan kenapa "review" tidak pernah merevisi apa pun di **tiga eksperimen** —
+dan kenapa diagnosis awalku ("patch-nya sudah benar") hanya sebagian benar.
+
+**Ini berarti arm `review` belum pernah mengukur review+revisi.** Prasyarat untuk
+klaim apa pun tentang review sebelum run 50.
+
+**Perbaikan:** reserve dihormati di kedua mode + **warning** kalau `per_task` tanpa
+reserve (supaya kelalaian setelan jadi berisik, bukan senyap).
+
+##### Perbaikan yang sudah diverifikasi
+
+| Perbaikan | Verifikasi |
+|---|---|
+| CSV **merge** sebelum tulis (bukan overwrite) | Test regresi **gagal di kode lama** (4 dari 6) → membuktikan test sah |
+| Manifest dibangun dari CSV hasil merge | `total_issues_processed` sekarang benar |
+| Dedupe prediksi + guard `resolved <= total` | Gagal keras kalau aritmatika salah |
+| `INCOMPLETE.json` kalau ada run hilang | Run yang kehilangan data **tidak** keluar seolah sukses |
+| `ACT_TIMEOUT_SECONDS` (default 1800 s) | Guard di **atas** loop; act yang dipotong ditandai `truncated` |
+| Manifest: semua bucket kegagalan + `failure_counts` | Run mati rate-limit tidak lagi `COMPLETED` |
+| `_PATCH_STATUS_FAILED` memuat `RATE_LIMIT`/`PROVIDER_ERROR` | Eksplisit, tidak bergantung kebetulan patch kosong |
+| Reserve revisi dihormati di `per_task` | Revisi dapat 4 turn (bukan 1) |
+
+**323 test lulus** (dari 305). Test baru: `test_resume_data_integrity.py`,
+`test_tool_loop_wall_clock.py`, + kasus dedup di `test_eval_empty_patch.py`,
++ regresi reserve di `test_budget_modes.py`.
+
+**Jebakan metodologis yang tercatat:** dua hipotesisku sendiri **terbantah saat diuji**
+— "78% penolakan karena file test" (asli: **12,5%**) dan "file scratch penyebab 11019"
+(**salah**). Keduanya kucatat supaya tidak diulang.
+
+---
 
 **Pertanyaan:** 8 dari 9 run 11019 gagal dengan `TESTS_ERROR` — bukan kegagalan test
 biasa, tapi **test run-nya sendiri rusak**. Itu pola yang tidak dihasilkan patch salah.

@@ -64,6 +64,7 @@ in practice; the floor is cheap insurance, not a load-bearing rule.
 """
 
 from dataclasses import dataclass, field
+import warnings
 
 from config import Config
 
@@ -87,6 +88,22 @@ class ToolTurnBudget:
         # being like-for-like.
         self.revision_remaining = max(0, self.revision_reserve)
         self.cost_remaining = max(0.0, Config.COST_LIMIT_USD)
+        # A per_task pool without a revision reserve is a trap, not a setting:
+        # the base flow consumes the pool by design, so every revision is
+        # silently granted the floor of 1 turn and cannot edit. That failure
+        # looked like a finding ("the patch was already correct") for two
+        # experiments before it was measured. Warn instead of discovering it
+        # again from a 150-run sweep.
+        if self.mode == "per_task" and self.total > 0 and self.revision_reserve <= 0:
+            warnings.warn(
+                "BUDGET_MODE=per_task with REVISION_TOOL_TURNS=0: the base acts "
+                "consume the whole pool, so any revision act will be granted the "
+                "floor of 1 turn and cannot edit. Set REVISION_TOOL_TURNS >= 8 "
+                "per allowed round (MAX_REVISION_TURNS) for a functional review "
+                "arm. This warning is expected for historical-run reproduction.",
+                UserWarning,
+                stacklevel=2,
+            )
 
     @classmethod
     def from_config(cls) -> "ToolTurnBudget":
@@ -136,17 +153,20 @@ class ToolTurnBudget:
         with tools/analyze_revision_budget.py: reserve=8 with 3 rounds allowed
         grants 4+4 to round 1 and 1+1 to rounds 2 and 3.
 
-        With no reserve configured this is the old behaviour — the base
-        remainder, which is usually the floor of 1 — so historical runs stay
-        reproducible.
+        The reserve is honoured in BOTH modes. ``per_task`` used to ignore it on
+        the theory that "the pool is large enough that a revision draws from it
+        like any other act". That theory was wrong, and measurably so: the base
+        flow is DESIGNED to consume the whole pool — the last base act is granted
+        ``share(1)``, i.e. everything left — so by the time a revision runs,
+        ``remaining`` is 0 and ``share()`` returns the floor of 1 turn. Measured
+        in EXP-20260929-003 (django-11019/review: "Tool loop hit
+        max_tool_turns=1 for role=executor", revision made 0 edits) and again in
+        EXP-20260929-022. A revision granted one turn can make one tool call; if
+        that call is a read, no edit is possible and the round is decorative.
 
-        In per_task mode there is no separate reserve at all: the pool is large
-        enough that a revision simply draws from it like any other act, which is
-        what makes the mode reference-comparable (the references have no notion of
-        a revision allowance). ``revision_reserve`` is therefore ignored.
+        With no reserve configured this is the old behaviour — the base
+        remainder, usually the floor of 1 — so historical runs stay reproducible.
         """
-        if self.mode == "per_task":
-            return self.share(acts_remaining)
         if self.revision_reserve <= 0:
             return self.share(acts_remaining)
         if self.revision_remaining <= 0:
@@ -159,11 +179,6 @@ class ToolTurnBudget:
 
     def spend_revision(self, turns: int) -> None:
         """Record what a revision act cost, drawing down the reserve."""
-        if self.mode == "per_task":
-            # No separate reserve in this mode: the revision is an ordinary draw
-            # on the pool, so it must debit the same counter it borrowed from.
-            self.spend(turns)
-            return
         if self.revision_reserve <= 0:
             # Legacy: revisions share the base pool, so this must stay
             # symmetric with share_revision's fallback.

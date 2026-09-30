@@ -100,15 +100,84 @@ def test_floor_zero_is_a_pure_free_draw():
 
 
 # ------------------------------------------------------------- revision in per_task
-def test_per_task_revision_draws_the_same_pool_not_a_reserve():
-    """No separate reserve exists in this mode: the references have no such notion."""
-    b = ToolTurnBudget(total=100, mode="per_task", floor=10, revision_reserve=8)
-    assert b.share_revision(2) == b.share(2)
-    before = b.remaining
-    b.spend_revision(5)
-    assert b.remaining == before - 5
-    # The reserve counter must stay untouched, or the two would drift apart.
-    assert b.revision_remaining == 8
+def test_per_task_revision_uses_the_reserve_not_the_exhausted_pool():
+    """REGRESSION: per_task used to ignore the reserve and starve every revision.
+
+    The old rule sent a revision to ``share()``, on the theory that the pool is
+    big enough to absorb it. It is not, and by design: the LAST base act is
+    granted ``share(1)`` -- everything left -- so the pool is empty exactly when
+    the revision starts, and ``share()`` returns the floor of 1 turn.
+
+    Measured in EXP-20260929-003 and EXP-20260929-022:
+    "Tool loop hit max_tool_turns=1 for role=executor" on the revision act, which
+    then made 0 edits. A revision with one turn can make one tool call; if that
+    call is a read, the round is decorative and the arm does not measure review.
+
+    This test fails on the old code: share_revision(2) returned share(2), i.e.
+    the whole remainder, instead of the reserve.
+    """
+    b = ToolTurnBudget(total=40, mode="per_task", floor=10, revision_reserve=8)
+    # Base acts spend the pool exactly as designed.
+    for acts_to_come in (3, 2, 1):
+        b.spend(b.share(acts_to_come))
+    assert b.remaining == 0, "the base flow is meant to consume the pool"
+
+    # The revision must still get real room, from the reserve.
+    grant = b.share_revision(2)
+    assert grant == 4, f"revision starved with {grant} turn(s)"
+    assert grant > 1, "one turn cannot both read a file and edit it"
+
+    # And it must debit the reserve, not the (already empty) base pool.
+    b.spend_revision(grant)
+    assert b.revision_remaining == 4
+    assert b.remaining == 0, "the base pool must not be touched by a revision"
+
+
+def test_reserve_is_split_across_every_round_not_front_loaded():
+    """Funding round 1 only would move the starvation to round 2.
+
+    reserve=24 over 3 rounds must give 4 turns per act every round. Funding just
+    the current round's 2 acts would grant 12+12 to round 1 and leave rounds 2 and
+    3 on the floor of 1 -- the same defect, one round later.
+
+    ``acts_remaining`` mirrors the real caller (review_strategy.py:177-182, 206):
+    ``2 * rounds_left`` for the revision, then one less for the re-review that
+    follows it, with ``rounds_left`` counting down. Passing a constant 6 every
+    round is not what the caller does and would over-declare the remaining acts.
+    """
+    b = ToolTurnBudget(total=40, mode="per_task", floor=10, revision_reserve=24)
+    grants = []
+    for rounds_left in (3, 2, 1):
+        rev = b.share_revision(2 * rounds_left)
+        b.spend_revision(rev)
+        rr = b.share_revision(max(1, 2 * rounds_left - 1))
+        b.spend_revision(rr)
+        grants.append((rev, rr))
+    assert grants == [(4, 4), (4, 4), (4, 4)], f"uneven across rounds: {grants}"
+
+
+def test_no_reserve_keeps_the_legacy_starved_behaviour():
+    """Default 0 must stay reproducible for historical runs -- but it IS starved.
+
+    This pins the trap so it cannot regress silently: any run that wants a
+    functional review arm must set REVISION_TOOL_TURNS. The companion test below
+    is the guard that makes forgetting it loud instead of silent.
+    """
+    b = ToolTurnBudget(total=40, mode="per_task", floor=10, revision_reserve=0)
+    for acts_to_come in (3, 2, 1):
+        b.spend(b.share(acts_to_come))
+    assert b.share_revision(2) == 1  # the floor: one call, no room to edit
+
+
+def test_per_task_without_a_reserve_warns_that_revisions_will_starve():
+    """Forgetting the reserve must be LOUD.
+
+    A silent 1-turn revision produces a plausible-looking run whose review arm
+    cannot revise anything -- the failure mode that cost EXP-20260928-003 an
+    instance and went unnoticed for two more experiments.
+    """
+    with pytest.warns(UserWarning, match="REVISION_TOOL_TURNS"):
+        ToolTurnBudget(total=40, mode="per_task", floor=10, revision_reserve=0)
 
 
 def test_per_act_revision_still_uses_the_reserve():

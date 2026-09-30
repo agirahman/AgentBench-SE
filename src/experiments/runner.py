@@ -17,7 +17,7 @@ from models.result import (
     EvaluationResult,
 )
 from models.patch import Patch
-from models.inference import InferenceRun
+from models.inference import InferenceRun, InferenceResult
 from experiments.csv_exporter import flatten_for_csv
 from experiments.swebench_adapter import (
     collect_test_files,
@@ -107,7 +107,21 @@ def _resume_key(instance_id: str, model: str, thinking: bool) -> str:
 #: row is appended with the same resume keys as a success so that a later
 #: --resume can RETRY it; treating it as done would make --resume silently
 #: preserve the failures it exists to recover from.
-_PATCH_STATUS_FAILED = {"TIMEOUT", "ERROR", "FAILED"}
+#:
+#: RATE_LIMIT and PROVIDER_ERROR were added when the error path stopped stamping
+#: every exception "TIMEOUT" (runner.py:493-498), but this set was not updated --
+#: so those two statuses fell outside it. Today ``_is_finished_entry`` still
+#: rejects them via the empty patch, but only by accident of the error path
+#: writing ``model_patch: ""``. If that ever changed, a rate-limited run would be
+#: counted as finished and skipped by every later --resume. The list is the
+#: explicit statement of intent, so it has to name them.
+_PATCH_STATUS_FAILED = {
+    "TIMEOUT",
+    "ERROR",
+    "FAILED",
+    "RATE_LIMIT",
+    "PROVIDER_ERROR",
+}
 
 
 def _is_finished_entry(entry: dict) -> bool:
@@ -164,6 +178,143 @@ def _append_jsonl(jsonl_path: str, entry: dict) -> None:
     """Append 1 baris ke jsonl (savepoint)."""
     with open(jsonl_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def _read_jsonl_entries(jsonl_path: str) -> list[dict]:
+    """Read every parseable row from a savepoint, in order."""
+    entries: list[dict] = []
+    if not os.path.exists(jsonl_path):
+        return entries
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return entries
+
+
+def _merge_csv_rows(csv_path: str, new_rows: list[dict]) -> list[dict]:
+    """Merge this session's rows with the rows already on disk.
+
+    Why this exists: the CSV was written from ``all_results``, which only ever
+    holds runs started in THIS process, and ``to_csv`` overwrites. So a ``--resume``
+    after a crash rewrote ``generation_result.csv`` with only the post-interruption
+    runs and silently dropped everything before it -- while the jsonl savepoints
+    stayed complete. Measured independently by two auditors: a 3-issue first pass
+    followed by a 5-issue resume left the CSV with 2 rows out of 5.
+
+    That is the failure a long sweep cannot tolerate. 50 issues x 3 strategies is
+    ~6 hours and a mid-run interruption is likely, so the recovery path must
+    preserve the paid-for work instead of erasing it.
+
+    Merging at the CSV level (rather than rebuilding from the jsonl savepoints)
+    keeps every recorded column: the savepoints carry only the prediction contract,
+    so a rebuild would report token and cost columns as zero for earlier runs --
+    turning a data-loss bug into a silent data-quality bug.
+
+    Rows are keyed by ``(instance_id, strategy)`` and the NEWEST wins, so a retry
+    after a failure replaces the failed row rather than appearing twice. That
+    deduplication is also what keeps the evaluation wrapper from counting one
+    instance twice (a duplicate row made ``resolved/total`` exceed 100%).
+    """
+    merged: dict[tuple[str, str], dict] = {}
+
+    if os.path.exists(csv_path):
+        try:
+            old = pd.read_csv(csv_path)
+            # The header is written with a leading "[" (a pandas artifact of the
+            # original writer), so strip it before matching column names.
+            old.columns = [str(c).lstrip("[") for c in old.columns]
+            for record in old.to_dict(orient="records"):
+                key = (str(record.get("instance_id")), str(record.get("strategy")))
+                merged[key] = record
+        except Exception as exc:  # noqa: BLE001 - never lose the new rows over this
+            logger.warning(
+                f"Could not read the existing CSV at {csv_path} for merging "
+                f"({type(exc).__name__}: {exc}); writing this session's rows only."
+            )
+
+    for record in new_rows:
+        key = (str(record.get("instance_id")), str(record.get("strategy")))
+        merged[key] = record
+
+    return list(merged.values())
+
+
+def _results_from_flat_rows(rows: list[dict]) -> list[ExperimentResult]:
+    """Rebuild manifest inputs from flattened CSV rows.
+
+    The manifest is built from ``ExperimentResult`` objects, but after a merge the
+    rows for earlier runs exist only as CSV records. Token and timing properties on
+    ``ExperimentResult`` are computed from ``run.inferences``, so the recorded
+    totals are carried by one synthetic ``InferenceResult`` -- that keeps
+    ``total_tokens``, ``execution_time`` and the cost columns faithful to what was
+    originally measured instead of collapsing them to zero.
+
+    Only fields the manifest actually reads are reconstructed; nothing is invented
+    for values the CSV does not carry.
+    """
+    out: list[ExperimentResult] = []
+
+    def _num(value, default=0.0) -> float:
+        try:
+            if value is None or (isinstance(value, float) and pd.isna(value)):
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    for row in rows:
+        patch_preview = str(row.get("patch_preview") or "")
+        synth = InferenceResult(
+            role="rebuilt",
+            response="",
+            usage={
+                "prompt_tokens": int(_num(row.get("input_tokens_total"))),
+                "completion_tokens": int(_num(row.get("output_tokens"))),
+                "total_tokens": int(_num(row.get("total_tokens"))),
+                "cached_tokens": int(_num(row.get("input_tokens_cached"))),
+            },
+            execution_time=_num(row.get("execution_time")),
+            api_turns=int(_num(row.get("total_turns"), 1)) or 1,
+        )
+        run = InferenceRun(patch=patch_preview, inferences=[synth])
+        cost = CostSummary(
+            input_cost_usd=_num(row.get("input_cost_usd_total")),
+            output_cost_usd=_num(row.get("output_cost_usd")),
+            total_cost_usd=_num(row.get("cost_usd_offpeak")),
+            total_cost_idr=_num(row.get("cost_idr_offpeak")),
+            pricing_version=str(row.get("pricing_version") or ""),
+            cached_input_tokens=int(_num(row.get("input_tokens_cached"))),
+            regular_input_tokens=int(_num(row.get("input_tokens_regular"))),
+            cached_input_cost_usd=_num(row.get("input_cost_usd_cached")),
+            regular_input_cost_usd=_num(row.get("input_cost_usd_regular")),
+            peak_total_cost_usd=_num(row.get("cost_usd_peak_total")),
+            peak_total_cost_idr=_num(row.get("cost_idr_peak_total")),
+            actual_cost_usd=_num(row.get("cost_usd_actual")),
+            actual_cost_idr=_num(row.get("cost_idr_actual")),
+        )
+        result = ExperimentResult(
+            instance_id=str(row.get("instance_id") or ""),
+            strategy=str(row.get("strategy") or ""),
+            model=str(row.get("model") or ""),
+            execution=ExecutionResult(run=run),
+            cost=cost,
+            evaluation=EvaluationResult(
+                success=bool(row.get("generated")),
+                error=str(row.get("error") or "") if not pd.isna(row.get("error")) else "",
+                timestamp=str(row.get("timestamp") or ""),
+            ),
+            difficulty=str(row.get("difficulty") or ""),
+            patch_status=str(row.get("patch_status") or ""),
+            apply_status=str(row.get("apply_status") or ""),
+        )
+        out.append(result)
+    return out
 
 
 def run_experiments(
@@ -552,11 +703,29 @@ def run_experiments(
     # --- Final exports ---
     # "generation_" prefix disambiguates phase-1 outputs from the eval-phase
     # files that report_generator writes under eval/ (results.csv, statistics.json).
-    rows = [flatten_for_csv(r) for r in all_results]
-    df = pd.DataFrame(rows)
+    #
+    # MERGE with whatever is already on disk before writing. all_results holds only
+    # the runs started in this process, so overwriting here dropped every earlier
+    # row when --resume was used -- see _merge_csv_rows. A fresh run has no old CSV
+    # and merges to exactly its own rows, so this is a no-op in the normal case.
     csv_path = f"{exp_dir}/generation_result.csv"
+    new_rows = [flatten_for_csv(r) for r in all_results]
+    merged_rows = _merge_csv_rows(csv_path, new_rows)
+    df = pd.DataFrame(merged_rows)
     df.to_csv(csv_path, index=False)
-    logger.success(f"CSV exported: {csv_path}")
+    logger.success(f"CSV exported: {csv_path} ({len(df)} rows)")
+
+    if len(df) > len(new_rows):
+        logger.info(
+            f"  (merged {len(df) - len(new_rows)} row(s) recorded by an earlier "
+            f"session in this experiment directory)"
+        )
+
+    # The manifest and the pre-eval report are built from ExperimentResult objects.
+    # After a merge, earlier runs exist only as CSV rows, so rebuild them from the
+    # merged frame: otherwise the manifest would claim fewer issues processed than
+    # the CSV contains -- the "shipping receipt" disagreeing with the shipment.
+    manifest_results = _results_from_flat_rows(merged_rows)
 
     stats_path = f"{exp_dir}/generation_statistics.json"
     model_name = df["model"].iloc[0] if len(df) else provider_name
@@ -577,7 +746,7 @@ def run_experiments(
         provider_name=provider_name,
         experiment_id=exp_id,
         output_dir=str(exp_dir),
-        results=all_results,
+        results=manifest_results,
         agents=agents,
     )
     manifest_path = f"{exp_dir}/manifest.json"
@@ -589,6 +758,57 @@ def run_experiments(
         strat_jsonl = str(pred_dir / f"{strat_name}.jsonl")
         count = sum(1 for _ in open(strat_jsonl, "r", encoding="utf-8") if _.strip())
         logger.success(f"Per-strategy predictions: {strat_jsonl} ({count} entries)")
+
+    # --- Completeness check ---
+    # Nothing used to compare the number of finished runs against the number
+    # planned, so a sweep that silently lost runs still reported success. At 50
+    # issues x 3 strategies a missing instance is easy to miss by eye and
+    # expensive to discover after the analysis is written.
+    expected_total = len(issues) * len(strategies)
+    finished_total = 0
+    missing: list[str] = []
+    for strat_name in strategies:
+        strat_jsonl = str(pred_dir / f"{strat_name}.jsonl")
+        finished_here = {
+            entry.get("instance_id")
+            for entry in _read_jsonl_entries(strat_jsonl)
+            if _is_finished_entry(entry)
+        }
+        finished_total += len(finished_here)
+        for issue in issues:
+            if issue.instance_id not in finished_here:
+                missing.append(f"{strat_name}:{issue.instance_id}")
+
+    if finished_total == expected_total:
+        logger.success(
+            f"Completeness: {finished_total}/{expected_total} finished runs recorded."
+        )
+    else:
+        logger.error(
+            f"Completeness: {finished_total}/{expected_total} finished runs recorded "
+            f"-- {len(missing)} run(s) did NOT complete."
+        )
+        for entry in missing[:20]:
+            logger.error(f"    incomplete: {entry}")
+        if len(missing) > 20:
+            logger.error(f"    ... and {len(missing) - 20} more")
+        logger.error(
+            "  Re-run with --resume to finish the incomplete runs before analysing."
+        )
+        # Persist the shortfall so a downstream reader cannot mistake this for a
+        # complete sweep just because the process exited 0.
+        completeness = {
+            "expected": expected_total,
+            "finished": finished_total,
+            "missing": missing,
+            "complete": False,
+        }
+        try:
+            Path(f"{exp_dir}/INCOMPLETE.json").write_text(
+                json.dumps(completeness, indent=2), encoding="utf-8"
+            )
+        except OSError as exc:
+            logger.warning(f"Could not write INCOMPLETE.json: {exc}")
 
     if skipped:
         logger.info(f"Resume: skipped {skipped} already-completed entries")
