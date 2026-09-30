@@ -49,6 +49,9 @@ _*.txt
 _*.json
 # Scratch scripts agents write into the repo root during an audit.
 .audit_*.py
+# The same thing for a verification pass: probe scripts and their captured
+# output. A `git add -A` picked these up once and they had to be unstaged.
+.verify_*
 
 # doc
 docs/*

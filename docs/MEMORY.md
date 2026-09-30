@@ -407,6 +407,44 @@ klaim apa pun tentang review sebelum run 50.
 **Perbaikan:** reserve dihormati di kedua mode + **warning** kalau `per_task` tanpa
 reserve (supaya kelalaian setelan jadi berisik, bukan senyap).
 
+##### ⚠️ KEPUTUSAN TERBUKA: reserve revisi membuat total budget TIDAK SAMA
+
+Perbaikan reserve (#3) memunculkan konsekuensi desain yang **harus diputuskan sadar**,
+bukan ditemukan belakangan di hasil. Diukur dengan `tools/check_budget_fairness.py`:
+
+| Strategi | Act base | Base | Revisi | **TOTAL** |
+|---|---|---|---|---|
+| direct | 40 | 40 | 0 | **40** |
+| planning | 30+10 | 40 | 0 | **40** |
+| review | 20+10+10 | 40 | **8** | **48** |
+
+**Base flow tetap setara (40/40/40)** — itu yang dijamin desain. Tapi **total** review
+bisa 48 (20% lebih), karena reserve adalah allowance **tambahan**, bukan potongan pool.
+
+**Konsekuensi untuk tesis:**
+
+- **RQ1 (efektivitas):** kalau `review` menang, kemenangan itu **tidak bisa diatribusikan
+  ke strategi saja** — dia punya budget lebih besar. Harus dilaporkan bersama totalnya.
+  Kalau `review` **kalah**, itu tetap informatif: gagal **dengan** ruang lebih.
+- **RQ2 (efisiensi):** terdampak langsung — turn/token review diukur terhadap allowance
+  yang lebih besar.
+- **RQ3 (biaya):** biaya review naik saat revisi jalan. Itu **nyata** dan boleh dilaporkan
+  sebagai biaya struktural strategi.
+
+**Opsi (semua defensible kalau dinyatakan):**
+
+| Opsi | Isi | Trade-off |
+|---|---|---|
+| **(a)** Terima | Laporkan base=40 + 8 tambahan review sebagai biaya struktural | Paling jujur soal realita; tapi RQ1 perlu kualifikasi |
+| **(b)** Samakan total | Naikkan `--total` direct/planning jadi 48 | Perbandingan bersih; tapi angka "40" di kurva tidak lagi sama |
+| **(c)** reserve=0 | Tetap seperti 3 eksperimen lalu | Jujur, tapi **review tidak diukur sama sekali** |
+
+**Catatan penting:** hanya opsi (c) yang dilakukan tiga eksperimen di disk. **Setiap angka
+`review` yang ada sekarang berasal dari run yang act revisinya dapat 1 turn** — jadi tidak
+ada satu pun yang benar-benar mengukur review.
+
+---
+
 ##### Perbaikan yang sudah diverifikasi
 
 | Perbaikan | Verifikasi |
