@@ -7,9 +7,8 @@ that 20-turn cap on all three instances — it was cut off mid-exploration and
 forced to answer without tools — so its numbers measured the budget rather than
 the strategy, and the three strategies were not comparable.
 
-``ToolTurnBudget`` gives every strategy the same BASE TOTAL (``Config.TOTAL_TOOL_TURNS``)
-and splits it across the base acts, so the base flow of each strategy adds up to
-the same number:
+``ToolTurnBudget`` gives every strategy the same TOTAL (``Config.TOTAL_TOOL_TURNS``)
+for the whole task, and splits it across the acts:
 
     direct    1 act            -> 40
     planning  planner+executor -> 20 + 20
@@ -17,25 +16,24 @@ the same number:
 
 Two pools, because a revision is not part of the base flow:
 
-* **base pool** — ``total``, split across the base acts. Every strategy's base
-  flow adds up to exactly this, which is what makes the comparison fair.
+* **base pool** — what is left of ``total`` after the reserve is carved out.
 * **revision pool** — ``revision_reserve``, only ever drawn by review's revision
   acts. It defaults to 0 (legacy behaviour: revisions draw the base remainder
   and get a floor of 1 turn).
 
-⚠️ **The GRAND total is therefore NOT equal — only the base flow is.** With
-``total=40`` and ``revision_reserve=8``:
+**The reserve is CARVED OUT of ``total``, not added on top of it.** That is what
+keeps the comparison fair, and it was a deliberate correction: an earlier version
+treated the reserve as an extra allowance, so review could consume
+``total + revision_reserve`` — 48 turns against direct's and planning's 40, a 20%
+advantage that would confound any claim that review is the better strategy.
 
-    direct     40 base              -> 40
-    planning   40 base              -> 40
-    review     40 base + 8 revision -> 48
+The trade is explicit and worth stating: totals are now equal (40/40/40) and the
+BASE flows are not (40/40/32). Review has to leave room for its own revision out
+of the same allowance, exactly as a person budgeting 40 actions would. The
+question the experiment answers is therefore "given the same 40 turns, which
+strategy does best?", and a review that never needs to revise simply spends less.
 
-The reserve is an extra allowance, not a slice of the base pool, so review may
-consume 20% more turns. That is a real confound for comparing the three
-strategies (RQ1 effectiveness, RQ2 efficiency) and has to be REPORTED, not
-assumed away. ``tools/check_budget_fairness.py`` prints the numbers and the three
-options: accept it and state it, raise ``total`` for direct/planning to match, or
-keep ``reserve=0`` and admit the review arm cannot revise at all.
+``tools/check_budget_fairness.py`` prints the split and asserts the totals match.
 
 The separate pool exists because of what EXP-20260928-003 measured. Review's
 base acts spent the whole base pool, so the revision act was granted the floor
@@ -46,10 +44,9 @@ candidate the strategy shipped the rejected initial patch. direct and planning,
 which have no revision overhead, both shipped ``re.DOTALL`` and resolved.
 
 Charging the revision to the base pool made review's extra act a punishment: it
-could not act on its own review. The reserve keeps the base flow equal across
-strategies while giving the revision act a usable allowance. Any run using it
-must report the extra turns, since review's total is then ``total +
-revision_reserve``.
+could not act on its own review. Carving the reserve out of the task budget gives
+the revision act a usable allowance WITHOUT giving review more turns than anyone
+else.
 
 ``mode="per_task"`` — the reference-compatible rule
 ---------------------------------------------------
@@ -96,11 +93,27 @@ class ToolTurnBudget:
     cost_remaining: float = field(init=False)
 
     def __post_init__(self) -> None:
-        self.remaining = self.total
-        # The reserve is a separate allowance, not a slice of ``total``: the
-        # base flow must stay equal across strategies or the comparison stops
-        # being like-for-like.
-        self.revision_remaining = max(0, self.revision_reserve)
+        # The reserve is CARVED OUT of ``total`` rather than added to it, so the
+        # whole task still costs exactly ``total`` turns for every strategy:
+        #
+        #     direct    40 base              -> 40
+        #     planning  40 base              -> 40
+        #     review    32 base + 8 revision -> 40
+        #
+        # An earlier version added it on top, giving review 48 turns against 40
+        # for the others. A 20% larger budget would confound any claim that review
+        # is the more effective strategy -- the confound the per-task design
+        # exists to remove.
+        #
+        # A reserve larger than the pool would leave the base acts with nothing;
+        # clamp so the base flow always has room to work, and let the revision
+        # draw whatever is genuinely spare.
+        reserve = max(0, self.revision_reserve)
+        if reserve >= self.total > 0:
+            reserve = max(0, self.total // 4)
+        self.revision_reserve = reserve
+        self.remaining = max(0, self.total - reserve) if self.total > 0 else 0
+        self.revision_remaining = reserve
         self.cost_remaining = max(0.0, Config.COST_LIMIT_USD)
         # A per_task pool without a revision reserve is a trap, not a setting:
         # the base flow consumes the pool by design, so every revision is
@@ -119,11 +132,34 @@ class ToolTurnBudget:
                 stacklevel=2,
             )
 
+    @property
+    def task_total(self) -> int:
+        """The whole task's allowance: base remainder plus what the reserve holds.
+
+        Equals ``total`` by construction, and exists so a caller can report the
+        task budget without having to remember that the reserve was carved out of
+        it. Reporting ``total`` directly would be right; reporting ``remaining``
+        would look like review was short-changed when it simply had not spent yet.
+        """
+        return self.remaining + self.revision_remaining
+
     @classmethod
-    def from_config(cls) -> "ToolTurnBudget":
+    def from_config(cls, with_revisions: bool = False) -> "ToolTurnBudget":
+        """Build the task budget.
+
+        ``with_revisions`` must be True ONLY for a strategy that actually has
+        revision acts (review). The reserve is carved out of ``total``, so
+        requesting it reduces the BASE pool: that is correct for review, which
+        spends part of its allowance on revising, and wrong for direct and
+        planning, which have no revision act and would simply lose 8 turns.
+
+        Getting this wrong is not a small mistake: carving the reserve out for
+        everyone gives direct and planning 32 turns while review gets 40, which is
+        the same unfairness as the bug this replaced, pointing the other way.
+        """
         return cls(
             total=Config.TOTAL_TOOL_TURNS,
-            revision_reserve=Config.REVISION_TOOL_TURNS,
+            revision_reserve=Config.REVISION_TOOL_TURNS if with_revisions else 0,
             floor=Config.BUDGET_FLOOR_PER_ACT,
             mode=Config.BUDGET_MODE,
         )

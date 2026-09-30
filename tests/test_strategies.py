@@ -181,15 +181,19 @@ def test_direct_is_not_starved_by_its_single_agent(issue, tool_provider):
 def test_revision_act_gets_a_usable_share_from_the_reserve(issue, monkeypatch):
     """The measured failure: review's revision act was granted 1 turn.
 
-    EXP-20260928-003, django-11001. The base flow spent the whole 40-turn pool,
-    so ``budget.share(2)`` for the revision returned the floor of 1. The revision
+    EXP-20260928-003, django-11001. The base flow spent the whole pool, so
+    ``budget.share(2)`` for the revision returned the floor of 1. The revision
     made two read_file calls and no edit, the re-review rejected the unchanged
     patch, and review shipped the initial (rejected) patch while direct and
     planning both resolved the issue with ``re.DOTALL``.
 
     This pins the fix end-to-end through the strategy: with a reserve the
-    revision act must be granted more than the floor, and the base acts must
-    still add up to the same 40 turns the other strategies get.
+    revision act must be granted more than the floor.
+
+    The reserve is carved OUT of the task pool, so the base acts total 40 - 8 =
+    32 here and review's whole task still costs 40 turns -- the same as direct and
+    planning. The earlier design kept the base flow at 40 and let the reserve be
+    extra, which gave review 48 turns and confounded the comparison.
     """
     from agents import base as base_mod
     from agents import budget as budget_mod
@@ -214,13 +218,24 @@ def test_revision_act_gets_a_usable_share_from_the_reserve(issue, monkeypatch):
         granted.setdefault(role, []).append(turns)
 
     base_total = granted["planner"][0] + granted["executor"][0] + granted["reviewer"][0]
-    assert base_total == 40, f"base flow must still total 40, got {base_total}"
+    assert base_total == 32, (
+        f"review's base flow must be 40 - 8 reserve = 32, got {base_total}"
+    )
 
     # The revision act is the executor's SECOND call; the re-review follows it.
     revision_grant = granted["executor"][1]
     assert revision_grant > 1, (
         f"revision was granted {revision_grant} turn(s) — the floor that starved "
         f"django-11001; it cannot edit with that"
+    )
+
+    # The whole task must still fit the budget the other strategies get.
+    total_granted = base_total + revision_grant
+    re_review_grant = granted["reviewer"][1] if len(granted["reviewer"]) > 1 else 0
+    total_granted += re_review_grant
+    assert total_granted <= 40, (
+        f"review was granted {total_granted} turns in total, above the 40 every "
+        f"strategy is supposed to get"
     )
 
 

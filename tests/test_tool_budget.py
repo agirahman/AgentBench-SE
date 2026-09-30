@@ -89,31 +89,41 @@ def test_spend_ignores_negative_and_zero():
     assert budget.remaining == 40
 
 
-def test_base_pool_stays_equal_when_a_revision_reserve_exists():
-    """The reserve must not shrink the base flow, or the comparison breaks.
+def test_task_total_stays_equal_when_a_revision_reserve_exists():
+    """THE fairness invariant: every strategy's TASK budget must be identical.
 
-    A revision is review-only; if it were paid for out of the base pool, review
-    would start every run with less room than direct and planning — measuring
-    the budget again, which is the bug the pool was introduced to fix.
+    Superseded rule, kept here so the reversal is not mistaken for a regression:
+    an earlier design held the BASE flow equal (40/40/40) and let the reserve be
+    extra, so review could spend 48 turns against direct's 40. That 20% advantage
+    would confound any claim that review is the more effective strategy, which is
+    the confound the per-task design exists to remove.
+
+    The user chose equal TOTALS instead, so the reserve is carved out of the pool:
+    totals are 40/40/40 and review's base flow is 32 because it sets 8 aside to
+    revise with. The question the experiment answers becomes "given the same 40
+    turns, which strategy does best?" -- and a review that never revises simply
+    spends less than its allowance.
     """
     for reserve in (0, 8, 20):
-        direct = ToolTurnBudget(total=40, revision_reserve=reserve)
+        direct = ToolTurnBudget(total=40, revision_reserve=0)
+        assert direct.task_total == 40, "nothing spent yet, so the whole budget remains"
         assert direct.share(1) == 40
 
-        planning = ToolTurnBudget(total=40, revision_reserve=reserve)
+        planning = ToolTurnBudget(total=40, revision_reserve=0)
+        assert planning.task_total == 40
         planner = planning.share(2)
         planning.spend(planner)
         executor = planning.share(1)
         assert (planner, executor) == (20, 20)
 
         review = ToolTurnBudget(total=40, revision_reserve=reserve)
-        shares = []
-        for remaining in (3, 2, 1):
-            grant = review.share(remaining)
-            review.spend(grant)
-            shares.append(grant)
-        assert shares == [13, 13, 14]
-        assert review.remaining == 0
+        assert review.task_total == 40, (
+            f"with reserve={reserve} review's task budget is {review.task_total}, "
+            f"not 40 -- the reserve must be carved out, not added on top"
+        )
+        assert review.remaining == 40 - reserve, (
+            "the reserve comes out of the base pool"
+        )
 
 
 def test_revision_reserve_is_not_starved_by_a_spent_base_pool():
@@ -127,7 +137,7 @@ def test_revision_reserve_is_not_starved_by_a_spent_base_pool():
     budget = ToolTurnBudget(total=40, revision_reserve=8)
     for remaining in (3, 2, 1):
         budget.spend(budget.share(remaining))
-    assert budget.remaining == 0
+    assert budget.remaining == 0, "the base acts use their whole (carved-out) pool"
 
     # 8 reserve split across the revision and the re-review that follows it.
     revision_share = budget.share_revision(2)
@@ -138,12 +148,19 @@ def test_revision_reserve_is_not_starved_by_a_spent_base_pool():
 
 
 def test_revision_reserve_does_not_extend_the_base_pool():
-    """Spending the reserve must not hand turns back to the base acts."""
+    """Spending the reserve must not hand turns back to the base acts.
+
+    The reserve is review's own set-aside, so exhausting it leaves the base acts
+    where they were -- and vice versa: a revision cannot borrow from the base
+    pool, or the totals would drift apart again.
+    """
     budget = ToolTurnBudget(total=40, revision_reserve=8)
-    budget.spend(40)
-    budget.spend_revision(4)
+    # The base pool is the total minus the reserve.
+    budget.spend(budget.remaining)
     assert budget.remaining == 0
-    assert budget.share(1) == 1
+    budget.spend_revision(4)
+    assert budget.remaining == 0, "a revision must not refill the base pool"
+    assert budget.share(1) == 1, "an exhausted base pool grants only the floor"
     assert budget.revision_used == 4
     assert budget.revision_remaining == 4
 

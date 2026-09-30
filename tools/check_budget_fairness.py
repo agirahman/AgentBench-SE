@@ -28,21 +28,25 @@ from agents.budget import ToolTurnBudget  # noqa: E402
 
 
 def simulate(total: int, floor: int, reserve: int, mode: str = "per_task") -> dict:
-    """Run each strategy's act sequence to completion and report what it drew.
+    """Run each strategy's act sequence and report what it drew.
 
     Every act takes its whole grant (the worst case for fairness: nobody leaves
     anything behind), which is what actually happened in the recorded runs -- the
     truncation warnings show acts using their full allowance.
+
+    ``with_revisions`` mirrors the callers: only review has revision acts, so only
+    review carves the reserve out of its pool. Requesting it for direct or planning
+    would cost them turns for acts they never run.
     """
     out = {}
 
     # direct: one act draws the whole pool.
-    b = ToolTurnBudget(total=total, floor=floor, mode=mode, revision_reserve=reserve)
+    b = ToolTurnBudget(total=total, floor=floor, mode=mode, revision_reserve=0)
     direct_grant = b.share(1)
     out["direct"] = {"acts": [direct_grant], "total": direct_grant}
 
     # planning: planner then executor.
-    b = ToolTurnBudget(total=total, floor=floor, mode=mode, revision_reserve=reserve)
+    b = ToolTurnBudget(total=total, floor=floor, mode=mode, revision_reserve=0)
     acts = []
     for acts_to_come in (2, 1):
         grant = b.share(acts_to_come)
@@ -104,46 +108,47 @@ def main() -> None:
     grand_totals = {n: sim[n]["total"] for n in sim}
 
     print()
-    print("  BASE FLOW (the comparable part)")
-    uniq_base = set(base_totals.values())
-    if len(uniq_base) == 1:
-        print(f"    all three strategies spend exactly {base_totals['direct']} "
-              f"turns on their base acts -> like-for-like")
-    else:
-        print(f"    UNEQUAL: {base_totals}")
-
-    print()
-    print("  GRAND TOTAL (what the run actually consumes)")
+    print("  GRAND TOTAL (what the run actually consumes) -- THIS is the invariant")
     uniq_grand = set(grand_totals.values())
     if len(uniq_grand) == 1:
-        print(f"    all three spend {grand_totals['direct']} -> fair on total too")
+        print(f"    all three spend exactly {grand_totals['direct']} turns -> FAIR")
+        print()
+        print("    The reserve is carved out of the pool, not added on top, so a")
+        print("    review win cannot be explained by a larger budget. The question")
+        print("    the experiment answers is: given the same turns, which strategy")
+        print("    does best?")
     else:
         print(f"    UNEQUAL: {grand_totals}")
-        extra = grand_totals["review"] - grand_totals["direct"]
-        pct = extra / grand_totals["direct"] * 100 if grand_totals["direct"] else 0
-        print(f"    review may consume {extra} more turn(s) ({pct:.0f}%) than "
-              f"direct/planning")
+        spread = max(grand_totals.values()) - min(grand_totals.values())
+        print(f"    a {spread}-turn advantage would confound any strategy comparison")
+
+    print()
+    print("  BASE FLOW (expected to differ -- review pays for its own revision)")
+    uniq_base = set(base_totals.values())
+    if len(uniq_base) == 1:
+        print(f"    all three spend {base_totals['direct']} on base acts")
+    else:
+        print(f"    {base_totals}")
+        print(f"    review's base flow is smaller by the reserve "
+              f"({grand_totals['review'] - base_totals['review']} turns): it sets that")
+        print("    aside for revising, out of the same allowance. This is the")
+        print("    intended trade, not a defect -- review that never revises simply")
+        print("    spends less than its budget.")
         print()
         print("    CONSEQUENCE for the thesis:")
-        print("      * A review WIN cannot be attributed to the strategy alone --")
-        print("        it had a larger budget. Report the total alongside the rate.")
-        print("      * A review LOSS is still informative: it failed WITH more room.")
-        print("      * RQ2 (efficiency) is affected directly: review's turn and")
-        print("        token counts are measured against a bigger allowance.")
-        print()
-        print("    Options, all defensible if stated:")
-        print(f"      (a) accept it and report base={base_totals['direct']} "
-              f"plus review's extra {extra} as a structural cost of the strategy")
-        print(f"      (b) raise --total for direct/planning to "
-              f"{grand_totals['review']} so all three match")
-        print("      (c) keep reserve=0 and report that the review arm cannot revise")
-        print("          -- honest, but then 'review' is not being measured")
+        print("      * RQ1: totals are equal, so a review WIN or LOSS is attributable")
+        print("        to the strategy rather than to a bigger budget.")
+        print("      * RQ2: turn/token counts are directly comparable.")
+        print("      * If review never revises, its base acts had 8 turns less than")
+        print("        direct's -- report that, since it is the cost of carrying a")
+        print("        revision capability.")
 
     print()
     print("=" * 78)
-    print("  NOTE: only option (c) is what the three recorded experiments did.")
-    print("  Every 'review' number on disk so far comes from a run whose revision")
-    print("  act was granted the floor of 1 turn, so none of them measured review.")
+    if len(uniq_grand) == 1:
+        print("  FAIR: every strategy's task budget is identical.")
+    else:
+        print("  UNFAIR: totals differ -- do not compare strategies until this is fixed.")
     print("=" * 78)
 
 

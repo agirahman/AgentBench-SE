@@ -100,6 +100,66 @@ def test_floor_zero_is_a_pure_free_draw():
 
 
 # ------------------------------------------------------------- revision in per_task
+def test_the_reserve_is_carved_out_of_the_total_not_added_on_top():
+    """THE fairness invariant: every strategy's task budget must be identical.
+
+    An earlier version added the reserve on top of ``total``, so review could
+    consume total + reserve = 48 turns against direct's and planning's 40. A 20%
+    larger budget would confound any claim that review is the more effective
+    strategy -- exactly the confound the per-task design exists to remove.
+
+    Carving it out means review still costs 40: it sets aside 8 of its own turns
+    for revising instead of being handed extra ones.
+    """
+    direct = ToolTurnBudget(total=40, mode="per_task", floor=10, revision_reserve=0)
+    review = ToolTurnBudget(total=40, mode="per_task", floor=10, revision_reserve=8)
+
+    assert direct.task_total == 40
+    assert review.task_total == 40, (
+        f"review's task budget is {review.task_total}, not 40 -- the reserve is "
+        f"being added on top instead of carved out"
+    )
+
+    # The reserve comes OUT of the base pool.
+    assert review.remaining == 32, (
+        f"review's base pool is {review.remaining}; it should be 40 - 8 = 32"
+    )
+    assert review.revision_remaining == 8
+
+
+def test_every_strategy_ends_up_with_the_same_total_after_acting():
+    """Spending the whole budget must land all three on the same number.
+
+    This is the end-to-end version of the invariant: simulate each strategy
+    drawing everything it is granted, and assert the sums match. Checking only
+    ``task_total`` at construction would miss a share() that hands out more than
+    the pool holds.
+    """
+    def draw(budget, acts, revision_acts=0):
+        spent = 0
+        for acts_to_come in range(acts, 0, -1):
+            grant = budget.share(acts_to_come)
+            budget.spend(grant)
+            spent += grant
+        for acts_remaining in range(revision_acts, 0, -1):
+            grant = budget.share_revision(acts_remaining)
+            budget.spend_revision(grant)
+            spent += grant
+        return spent
+
+    direct = draw(ToolTurnBudget(total=40, mode="per_task", floor=10), 1)
+    planning = draw(ToolTurnBudget(total=40, mode="per_task", floor=10), 2)
+    review = draw(
+        ToolTurnBudget(total=40, mode="per_task", floor=10, revision_reserve=8),
+        3,
+        revision_acts=2,
+    )
+
+    assert direct == planning == review == 40, (
+        f"totals differ: direct={direct} planning={planning} review={review}"
+    )
+
+
 def test_per_task_revision_uses_the_reserve_not_the_exhausted_pool():
     """REGRESSION: per_task used to ignore the reserve and starve every revision.
 
@@ -112,15 +172,12 @@ def test_per_task_revision_uses_the_reserve_not_the_exhausted_pool():
     "Tool loop hit max_tool_turns=1 for role=executor" on the revision act, which
     then made 0 edits. A revision with one turn can make one tool call; if that
     call is a read, the round is decorative and the arm does not measure review.
-
-    This test fails on the old code: share_revision(2) returned share(2), i.e.
-    the whole remainder, instead of the reserve.
     """
     b = ToolTurnBudget(total=40, mode="per_task", floor=10, revision_reserve=8)
-    # Base acts spend the pool exactly as designed.
+    # Base acts spend the base pool, which is the total minus the reserve.
     for acts_to_come in (3, 2, 1):
         b.spend(b.share(acts_to_come))
-    assert b.remaining == 0, "the base flow is meant to consume the pool"
+    assert b.remaining == 0, "the base flow is meant to consume the base pool"
 
     # The revision must still get real room, from the reserve.
     grant = b.share_revision(2)
@@ -156,6 +213,40 @@ def test_reserve_is_split_across_every_round_not_front_loaded():
     assert grants == [(4, 4), (4, 4), (4, 4)], f"uneven across rounds: {grants}"
 
 
+def test_a_reserve_larger_than_the_pool_is_clamped():
+    """A reserve that would starve the base acts must be reduced, not obeyed.
+
+    Setting REVISION_TOOL_TURNS above TOTAL_TOOL_TURNS would otherwise leave the
+    base flow with a negative pool and every act on the floor of 1 -- review would
+    be unable to do anything at all. Clamping keeps the base flow workable.
+    """
+    b = ToolTurnBudget(total=40, mode="per_task", floor=10, revision_reserve=100)
+    assert b.revision_reserve < 40, "the reserve must not swallow the whole task"
+    assert b.remaining > 0, "the base acts need room to work"
+    assert b.task_total == 40, "the clamp must not inflate the task budget"
+
+
+def test_from_config_only_carves_the_reserve_for_a_strategy_that_revises():
+    """direct and planning must NOT lose 8 turns for an act they never run.
+
+    ``from_config()`` is called by all three strategies. Carving the reserve out
+    unconditionally would give direct and planning 32 turns while review got 40 --
+    the same unfairness as the bug this replaced, pointing the other way.
+    """
+    Config.TOTAL_TOOL_TURNS = 40
+    Config.REVISION_TOOL_TURNS = 8
+    Config.BUDGET_MODE = "per_task"
+    Config.BUDGET_FLOOR_PER_ACT = 10
+
+    without = ToolTurnBudget.from_config()
+    with_rev = ToolTurnBudget.from_config(with_revisions=True)
+
+    assert without.remaining == 40, "a strategy without revisions keeps all 40"
+    assert without.task_total == 40
+    assert with_rev.remaining == 32, "review sets 8 aside for revising"
+    assert with_rev.task_total == 40, "and still costs 40 in total"
+
+
 def test_no_reserve_keeps_the_legacy_starved_behaviour():
     """Default 0 must stay reproducible for historical runs -- but it IS starved.
 
@@ -181,13 +272,22 @@ def test_per_task_without_a_reserve_warns_that_revisions_will_starve():
 
 
 def test_per_act_revision_still_uses_the_reserve():
-    """The legacy path must not change: EXP-003's revision accounting depends on it."""
+    """The per_act path must also carve the reserve out of the pool.
+
+    per_act used to be the mode that DID honour the reserve, while per_task
+    ignored it. Both now carve it out, so review's task budget is the same 40
+    turns in either mode -- the mode decides how the base pool is SPLIT, not how
+    large the task is.
+    """
     b = ToolTurnBudget(total=40, mode="per_act", revision_reserve=8)
+    assert b.task_total == 40, "the task budget must stay 40"
+    assert b.remaining == 32, "the reserve is carved out of the base pool"
+
     grant = b.share_revision(2)
     assert grant == 4  # 8 // 2
     b.spend_revision(4)
     assert b.revision_remaining == 4
-    assert b.remaining == 40  # base pool untouched
+    assert b.remaining == 32, "a revision must not touch the base pool"
 
 
 # ------------------------------------------------------------------- cost guard

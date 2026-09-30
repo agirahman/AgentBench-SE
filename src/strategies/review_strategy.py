@@ -89,12 +89,15 @@ class ReviewStrategy:
 
         # Three base acts share the strategy-wide pool (40 -> 13 + 13 + 14), so
         # the base flow costs exactly what direct's and planning's do. A revision
-        # act draws from a SEPARATE reserve (Config.REVISION_TOOL_TURNS) instead
-        # of the base pool: when it drew the base remainder, EXP-20260928-003
-        # showed it was granted the floor of 1 turn (django-11001), so the
-        # reviewer's correct diagnosis could not be applied and review lost an
-        # instance that direct and planning both resolved.
-        budget = ToolTurnBudget.from_config()
+        # act draws from a reserve CARVED OUT of that same pool (Config.REVISION_TOOL_TURNS),
+        # not added on top of it: review's whole task still costs 40 turns, the
+        # same as direct and planning, so a better review result cannot be
+        # explained by a larger budget.
+        #
+        # with_revisions=True is what carves the reserve out. Passing it for
+        # direct or planning would simply cost them 8 turns for an act they never
+        # run.
+        budget = ToolTurnBudget.from_config(with_revisions=True)
 
         plan_task = AgentMessage(sender="orchestrator", receiver="planner", kind="task", content=issue.to_agent_prompt(), bb_ops=["get_issue"])
         bb.log(plan_task)
