@@ -6,8 +6,6 @@ Your task is to fix the following bug.
 
 Analyze the root cause and provide a fix.
 
-If source code is provided below under "SOURCE CODE (base commit)", base your fix on those exact files and line numbers. Use the exact file paths shown in the file tree and the line numbers shown in the selected files when writing your patch hunk headers. Do NOT guess file paths or line numbers — only reference files and lines that are actually present in the provided source code.
-
 Output ONLY valid JSON. Do NOT wrap in markdown code blocks. Do NOT add any text before or after. Use this exact format:
 {
   "root_cause": "<one paragraph explanation>",

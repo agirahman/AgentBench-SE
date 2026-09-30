@@ -1,4 +1,4 @@
-"""A context overflow must be handled, not retried and not reported as a failure.
+﻿"""A context overflow must be handled, not retried and not reported as a failure.
 
 Why this exists
 ---------------
@@ -109,7 +109,7 @@ def _run(client, **kwargs):
 
 @pytest.fixture(autouse=True)
 def _fast_tool(monkeypatch):
-    monkeypatch.setattr(tool_loop, "execute_tool", lambda name, args: "TOOL OUTPUT")
+    monkeypatch.setattr(tool_loop, "execute_tool", lambda name, args, role="": "TOOL OUTPUT")
     monkeypatch.setattr(tool_loop.Config, "TOOL_OUTPUT_MAX_CHARS", 2000)
 
 

@@ -1,4 +1,4 @@
-"""The tool loop's wrap-up nudge must match the role's mandate.
+﻿"""The tool loop's wrap-up nudge must match the role's mandate.
 
 Measured on EXP-20260927-007: the "you are almost out of tool budget" message
 told every role to "apply your fix NOW with edit_file". Read-only roles (planner,
@@ -73,7 +73,7 @@ class _FakeClient:
 
 def _run(role, always_tool, monkeypatch):
     client = _FakeClient(always_tool)
-    monkeypatch.setattr(tool_loop, "execute_tool", lambda name, args: "ok")
+    monkeypatch.setattr(tool_loop, "execute_tool", lambda name, args, role="": "ok")
     tool_loop.run_tool_loop(
         client,
         model="fake",

@@ -12,8 +12,6 @@ Implement the fix following the plan above. Output ONLY valid JSON. Do NOT wrap 
   "summary": "<one line summary of the change>"
 }
 
-If source code is provided below under "SOURCE CODE (base commit)", base your patch on those exact files and line numbers. Use the exact file paths from the file tree and the line numbers from the selected files when writing hunk headers. Do NOT guess file paths or line numbers — only reference files and lines that are actually present in the provided source code.
-
 IMPORTANT:
 - The "patch" field must be a valid unified diff with correct hunk line counts.
 - Every hunk header like @@ -N,M +P,Q @@ must exactly match the number of context, added, and removed lines that follow.

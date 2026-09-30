@@ -1,3 +1,4 @@
+import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -55,6 +56,19 @@ class BaseAgent(ABC):
         captured from the working tree — a model following it would type a diff
         instead of editing files, and the edit would never happen. Each role that
         has a tool variant loads ``<prompt_file>`` with a ``_tools`` suffix.
+
+        A MISSING variant used to fall back to the base template silently, and that
+        fallback was a real defect rather than a safety net: ``planner`` had no
+        ``planner_tools.md``, so in tool mode it received the text-diff prompt
+        telling it to "Output ONLY valid JSON". The planner then made ZERO tool
+        calls in 6 of 9 pilot runs (EXP-20260930-332) -- not because it chose not to
+        explore, but because nothing asked it to. The results carried no mark of
+        the difference, so it read as agent behaviour.
+
+        Now the fallback WARNS and names the missing file, so the next such gap
+        surfaces at the first run instead of in a post-hoc audit. The base template
+        is still returned (a missing file must not crash a 150-run sweep), but the
+        warning makes it visible.
         """
         if self._tool_template_cache is None:
             stem = (
@@ -62,9 +76,20 @@ class BaseAgent(ABC):
                 if self.prompt_file.endswith(".md")
                 else self.prompt_file
             )
-            self._tool_template_cache = (
-                load_prompt_or_default(f"{stem}_tools.md", "") or self.template
-            )
+            variant = f"{stem}_tools.md"
+            loaded = load_prompt_or_default(variant, "")
+            if not loaded:
+                warnings.warn(
+                    f"PROMPT VARIANT MISSING: agent '{self.name}' is running with "
+                    f"tools but '{variant}' does not exist, so it falls back to "
+                    f"'{self.prompt_file}' -- a NON-TOOL prompt that tells the model "
+                    f"to emit JSON instead of calling tools. The agent will not "
+                    f"explore, and the run will look like a strategy that chose not "
+                    f"to read code. Create src/prompts/{variant}.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            self._tool_template_cache = loaded or self.template
         return self._tool_template_cache
 
     def _static_header(self) -> str:

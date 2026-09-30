@@ -1,4 +1,4 @@
-"""The run must be recorded as a TRAJECTORY, not a summary of its last message.
+﻿"""The run must be recorded as a TRAJECTORY, not a summary of its last message.
 
 What was missing, and why it mattered
 -------------------------------------
@@ -119,7 +119,7 @@ def _run(client, **kwargs):
 
 
 def _patch_tool(monkeypatch, output="FILE CONTENTS"):
-    monkeypatch.setattr(tool_loop, "execute_tool", lambda name, args: output)
+    monkeypatch.setattr(tool_loop, "execute_tool", lambda name, args, role="": output)
     monkeypatch.setattr(tool_loop.Config, "TOOL_OUTPUT_MAX_CHARS", 2000)
 
 

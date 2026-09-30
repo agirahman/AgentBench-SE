@@ -1,4 +1,4 @@
-"""Retry must not restart the tool-calling loop.
+﻿"""Retry must not restart the tool-calling loop.
 
 Regression test for the EXP-20260928-001 bug (django-11019, direct):
 
@@ -126,7 +126,7 @@ def _no_sleep(monkeypatch):
 @pytest.fixture(autouse=True)
 def _fast_tool(monkeypatch):
     """Execute no real tool; return a marker the test can look for."""
-    monkeypatch.setattr(tool_loop, "execute_tool", lambda name, args: "TOOL_OUT")
+    monkeypatch.setattr(tool_loop, "execute_tool", lambda name, args, role="": "TOOL_OUT")
 
 
 def _run(client, monkeypatch, *, max_tool_turns=5, role="direct", retries=3):
@@ -288,7 +288,7 @@ def test_large_tool_output_is_truncated_keeping_head_and_tail(monkeypatch):
     """The tail carries the error/diff summary, so it must not be dropped."""
     big = "HEAD" + ("x" * 5000) + "TAIL"
 
-    monkeypatch.setattr(tool_loop, "execute_tool", lambda name, args: big)
+    monkeypatch.setattr(tool_loop, "execute_tool", lambda name, args, role="": big)
     monkeypatch.setattr(tool_loop.Config, "TOOL_OUTPUT_MAX_CHARS", 200)
 
     client = _FakeClient([_tool_response(0), _final_response("done")])
@@ -307,7 +307,7 @@ def test_large_tool_output_is_truncated_keeping_head_and_tail(monkeypatch):
 
 
 def test_small_tool_output_is_untouched(monkeypatch):
-    monkeypatch.setattr(tool_loop, "execute_tool", lambda name, args: "small")
+    monkeypatch.setattr(tool_loop, "execute_tool", lambda name, args, role="": "small")
     monkeypatch.setattr(tool_loop.Config, "TOOL_OUTPUT_MAX_CHARS", 2000)
 
     client = _FakeClient([_tool_response(0), _final_response("done")])

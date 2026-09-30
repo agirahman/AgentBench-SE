@@ -472,7 +472,7 @@ def run_tool_loop(
                 args = {}
             if not isinstance(args, dict):
                 args = {}
-            tool_out = execute_tool(name, args)
+            tool_out = execute_tool(name, args, role=role)
             recorded_calls.append(
                 {"name": name, "arguments": args, "result": tool_out[:2000]}
             )

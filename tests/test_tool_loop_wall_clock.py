@@ -1,4 +1,4 @@
-"""A single act must be bounded in WALL-CLOCK time, not just in turns and dollars.
+﻿"""A single act must be bounded in WALL-CLOCK time, not just in turns and dollars.
 
 Why this matters for a 50-issue x 3-strategy sweep (~6 hours, 150 runs):
 
@@ -95,7 +95,7 @@ class _FakeClient:
 
 @pytest.fixture(autouse=True)
 def _fast_tool(monkeypatch):
-    monkeypatch.setattr(tool_loop, "execute_tool", lambda name, args: "TOOL_OUT")
+    monkeypatch.setattr(tool_loop, "execute_tool", lambda name, args, role="": "TOOL_OUT")
     monkeypatch.setattr(tool_loop.Config, "TOOL_OUTPUT_MAX_CHARS", 2000)
 
 

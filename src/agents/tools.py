@@ -327,8 +327,116 @@ def _looks_like_env_failure(output: str) -> bool:
 _RECENT_TEST_COMMANDS: list[str] = []
 _MAX_REPEATS = 2
 
+#: Roles whose mandate is to inspect, never to author. The review strategy's whole
+#: premise is that the reviewer does not write the code it judges, so a read-only
+#: role must not be able to write through the shell either.
+_READONLY_ROLES = frozenset({"planner", "reviewer"})
 
-def run_tests(command: str = "") -> str:
+#: Shell constructs that MUTATE the repository. Checked only for read-only roles,
+#: because `run_tests` takes an arbitrary command and those roles have no other
+#: route to a shell.
+#:
+#: Deliberately narrow. `2>&1`, `>/dev/null` and a pipe into `tail` are NOT writes --
+#: every test command here uses them, and a first version of this pattern treated
+#: `2>&1` as a redirect and flagged every pytest call. An audit of both pilots
+#: (docs/AUDIT_RUN_TESTS_PARTNER.md) also found 13 false "write" classifications
+#: from `->` inside a printed string, so a redirect must be preceded by something
+#: that can actually be a command.
+_WRITE_COMMAND_PATTERNS = (
+    # open('f','w') / open('f', 'a') / open('f','x') -- a MODE ARGUMENT, not merely
+    # the word "open". The first version used [^)]* between the parens and the
+    # quote, which matched the READ-ONLY `open('x.py').read()`: the class skipped
+    # the closing paren and reached the quote. Matching the closing paren prevents
+    # it, so a read is not mistaken for a write.
+    re.compile(r"\bopen\s*\([^)]*,\s*['\"][wax]", re.I),
+    re.compile(r"\bsed\s+-i\b", re.I),                       # in-place edit
+    re.compile(r"\bgit\s+(checkout|apply|reset|clean|stash|rm|mv)\b", re.I),
+    re.compile(r"\b(rm|mv|cp|truncate|tee|dd)\s", re.I),
+    re.compile(r"\b(shutil|os)\.(remove|unlink|rmtree|rename|replace|chmod)\b", re.I),
+    # patch with a file argument, in either direction: `patch -p1 < x` and
+    # `patch -p1 x.diff`. The first version required `-p` followed by nothing
+    # else, so a real invocation was missed.
+    re.compile(r"\bpatch\s+(-p\s*\d+|\S+\.(diff|patch))\b", re.I),
+    re.compile(r"(?<![-=<>0-9])>{1,2}\s*(?!/dev/null)\S"),   # > file, >> file
+    re.compile(r"\bpython[0-9.]*\s+-\s*$", re.I),            # python reading a script that may write
+)
+
+
+def _command_looks_like_a_write(command: str) -> str:
+    """Return the pattern that matched, or "" when the command is not a write.
+
+    Used only to refuse MUTATION of the REPOSITORY by a read-only role.
+
+    Scope matters, and a first version of this got it wrong. It refused
+    ``cd /tmp && cat > t.py <<'EOF' ... EOF`` -- a reviewer writing a scratch probe
+    script OUTSIDE the repo, which is a legitimate way to establish behaviour and
+    one the model reached for on its very first real run after the guard went in
+    (EXP-20260930-398). Blocking that would cripple verification: the reviewer must
+    be able to test a hypothesis, it just must not rewrite the code it judges.
+
+    So the question is not "does this write" but "does this write INTO the repo".
+    ``run_tests`` runs with ``cwd=repo_root``, so:
+
+    * a RELATIVE write target lands inside the repo -> refuse;
+    * an ABSOLUTE target outside the repo -> allow;
+    * a command that first ``cd``-s outside the repo -> its relative writes land
+      outside -> allow.
+
+    A read-only role running ``python -c "print(x)"`` is fine and common; one
+    running ``python -c "open('django/conf/global_settings.py','w')..."`` is not.
+    """
+    if not command:
+        return ""
+
+    # A cd to somewhere outside the repo makes the rest of the command's relative
+    # paths land outside too.
+    for target in re.findall(r"\bcd\s+([^\s;&|]+)", command):
+        if _is_outside_repo_path(target.strip("'\"")):
+            return ""
+
+    # A write whose TARGET is an absolute path outside the repo is scratch work,
+    # even when the command looks like a write. This covers the two shapes the
+    # model actually used: a shell redirect (`> /tmp/out.txt`) and a Python open()
+    # (`open('/tmp/probe.py','w')`).
+    targets = re.findall(r">{1,2}\s*(\S+)", command)
+    targets += re.findall(r"\bopen\s*\(\s*['\"]([^'\"]+)['\"]", command)
+    write_like_targets = [t.strip("'\"") for t in targets]
+    if write_like_targets and all(
+        _is_outside_repo_path(t) or t == "/dev/null" for t in write_like_targets
+    ):
+        return ""
+
+    for pattern in _WRITE_COMMAND_PATTERNS:
+        if pattern.search(command):
+            return pattern.pattern
+    return ""
+
+
+def _is_outside_repo_path(raw: str) -> bool:
+    """True when ``raw`` names a location outside the active repo checkout.
+
+    Used to let a read-only role keep scratch work (probe scripts, temp output)
+    while refusing writes that land in the repository it is judging.
+    """
+    if not raw:
+        return False
+    candidate = raw.strip().strip("'\"")
+    if candidate.startswith(("/tmp", "/var/tmp", "/dev/shm", "/dev/null")):
+        return True
+    if candidate.startswith("$TMPDIR") or candidate.startswith("%TEMP%"):
+        return True
+    if re.match(r"^[A-Za-z]:[\\/]", candidate):
+        try:
+            return not candidate.lower().startswith(str(_repo_root()).lower())
+        except Exception:  # noqa: BLE001
+            return False
+    if candidate.startswith("/") and not candidate.startswith("//"):
+        # Any other absolute POSIX path is outside a Windows-style repo root.
+        return True
+    return False
+
+
+def run_tests(command: str = "", role: str = "") -> str:
     """Run a test command inside the instance repo (sandboxed, capped).
 
     SWE-bench checkouts are raw clones: their per-repo dependencies are NOT
@@ -346,6 +454,19 @@ def run_tests(command: str = "") -> str:
     The interpreter is ``sys.executable`` (the project venv), not a bare
     ``python``: on this machine a bare ``python`` resolves to the system
     interpreter, where the venv's packages are absent.
+
+    ``role`` REFUSES a mutating command from a read-only role. The parameter name
+    is ``command`` and it is executed with ``shell=True``, so the tool is a general
+    shell, not a test runner -- which means a reviewer, whose mandate is to judge
+    the code rather than author it, could rewrite the very file it is reviewing.
+    Audited on 2026-10-01 (docs/AUDIT_RUN_TESTS_PARTNER.md §2): a reviewer could
+    ``open('core.py','w').write(...)`` and the change reached the working tree, and
+    in the revision path it reached the SHIPPED patch. No guard prevented it.
+
+    The audit also measured that this never actually happened in either pilot (0 of
+    20 reviewer calls), so this guard closes an exploitable hole rather than fixing
+    an observed failure. It is deliberately narrow: read-only roles keep the shell
+    for probing, which they do use (10 of 13 reviewer calls were read-only probes).
     """
     root = _repo_root()
     if not root.exists():
@@ -354,6 +475,22 @@ def run_tests(command: str = "") -> str:
     command = (command or "").strip()
     if not command:
         command = _guess_test_command(root)
+
+    # A read-only role must not mutate the repository through the shell. See the
+    # docstring: the grant is structural, but this tool is arbitrary shell.
+    if role in _READONLY_ROLES:
+        matched = _command_looks_like_a_write(command)
+        if matched:
+            _warn(
+                f"[tool-guard] read-only role={role} tried a mutating run_tests "
+                f"command; refused. command={command[:160]!r}"
+            )
+            return (
+                f"[error] role '{role}' is read-only and may not modify the "
+                f"repository. This command looks like a write. Use read_file, grep, "
+                f"git_diff or a read-only shell command to inspect the code instead. "
+                f"To change the code, report it in your verdict."
+            )
 
     # Refuse to spin on an identical command.
     repeats = sum(1 for c in _RECENT_TEST_COMMANDS if c == command)
@@ -900,12 +1037,42 @@ TOOL_SCHEMAS = [
 ]
 
 
-def execute_tool(name: str, arguments: dict) -> str:
-    """Dispatch a tool call by name with parsed arguments."""
+def execute_tool(name: str, arguments: dict, role: str = "") -> str:
+    """Dispatch a tool call by name with parsed arguments.
+
+    ``role`` ENFORCES the per-role grant. Without it this function executed whatever
+    name the model returned, because the provider is only sent the schemas in
+    ``AGENT_TOOLS`` -- a filter on what the model is OFFERED, not on what can run.
+    Audited on 2026-10-01 (docs/AUDIT_RUN_TESTS_PARTNER.md §2): calling
+    ``execute_tool("write_file", ...)`` and ``execute_tool("edit_file", ...)`` both
+    succeeded for a reviewer, with no role check anywhere.
+
+    That mattered because the review strategy's premise is that the reviewer does
+    not author code. The premise was held up by three soft layers -- the schema
+    filter, the system prompt ("You may NOT modify files"), and the absence of
+    editing tools -- and none of them is enforcement.
+
+    An empty ``role`` keeps the legacy behaviour so existing callers and tests do
+    not break, but the tool loop always passes the real role.
+    """
+    if role and role in AGENT_TOOLS and name not in AGENT_TOOLS[role]:
+        _warn(
+            f"[tool-guard] role={role} called '{name}', which is not granted to it "
+            f"(granted: {AGENT_TOOLS[role]}). Refused."
+        )
+        return (
+            f"[error] tool '{name}' is not available to role '{role}'. "
+            f"You may use: {', '.join(AGENT_TOOLS[role])}."
+        )
+
     fn = TOOL_FUNCTIONS.get(name)
     if fn is None:
         return f"[error] unknown tool: {name}"
     try:
+        # run_tests needs the role so it can refuse a mutating command from a
+        # read-only role; it is the only tool that takes an arbitrary shell string.
+        if name == "run_tests":
+            return fn(**(arguments or {}), role=role)
         return fn(**(arguments or {}))
     except TypeError as e:
         return f"[error] bad arguments for {name}: {e}"
