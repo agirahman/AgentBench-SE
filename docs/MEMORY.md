@@ -1,9 +1,9 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-09-30 18:55 WIB
-**Status:** **Persiapan run 50 issue.** Audit kesiapan oleh 2 partner menemukan **2 BLOCKER** — keduanya sudah diperbaiki + teruji. **BLOCKER kritis ketiga ditemukan sendiri: act revisi kelaparan budget** (0 edit selama 3 eksperimen). 323 test lulus.
+**Last Updated:** 2026-09-30 19:20 WIB
+**Status:** **Persiapan run 50.** Audit 2 partner + **verifikasi adversarial** menemukan **7 cacat** (4 KRITIS) — semua diperbaiki & teruji. **2 di antaranya ada di perbaikanku sendiri**, ditemukan justru karena partner diminta membongkarnya. 328 test lulus. **1 keputusan menunggu user: opsi reserve budget (a/b/c).**
 **Active Branch:** `19/toolcall-commandcode`
-**Detail sesi terakhir:** [`HANDOFF_20260929.md`](HANDOFF_20260929.md) · [`AUDIT_RUN_READINESS.md`](AUDIT_RUN_READINESS.md) · [`AUDIT_DATA_INTEGRITY.md`](AUDIT_DATA_INTEGRITY.md) · [`AUDIT_PIPELINE_20260930.md`](AUDIT_PIPELINE_20260930.md)
+**Detail sesi terakhir:** [`VERIFY_FIXES_P7.md`](VERIFY_FIXES_P7.md) · [`VERIFY_FIXES_P8.md`](VERIFY_FIXES_P8.md) · [`AUDIT_RUN_READINESS.md`](AUDIT_RUN_READINESS.md) · [`AUDIT_DATA_INTEGRITY.md`](AUDIT_DATA_INTEGRITY.md)
 
 > ⛔ **GATE — WAJIB KONFIRMASI USER:** Jangan jalankan run besar (50 issue / multi-jam)
 > tanpa persetujuan eksplisit dari user. Boleh tanpa konfirmasi: unit test, smoke test
@@ -406,6 +406,45 @@ klaim apa pun tentang review sebelum run 50.
 
 **Perbaikan:** reserve dihormati di kedua mode + **warning** kalau `per_task` tanpa
 reserve (supaya kelalaian setelan jadi berisik, bukan senyap).
+
+##### 🔁 VERIFIKASI ADVERSARIAL (2026-09-30) — 4 KRITIS, semua di perbaikanku SENDIRI
+
+Setelah audit, partner **tidak** diberi tugas mengaudit lagi — mereka diberi tugas
+**membongkar perbaikanku**. Ini disengaja: kesalahan pada perbaikan lebih berbahaya
+daripada bug aslinya, karena kita sekarang mengandalkannya.
+
+**Hasil: perbaikan BLOCKER-nya benar, tapi 3 dari 4 perbaikan TIDAK menutup kasus
+yang jadi alasan keberadaannya.** Laporan: `VERIFY_FIXES_P7.md`, `VERIFY_FIXES_P8.md`.
+
+| # | Cacat pada perbaikanku | Tingkat | Kenapa berbahaya |
+|---|---|---|---|
+| 1 | `--resume` **masih** kehilangan data kalau crash **sebelum export pertama** | **KRITIS** | CSV ditulis **sekali di akhir** → crash = tidak ada CSV → merge tidak memulihkan apa pun. **Ini kasus UTAMA `--resume` ada.** Dibuktikan dengan `KeyboardInterrupt` nyata: 5 issue, mati di ke-3 → CSV berisi 3, savepoint berisi 5 |
+| 2 | CSV **terpotong** → `pd.read_csv` gagal → **semua** baris lama dibuang | **KRITIS** | `to_csv` tidak atomik, dan menulis CSV adalah langkah **terakhir** — jadi ini gangguan **paling mungkin**, bukan paling jarang. Terbukti: 9 baris → 1 |
+| 3 | Pemeriksaan kelengkapan **alarm palsu** pada hasil yang sah | **KRITIS** | Run yang selesai **tanpa patch** dihitung "hilang". Di data nyata (EXP-20260824-005): 84 ditandai, **44 di antaranya sah**. Alarm palsu = alarm asli diabaikan |
+| 4 | `INCOMPLETE.json` **tidak pernah dihapus** | **KRITIS** | Resume yang berhasil meninggalkan alarm permanen. Alarm basi tak bisa dibedakan dari alarm hidup |
+
+**Perbaikan:**
+
+- Rekonstruksi dari **savepoint jsonl** (bukan hanya CSV) + rekonsiliasi: savepoint adalah
+  **otoritas** soal run mana yang ada; CSV hanya lebih kaya per baris
+- Tulis CSV **atomik** (`tmp` + `os.replace`) + simpan `.bak`
+- Predikat terpisah: `_is_finished_entry` (untuk resume) vs `_is_completed_entry`
+  (untuk kelengkapan) — **menggabungkan keduanya itulah bug-nya**
+- `INCOMPLETE.json` dihapus saat sukses; laporan pisahkan "ran but FAILED" vs "never ran"
+
+**3 cacat kecil, semuanya terkonfirmasi eksekusi:**
+
+| Cacat | Kenapa berbahaya |
+|---|---|
+| `bool(NaN)` = **True** | Sel `generated` kosong dibaca sebagai **sukses** — setiap baris hasil pemulihan akan mengaku punya patch |
+| `str(NaN)` = `'nan'` | String **tidak kosong** → lolos guard `patch.strip()` yang seharusnya mendeteksi patch kosong |
+| Guard rate **raise** | Terjadi **setelah** Modal dijalankan & dibayar → membuang evaluasi yang sudah selesai karena masalah pembukuan. Sekarang: rate ditahan (`null`), baris per-instance tetap ditulis |
+
+**Pelajaran proses:** memperbaiki bug lalu memverifikasi perbaikan itu **wajib**, dan
+paling baik dilakukan pihak yang **tidak** menulis perbaikannya. Tiga dari empat
+perbaikanku tidak menutup kasus utamanya — dan aku tidak akan menemukannya sendiri.
+
+---
 
 ##### ⚠️ KEPUTUSAN TERBUKA: reserve revisi membuat total budget TIDAK SAMA
 
