@@ -24,6 +24,12 @@ def _preds(*specs):
     return [{"instance_id": iid, "model_patch": patch} for iid, patch in specs]
 
 
+def _classify(summary, preds):
+    """Unpack the classifier's dict result the way the tests want it."""
+    c = classify_summary(summary, preds, None)
+    return c["results"], c["resolved"], c["total"], c["empty"], c["errors"], c
+
+
 def test_empty_patch_is_labelled_empty_not_unresolved():
     """The dead run is classified EMPTY_PATCH, and not as a wrong answer."""
     summary = {
@@ -38,7 +44,7 @@ def test_empty_patch_is_labelled_empty_not_unresolved():
         ("django__django-11001", "diff --git c d"),
         ("django__django-11019", ""),
     )
-    results, resolved, total, empty, errors = classify_summary(summary, preds, None)
+    results, resolved, total, empty, errors, _c = _classify(summary, preds)
 
     assert (resolved, total, empty, errors) == (2, 3, 1, 0)
 
@@ -59,7 +65,7 @@ def test_empty_ids_are_re_derived_when_the_summary_omits_them():
         "error_ids": [],
     }
     preds = _preds(("django__django-10914", "diff"), ("django__django-11019", ""))
-    results, resolved, total, empty, errors = classify_summary(summary, preds, None)
+    results, resolved, total, empty, errors, _c = _classify(summary, preds)
 
     assert (resolved, total, empty, errors) == (1, 2, 1, 0)
     assert {r["instance_id"]: r["failure_reason"] for r in results}[
@@ -70,7 +76,7 @@ def test_empty_ids_are_re_derived_when_the_summary_omits_them():
 def test_total_falls_back_to_predictions_when_summary_has_no_count():
     summary = {"resolved_ids": ["django__django-10914"], "error_ids": []}
     preds = _preds(("django__django-10914", "diff"), ("django__django-11001", "diff"))
-    _results, resolved, total, _empty, _errors = classify_summary(summary, preds, None)
+    _results, resolved, total, _empty, _errors, _c = _classify(summary, preds)
     assert (resolved, total) == (1, 2)
 
 
@@ -107,7 +113,7 @@ def test_no_empty_patches_leaves_both_rates_identical():
         ("django__django-11001", "diff b"),
         ("django__django-11019", "diff c"),
     )
-    _results, resolved, total, empty, errors = classify_summary(summary, preds, None)
+    _results, resolved, total, empty, errors, _c = _classify(summary, preds)
     assert (resolved, total, empty, errors) == (2, 3, 0, 0)
     assert resolved / (total - empty - errors) == resolved / total
 
@@ -137,7 +143,7 @@ def test_a_retried_instance_is_not_counted_twice():
         ("django__django-11019", ""),
         ("django__django-11019", "diff b"),
     )
-    results, resolved, total, empty, errors = classify_summary(summary, preds, None)
+    results, resolved, total, empty, errors, _c = _classify(summary, preds)
 
     assert total == 2, "the denominator must be the harness's deduplicated count"
     assert resolved == 2
@@ -161,7 +167,7 @@ def test_the_last_row_wins_for_a_retried_instance():
         ("django__django-11019", ""),          # first attempt: dead
         ("django__django-11019", "diff good"),  # retry: the real answer
     )
-    results, resolved, total, _empty, _errors = classify_summary(summary, preds, None)
+    results, resolved, total, _empty, _errors, _c = _classify(summary, preds)
 
     assert (resolved, total) == (1, 1)
     assert len(results) == 1
@@ -169,12 +175,16 @@ def test_the_last_row_wins_for_a_retried_instance():
     assert results[0]["failure_reason"] != "EMPTY_PATCH"
 
 
-def test_classifier_refuses_to_report_a_rate_above_100_percent():
-    """A guard, not a fix: if the arithmetic breaks again, fail instead of emitting.
+def test_classifier_flags_an_impossible_rate_instead_of_raising():
+    """A guard, not a fix: if the arithmetic breaks again, do not emit a rate.
 
-    A rate above 100% is nonsense that a reader might still quote. The duplicate
-    bug produced one and was caught only by inspecting the output by hand, so the
-    invariant is asserted rather than trusted.
+    A rate above 100% is nonsense that a reader might still quote, so the rate is
+    withheld -- written as null in the results file.
+
+    It must NOT raise: by the time classification runs, Modal has already executed
+    and been paid for, so an exception would throw away a completed evaluation over
+    a bookkeeping mismatch. The per-instance rows are still correct; only the ratio
+    is in doubt, so only the ratio is refused.
     """
     summary = {
         "submitted_instances": 1,
@@ -184,5 +194,26 @@ def test_classifier_refuses_to_report_a_rate_above_100_percent():
         "error_ids": [],
     }
     preds = _preds(("a", "diff a"), ("b", "diff b"))
-    with pytest.raises(AssertionError, match="exceeds"):
-        classify_summary(summary, preds, None)
+
+    results, resolved, total, _empty, _errors, c = _classify(summary, preds)
+
+    # It still returns usable rows rather than aborting.
+    assert len(results) == 2
+    assert (resolved, total) == (2, 1)
+    # And it marks the ratio as unusable.
+    assert c["rate_is_valid"] is False
+
+
+def test_a_normal_run_is_marked_valid():
+    """The flag must not fire on healthy input, or it will be ignored."""
+    summary = {
+        "submitted_instances": 2,
+        "resolved_ids": ["a"],
+        "unresolved_ids": ["b"],
+        "empty_patch_ids": [],
+        "error_ids": [],
+    }
+    _results, _resolved, _total, _empty, _errors, c = _classify(
+        summary, _preds(("a", "diff a"), ("b", "diff b"))
+    )
+    assert c["rate_is_valid"] is True

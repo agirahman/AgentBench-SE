@@ -7,9 +7,9 @@ that 20-turn cap on all three instances — it was cut off mid-exploration and
 forced to answer without tools — so its numbers measured the budget rather than
 the strategy, and the three strategies were not comparable.
 
-``ToolTurnBudget`` gives every strategy the same TOTAL (``Config.TOTAL_TOOL_TURNS``)
-and splits it across the acts still to come, so the base flow of each strategy
-adds up to the same number:
+``ToolTurnBudget`` gives every strategy the same BASE TOTAL (``Config.TOTAL_TOOL_TURNS``)
+and splits it across the base acts, so the base flow of each strategy adds up to
+the same number:
 
     direct    1 act            -> 40
     planning  planner+executor -> 20 + 20
@@ -23,6 +23,20 @@ Two pools, because a revision is not part of the base flow:
   acts. It defaults to 0 (legacy behaviour: revisions draw the base remainder
   and get a floor of 1 turn).
 
+⚠️ **The GRAND total is therefore NOT equal — only the base flow is.** With
+``total=40`` and ``revision_reserve=8``:
+
+    direct     40 base              -> 40
+    planning   40 base              -> 40
+    review     40 base + 8 revision -> 48
+
+The reserve is an extra allowance, not a slice of the base pool, so review may
+consume 20% more turns. That is a real confound for comparing the three
+strategies (RQ1 effectiveness, RQ2 efficiency) and has to be REPORTED, not
+assumed away. ``tools/check_budget_fairness.py`` prints the numbers and the three
+options: accept it and state it, raise ``total`` for direct/planning to match, or
+keep ``reserve=0`` and admit the review arm cannot revise at all.
+
 The separate pool exists because of what EXP-20260928-003 measured. Review's
 base acts spent the whole base pool, so the revision act was granted the floor
 of **1 turn** on django-11001 — enough to read two files, not enough to edit
@@ -33,9 +47,9 @@ which have no revision overhead, both shipped ``re.DOTALL`` and resolved.
 
 Charging the revision to the base pool made review's extra act a punishment: it
 could not act on its own review. The reserve keeps the base flow equal across
-strategies (so the comparison is still like-for-like) while giving the revision
-act a usable allowance. Any run using it must report the extra turns, since
-review's total is then ``total + revision_reserve``.
+strategies while giving the revision act a usable allowance. Any run using it
+must report the extra turns, since review's total is then ``total +
+revision_reserve``.
 
 ``mode="per_task"`` — the reference-compatible rule
 ---------------------------------------------------

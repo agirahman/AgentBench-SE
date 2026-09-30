@@ -230,3 +230,174 @@ def test_completeness_check_is_quiet_when_everything_finished(tmp_path):
     _, exp_id = _run(tmp_path, [_issue(1), _issue(2)], calls)
 
     assert not (tmp_path / exp_id / "INCOMPLETE.json").exists()
+
+
+def test_crash_before_the_first_export_does_not_lose_data(tmp_path):
+    """THE CASE --resume EXISTS FOR: the process dies before any CSV is written.
+
+    The CSV is written ONCE at the end of run_experiments, so a crash mid-sweep
+    leaves no CSV at all -- and merging with a file that does not exist recovers
+    nothing. The earlier merge fix only handled "session one reached the end",
+    which is precisely when resume is not needed.
+
+    The jsonl savepoints are appended per run, so they survive. This asserts the
+    CSV is rebuilt from them, and that the recovered rows are marked so a reader
+    cannot mistake the missing token/cost columns for zeros.
+    """
+    calls: list[str] = []
+    exp_dir = None
+
+    class _Boom(_StubStrategy):
+        def run(self, issue):
+            # Simulate a hard interruption partway through the sweep.
+            if issue.instance_id == "django__django-3" and not self.calls.count(
+                "django__django-3"
+            ) > 1:
+                self.calls.append(issue.instance_id)
+                raise KeyboardInterrupt("simulated Ctrl+C")
+            return super().run(issue)
+
+    # Session 1: dies on the third issue, so no CSV is ever written.
+    try:
+        run_experiments(
+            [_issue(1), _issue(2), _issue(3), _issue(4)],
+            {"direct": _Boom(calls)},
+            base_dir=str(tmp_path),
+            provider_name="test",
+            model="test-model",
+            rate_limit_seconds=0,
+        )
+    except KeyboardInterrupt:
+        pass
+
+    exp_id = sorted(p.name for p in tmp_path.glob("EXP-*"))[-1]
+    exp_dir = tmp_path / exp_id
+    assert not (exp_dir / "generation_result.csv").exists(), (
+        "precondition: a crash mid-sweep must leave no CSV"
+    )
+
+    # Session 2: resume. Two runs are already saved; two remain.
+    calls.clear()
+    _run(tmp_path, [_issue(1), _issue(2), _issue(3), _issue(4)], calls,
+         resume=True, experiment_id=exp_id)
+
+    ids = _csv_ids(exp_dir)
+    assert ids == [
+        "django__django-1",
+        "django__django-2",
+        "django__django-3",
+        "django__django-4",
+    ], f"the pre-crash runs were lost from the CSV: {ids}"
+
+
+def test_a_corrupt_csv_does_not_discard_the_old_rows(tmp_path):
+    """A half-written CSV must not cost every row it contains.
+
+    to_csv is not atomic, so a process killed mid-write leaves a truncated file --
+    the most likely interruption, because writing the CSV is the last thing a long
+    run does. pd.read_csv is all-or-nothing: ONE malformed row raises and every old
+    row is dropped, which restores the original bug on the most realistic input.
+    """
+    calls: list[str] = []
+    _, exp_id = _run(tmp_path, [_issue(1), _issue(2), _issue(3)], calls)
+    exp_dir = tmp_path / exp_id
+    csv_path = exp_dir / "generation_result.csv"
+
+    # Truncate mid-file, as an interrupted write would.
+    text = csv_path.read_text(encoding="utf-8")
+    csv_path.write_text(text[: int(len(text) * 0.6)], encoding="utf-8")
+
+    calls.clear()
+    _run(tmp_path, [_issue(1), _issue(2), _issue(3), _issue(4)], calls,
+         resume=True, experiment_id=exp_id)
+
+    ids = _csv_ids(exp_dir)
+    assert "django__django-4" in ids, "the new run must be present"
+    assert len(ids) >= 3, (
+        f"the corrupt CSV cost the earlier runs: only {ids} survived"
+    )
+
+
+def test_a_completed_run_without_a_patch_is_not_reported_as_missing(tmp_path):
+    """A model answering with prose is an OUTCOME, not an absent run.
+
+    The completeness check reused the resume predicate, which requires a non-empty
+    patch. But a run can finish normally and produce no diff -- recorded as
+    NO_DIFF/EMPTY with no error_type. On real data (EXP-20260824-005) that
+    predicate flagged 44 of 150 rows as unfinished when they had in fact run.
+
+    A control that cries wolf on legitimate outcomes is worse than none, because
+    the real alarm gets ignored.
+    """
+    calls: list[str] = []
+
+    class _NoDiff(_StubStrategy):
+        def run(self, issue):
+            self.calls.append(issue.instance_id)
+            inf = InferenceResult(role="direct", response="I could not find the bug.")
+            run = InferenceRun(patch="", inferences=[inf], messages=[])
+            result = ExperimentResult(
+                instance_id=issue.instance_id,
+                strategy="direct",
+                model="test-model",
+                execution=ExecutionResult(run=run),
+                cost=CostCalculator().aggregate([inf]),
+                evaluation=EvaluationResult(success=False, error=""),
+            )
+            return Patch(response=""), result
+
+    _, exp_id = run_experiments(
+        [_issue(1), _issue(2)],
+        {"direct": _NoDiff(calls)},
+        base_dir=str(tmp_path),
+        provider_name="test",
+        model="test-model",
+        rate_limit_seconds=0,
+    )
+
+    exp_dir = tmp_path / exp_id
+    assert not (exp_dir / "INCOMPLETE.json").exists(), (
+        "both runs completed; a no-diff answer is a result, not a missing run"
+    )
+
+
+def test_a_successful_resume_clears_the_stale_incomplete_marker(tmp_path):
+    """A resolved shortfall must remove the alarm, not leave it forever.
+
+    The marker was written only on the failure branch and never removed, so a
+    successful resume left a file claiming the experiment was short. A stale alarm
+    is indistinguishable from a live one, which makes the marker useless exactly
+    when someone checks it before analysing.
+    """
+    calls: list[str] = []
+    issues = [_issue(1), _issue(2)]
+
+    # Pass 1: the second issue dies, so the marker is written.
+    run_experiments(
+        issues,
+        {"direct": _StubStrategy(calls, fail_on="django__django-2")},
+        base_dir=str(tmp_path),
+        provider_name="test",
+        model="test-model",
+        rate_limit_seconds=0,
+    )
+    exp_id = sorted(p.name for p in tmp_path.glob("EXP-*"))[-1]
+    exp_dir = tmp_path / exp_id
+    assert (exp_dir / "INCOMPLETE.json").exists(), "precondition: marker written"
+
+    # Pass 2: resume with a healthy strategy, so everything completes.
+    calls.clear()
+    run_experiments(
+        issues,
+        {"direct": _StubStrategy(calls)},
+        base_dir=str(tmp_path),
+        provider_name="test",
+        model="test-model",
+        rate_limit_seconds=0,
+        resume=True,
+        experiment_id=exp_id,
+    )
+
+    assert not (exp_dir / "INCOMPLETE.json").exists(), (
+        "the shortfall was resolved; the stale marker must be cleared"
+    )

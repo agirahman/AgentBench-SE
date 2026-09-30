@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import shutil
 import time
 from collections import Counter
 from datetime import datetime, timezone
@@ -131,6 +132,12 @@ def _is_finished_entry(entry: dict) -> bool:
     ``model_patch: ""`` together with ``patch_status: "TIMEOUT"``
     (runner.py:452-465), so an empty patch is the reliable signal that the
     instance still needs to run.
+
+    NOTE for the completeness check: use ``_is_completed_entry`` instead. This
+    predicate answers "should --resume retry it?", and a run that finished
+    normally but produced NO diff must be retried (the model may answer with prose
+    on one attempt and a diff on the next). For "did the sweep cover this
+    instance?", that same row is a completed run -- see the docstring there.
     """
     status = str(entry.get("patch_status") or "").upper()
     if status in _PATCH_STATUS_FAILED:
@@ -138,6 +145,29 @@ def _is_finished_entry(entry: dict) -> bool:
     if entry.get("error_type"):
         return False
     return bool((entry.get("model_patch") or "").strip())
+
+
+def _is_completed_entry(entry: dict) -> bool:
+    """Did this row represent a run that actually RAN to completion?
+
+    Different question from ``_is_finished_entry``, and conflating them broke the
+    completeness check: it counted a legitimate "the model produced no diff" as a
+    missing run. A model answering with prose instead of a diff is a valid
+    OUTCOME, not an absent run -- the runner records it as ``NO_DIFF``/``EMPTY``
+    with no ``error_type``.
+
+    On real data (EXP-20260824-005, 150 runs) the patch-based predicate flagged 84
+    rows as unfinished, of which 44 were legitimate no-diff outcomes and only 40
+    were infrastructure deaths. Reporting a false alarm on 44 of 150 runs would
+    have discredited the very check meant to catch real losses -- and a control
+    that cries wolf is worse than none, because the real alarm is then ignored.
+
+    So: a run counts as covered unless it failed for an INFRASTRUCTURE reason.
+    """
+    if entry.get("error_type"):
+        return False
+    status = str(entry.get("patch_status") or "").upper()
+    return status not in _PATCH_STATUS_FAILED
 
 
 def _load_existing_ids(jsonl_path: str) -> set[str]:
@@ -197,7 +227,71 @@ def _read_jsonl_entries(jsonl_path: str) -> list[dict]:
     return entries
 
 
-def _merge_csv_rows(csv_path: str, new_rows: list[dict]) -> list[dict]:
+def _rows_from_savepoints(pred_dir: Path, strategies) -> list[dict]:
+    """Reconstruct CSV rows from the jsonl savepoints.
+
+    Used when the CSV cannot be read: missing (a crash before the first export --
+    the MAIN case --resume exists for), truncated (a crash DURING to_csv, which is
+    the last and most interruptible step), or otherwise unparseable.
+
+    The savepoints are the source of truth: they are appended per run, so a run
+    that finished is recorded even if the process died before any export.
+
+    What this CANNOT recover: token counts, cost, and timing are not part of the
+    prediction contract the savepoints store. Those columns come back empty and
+    ``_recovered_from_savepoint`` is set, so a reader can tell "not recorded" from
+    "zero". Reporting a fabricated 0.00 cost for a run that really spent money
+    would be worse than reporting nothing -- it is the same class of error as the
+    cache-discount bug that nearly halved RQ3's numbers.
+    """
+    rows: list[dict] = []
+    for strat_name in strategies:
+        jsonl_path = str(pred_dir / f"{strat_name}.jsonl")
+        for entry in _read_jsonl_entries(jsonl_path):
+            iid = entry.get("instance_id")
+            if not iid:
+                continue
+            status = str(entry.get("patch_status") or "")
+            rows.append({
+                "instance_id": iid,
+                "strategy": strat_name,
+                "model": entry.get("model_name_or_path", ""),
+                "patch_status": status,
+                "error": entry.get("error") or "",
+                "generated": bool((entry.get("model_patch") or "").strip()),
+                "patch_preview": "",
+                # None, not "": these columns are numeric everywhere else, and a
+                # mixed str/float column makes pandas raise on any arithmetic
+                # downstream (statistics, cost aggregation). None reads back as
+                # NaN, which the _num/_text helpers map to "not recorded" --
+                # distinguishable from a real 0, which matters because a
+                # fabricated 0.00 cost for a paid run is a wrong number, not a
+                # missing one.
+                "total_tokens": None,
+                "input_tokens_total": None,
+                "input_tokens_cached": None,
+                "input_tokens_regular": None,
+                "output_tokens": None,
+                "cost_usd_offpeak": None,
+                "cost_idr_offpeak": None,
+                "cost_usd_peak_total": None,
+                "cost_idr_peak_total": None,
+                "cost_usd_actual": None,
+                "cost_idr_actual": None,
+                "input_cost_usd_total": None,
+                "output_cost_usd": None,
+                "input_cost_usd_cached": None,
+                "input_cost_usd_regular": None,
+                "execution_time": None,
+                "pricing_version": "",
+                "_recovered_from_savepoint": True,
+            })
+    return rows
+
+
+def _merge_csv_rows(csv_path: str, new_rows: list[dict],
+                    pred_dir: Path | None = None,
+                    strategies=None) -> list[dict]:
     """Merge this session's rows with the rows already on disk.
 
     Why this exists: the CSV was written from ``all_results``, which only ever
@@ -211,10 +305,19 @@ def _merge_csv_rows(csv_path: str, new_rows: list[dict]) -> list[dict]:
     ~6 hours and a mid-run interruption is likely, so the recovery path must
     preserve the paid-for work instead of erasing it.
 
-    Merging at the CSV level (rather than rebuilding from the jsonl savepoints)
-    keeps every recorded column: the savepoints carry only the prediction contract,
-    so a rebuild would report token and cost columns as zero for earlier runs --
-    turning a data-loss bug into a silent data-quality bug.
+    Three sources, in order of preference:
+
+    1. The existing CSV -- it carries every column, including tokens and cost.
+    2. The jsonl savepoints -- when the CSV is missing or unreadable. Recovers
+       WHICH runs happened and their status, but not tokens/cost, because the
+       savepoints store only the prediction contract.
+    3. This session's rows.
+
+    The csv is read with escalating tolerance. ``pd.read_csv`` is all-or-nothing:
+    ONE malformed row raises ParserError and every old row is discarded -- which
+    would restore the original bug on the MOST realistic input, a file half-written
+    when the process died mid-``to_csv``. So a failed strict parse falls back to
+    ``on_bad_lines="skip"``, and then to the savepoints.
 
     Rows are keyed by ``(instance_id, strategy)`` and the NEWEST wins, so a retry
     after a failure replaces the failed row rather than appearing twice. That
@@ -222,27 +325,90 @@ def _merge_csv_rows(csv_path: str, new_rows: list[dict]) -> list[dict]:
     instance twice (a duplicate row made ``resolved/total`` exceed 100%).
     """
     merged: dict[tuple[str, str], dict] = {}
+    loaded_from_csv = False
 
     if os.path.exists(csv_path):
-        try:
-            old = pd.read_csv(csv_path)
-            # The header is written with a leading "[" (a pandas artifact of the
-            # original writer), so strip it before matching column names.
-            old.columns = [str(c).lstrip("[") for c in old.columns]
-            for record in old.to_dict(orient="records"):
-                key = (str(record.get("instance_id")), str(record.get("strategy")))
-                merged[key] = record
-        except Exception as exc:  # noqa: BLE001 - never lose the new rows over this
+        for attempt, kwargs in enumerate(({}, {"on_bad_lines": "skip"})):
+            try:
+                old = pd.read_csv(csv_path, **kwargs)
+                # The header is written with a leading "[" (a pandas artifact of
+                # the original writer), so strip it before matching column names.
+                old.columns = [str(c).lstrip("[") for c in old.columns]
+                for record in old.to_dict(orient="records"):
+                    key = (str(record.get("instance_id")),
+                           str(record.get("strategy")))
+                    merged[key] = record
+                loaded_from_csv = True
+                if attempt == 1:
+                    logger.warning(
+                        f"{csv_path} needed on_bad_lines='skip' to parse: some "
+                        f"rows were malformed and dropped. Recovered "
+                        f"{len(merged)} row(s) from it; the savepoints are the "
+                        f"authority if the count looks short."
+                    )
+                break
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    f"Could not read {csv_path} for merging "
+                    f"(attempt {attempt + 1}, {type(exc).__name__}: {exc})"
+                )
+
+    if not loaded_from_csv and pred_dir is not None and strategies:
+        recovered = _rows_from_savepoints(pred_dir, strategies)
+        if recovered:
             logger.warning(
-                f"Could not read the existing CSV at {csv_path} for merging "
-                f"({type(exc).__name__}: {exc}); writing this session's rows only."
+                f"No readable CSV at {csv_path}; reconstructed {len(recovered)} "
+                f"row(s) from the jsonl savepoints. Token and cost columns are "
+                f"empty for those rows -- they were never recorded there."
             )
+        for record in recovered:
+            key = (str(record.get("instance_id")), str(record.get("strategy")))
+            merged.setdefault(key, record)
+
+    # The savepoints are the authority on WHICH runs happened; the CSV is only
+    # richer per row. A CSV that parsed but is SHORT -- truncated mid-write, or
+    # with rows dropped by on_bad_lines="skip" -- would otherwise pass as complete
+    # while quietly missing runs that the savepoints prove were done. So any
+    # instance the savepoints record and the CSV does not is added from them.
+    if loaded_from_csv and pred_dir is not None and strategies:
+        for record in _rows_from_savepoints(pred_dir, strategies):
+            key = (str(record.get("instance_id")), str(record.get("strategy")))
+            if key not in merged:
+                merged[key] = record
+                logger.warning(
+                    f"  {key[0]}/{key[1]} is in the savepoints but was missing "
+                    f"from {Path(csv_path).name}; restored (without token/cost, "
+                    f"which the savepoint does not record)."
+                )
 
     for record in new_rows:
         key = (str(record.get("instance_id")), str(record.get("strategy")))
         merged[key] = record
 
     return list(merged.values())
+
+
+def _write_csv_atomically(df, csv_path: str) -> None:
+    """Write the CSV via a temp file and a rename, keeping a .bak of the old one.
+
+    ``df.to_csv`` writes in place, so a process that dies mid-write leaves a
+    TRUNCATED file -- and that is the most likely moment for an interruption,
+    because it is the last thing a long run does. A truncated CSV then hits the
+    merge path, which is exactly the case the savepoint fallback exists for; the
+    atomic write removes the cause instead of relying on the recovery.
+
+    The ``.bak`` copy means a bad merge can never destroy the only record: the
+    previous good file is still on disk.
+    """
+    target = Path(csv_path)
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    df.to_csv(tmp, index=False)
+    if target.exists():
+        try:
+            shutil.copy2(target, target.with_suffix(target.suffix + ".bak"))
+        except OSError as exc:
+            logger.warning(f"Could not write the CSV backup: {exc}")
+    os.replace(tmp, target)
 
 
 def _results_from_flat_rows(rows: list[dict]) -> list[ExperimentResult]:
@@ -264,12 +430,46 @@ def _results_from_flat_rows(rows: list[dict]) -> list[ExperimentResult]:
         try:
             if value is None or (isinstance(value, float) and pd.isna(value)):
                 return default
+            if isinstance(value, str) and not value.strip():
+                return default
             return float(value)
         except (TypeError, ValueError):
             return default
 
+    def _truthy(value) -> bool:
+        """Read a boolean-ish CSV cell, where an empty cell arrives as NaN.
+
+        ``bool(float("nan"))`` is True, so a blank ``generated`` cell was read as
+        a SUCCESSFUL generation -- the exact opposite of what an empty cell means.
+        A blank cell is written by the savepoint recovery path and by any row that
+        lacks the column, so on a resumed experiment every recovered row would have
+        claimed to have produced a patch.
+        """
+        if value is None:
+            return False
+        if isinstance(value, float) and pd.isna(value):
+            return False
+        if isinstance(value, str):
+            return value.strip().lower() in ("true", "1", "yes")
+        return bool(value)
+
+    def _text(value) -> str:
+        """Read a text cell, mapping NaN to "" instead of the string 'nan'.
+
+        ``str(float('nan'))`` is ``'nan'``, a non-empty string. That defeats the
+        ``patch.strip()`` guard used to decide whether a patch exists, so a row
+        with no patch preview would have passed an emptiness test as if it had
+        content.
+        """
+        if value is None:
+            return ""
+        if isinstance(value, float) and pd.isna(value):
+            return ""
+        text = str(value)
+        return "" if text.lower() in ("nan", "none") else text
+
     for row in rows:
-        patch_preview = str(row.get("patch_preview") or "")
+        patch_preview = _text(row.get("patch_preview"))
         synth = InferenceResult(
             role="rebuilt",
             response="",
@@ -288,7 +488,7 @@ def _results_from_flat_rows(rows: list[dict]) -> list[ExperimentResult]:
             output_cost_usd=_num(row.get("output_cost_usd")),
             total_cost_usd=_num(row.get("cost_usd_offpeak")),
             total_cost_idr=_num(row.get("cost_idr_offpeak")),
-            pricing_version=str(row.get("pricing_version") or ""),
+            pricing_version=_text(row.get("pricing_version")),
             cached_input_tokens=int(_num(row.get("input_tokens_cached"))),
             regular_input_tokens=int(_num(row.get("input_tokens_regular"))),
             cached_input_cost_usd=_num(row.get("input_cost_usd_cached")),
@@ -299,19 +499,21 @@ def _results_from_flat_rows(rows: list[dict]) -> list[ExperimentResult]:
             actual_cost_idr=_num(row.get("cost_idr_actual")),
         )
         result = ExperimentResult(
-            instance_id=str(row.get("instance_id") or ""),
-            strategy=str(row.get("strategy") or ""),
-            model=str(row.get("model") or ""),
+            instance_id=_text(row.get("instance_id")),
+            strategy=_text(row.get("strategy")),
+            model=_text(row.get("model")),
             execution=ExecutionResult(run=run),
             cost=cost,
             evaluation=EvaluationResult(
-                success=bool(row.get("generated")),
-                error=str(row.get("error") or "") if not pd.isna(row.get("error")) else "",
-                timestamp=str(row.get("timestamp") or ""),
+                # _truthy, not bool(): a blank cell arrives as NaN, and
+                # bool(NaN) is True -- so an empty cell read as a success.
+                success=_truthy(row.get("generated")),
+                error=_text(row.get("error")),
+                timestamp=_text(row.get("timestamp")),
             ),
-            difficulty=str(row.get("difficulty") or ""),
-            patch_status=str(row.get("patch_status") or ""),
-            apply_status=str(row.get("apply_status") or ""),
+            difficulty=_text(row.get("difficulty")),
+            patch_status=_text(row.get("patch_status")),
+            apply_status=_text(row.get("apply_status")),
         )
         out.append(result)
     return out
@@ -710,9 +912,9 @@ def run_experiments(
     # and merges to exactly its own rows, so this is a no-op in the normal case.
     csv_path = f"{exp_dir}/generation_result.csv"
     new_rows = [flatten_for_csv(r) for r in all_results]
-    merged_rows = _merge_csv_rows(csv_path, new_rows)
+    merged_rows = _merge_csv_rows(csv_path, new_rows, pred_dir, list(strategies))
     df = pd.DataFrame(merged_rows)
-    df.to_csv(csv_path, index=False)
+    _write_csv_atomically(df, csv_path)
     logger.success(f"CSV exported: {csv_path} ({len(df)} rows)")
 
     if len(df) > len(new_rows):
@@ -764,34 +966,63 @@ def run_experiments(
     # planned, so a sweep that silently lost runs still reported success. At 50
     # issues x 3 strategies a missing instance is easy to miss by eye and
     # expensive to discover after the analysis is written.
+    #
+    # Counts a row as covered unless it died for an infrastructure reason
+    # (_is_completed_entry): a run that finished and produced no diff is an
+    # outcome, not a gap. Using the resume predicate here flagged 44 of 150
+    # legitimate no-diff runs as missing on real data, which would have turned
+    # this control into noise.
     expected_total = len(issues) * len(strategies)
-    finished_total = 0
+    covered_total = 0
     missing: list[str] = []
+    failed: list[str] = []
     for strat_name in strategies:
         strat_jsonl = str(pred_dir / f"{strat_name}.jsonl")
-        finished_here = {
-            entry.get("instance_id")
-            for entry in _read_jsonl_entries(strat_jsonl)
-            if _is_finished_entry(entry)
+        entries = _read_jsonl_entries(strat_jsonl)
+        covered_here = {
+            entry.get("instance_id") for entry in entries
+            if _is_completed_entry(entry)
         }
-        finished_total += len(finished_here)
+        failed_here = {
+            entry.get("instance_id") for entry in entries
+            if not _is_completed_entry(entry)
+        }
+        covered_total += len(covered_here)
         for issue in issues:
-            if issue.instance_id not in finished_here:
-                missing.append(f"{strat_name}:{issue.instance_id}")
+            if issue.instance_id not in covered_here:
+                # Distinguish "ran and died" from "never ran": they need different
+                # actions (retry vs investigate), and merging them hides which.
+                if issue.instance_id in failed_here:
+                    failed.append(f"{strat_name}:{issue.instance_id}")
+                else:
+                    missing.append(f"{strat_name}:{issue.instance_id}")
 
-    if finished_total == expected_total:
+    incomplete_marker = Path(f"{exp_dir}/INCOMPLETE.json")
+    if covered_total == expected_total:
         logger.success(
-            f"Completeness: {finished_total}/{expected_total} finished runs recorded."
+            f"Completeness: {covered_total}/{expected_total} runs completed."
         )
+        # Clear a stale marker. It was written only on the failure branch and never
+        # removed, so a successful resume left a permanent alarm claiming the
+        # experiment was short -- and a stale alarm is indistinguishable from a
+        # live one.
+        if incomplete_marker.exists():
+            try:
+                incomplete_marker.unlink()
+                logger.info("Cleared the INCOMPLETE.json left by an earlier session.")
+            except OSError as exc:
+                logger.warning(f"Could not remove the stale INCOMPLETE.json: {exc}")
     else:
         logger.error(
-            f"Completeness: {finished_total}/{expected_total} finished runs recorded "
-            f"-- {len(missing)} run(s) did NOT complete."
+            f"Completeness: {covered_total}/{expected_total} runs completed "
+            f"-- {len(missing) + len(failed)} run(s) not covered."
         )
+        for entry in failed[:20]:
+            logger.error(f"    ran but FAILED: {entry}")
         for entry in missing[:20]:
-            logger.error(f"    incomplete: {entry}")
-        if len(missing) > 20:
-            logger.error(f"    ... and {len(missing) - 20} more")
+            logger.error(f"    never ran: {entry}")
+        if len(missing) + len(failed) > 20:
+            logger.error(f"    ... and {len(missing) + len(failed) - 20} more")
         logger.error(
             "  Re-run with --resume to finish the incomplete runs before analysing."
         )
@@ -799,12 +1030,14 @@ def run_experiments(
         # complete sweep just because the process exited 0.
         completeness = {
             "expected": expected_total,
-            "finished": finished_total,
-            "missing": missing,
+            "completed": covered_total,
+            "failed": failed,
+            "never_ran": missing,
+            "missing": failed + missing,  # kept for readers of the old key
             "complete": False,
         }
         try:
-            Path(f"{exp_dir}/INCOMPLETE.json").write_text(
+            incomplete_marker.write_text(
                 json.dumps(completeness, indent=2), encoding="utf-8"
             )
         except OSError as exc:

@@ -203,14 +203,30 @@ def classify_summary(
     # is nonsense. Failing loudly here is better than emitting a rate above 100%
     # that a reader might quote: the duplicate-row bug produced exactly that and
     # was only caught by inspecting the output by hand.
-    if resolved_count > total_count:
-        raise AssertionError(
-            f"classification error: resolved={resolved_count} exceeds "
-            f"total={total_count}. This means an instance was counted more than "
-            f"once; refusing to report a rate above 100%."
+    #
+    # Returned as a flag rather than raised. A raise here happens AFTER Modal has
+    # already run and been paid for, and a stale summary (the harness reuses a run
+    # id, or resolved_ids carries an id from an earlier submission) would throw
+    # away the whole evaluation over a bookkeeping mismatch. The per-instance rows
+    # are still correct; only the ratio is suspect, so the ratio is what gets
+    # withheld -- see main().
+    rate_is_valid = resolved_count <= total_count
+    if not rate_is_valid:
+        print(
+            f"  ERROR: resolved={resolved_count} exceeds total={total_count}. "
+            f"An instance was counted more than once, so the success rate is NOT "
+            f"meaningful and must not be quoted. Per-instance rows are still "
+            f"written; check the predictions file for duplicate instance ids."
         )
 
-    return results, resolved_count, total_count, len(empty_ids), len(error_ids)
+    return {
+        "results": results,
+        "resolved": resolved_count,
+        "total": total_count,
+        "empty": len(empty_ids),
+        "errors": len(error_ids),
+        "rate_is_valid": rate_is_valid,
+    }
 
 
 def main():
@@ -317,9 +333,13 @@ def main():
         summary_file = summary_files[-1]
         print(f"Reading summary from {summary_file}")
         summary = json.loads(summary_file.read_text(encoding="utf-8"))
-        results, resolved_count, total_count, empty_count, error_count = classify_summary(
-            summary, predictions_list, log_dir
-        )
+        classified = classify_summary(summary, predictions_list, log_dir)
+        results = classified["results"]
+        resolved_count = classified["resolved"]
+        total_count = classified["total"]
+        empty_count = classified["empty"]
+        error_count = classified["errors"]
+        rate_is_valid = classified["rate_is_valid"]
     else:
         # Fallback: look for report.json in local logs (if Modal synced them)
         total_count = 0
@@ -331,6 +351,7 @@ def main():
             results.append(enrich_instance_result(inst_id, resolved, log_dir))
             if resolved:
                 resolved_count += 1
+        rate_is_valid = True
 
     # Rate over SUBMITTED instances -- the conservative headline, comparable
     # across levels, and the same convention the SWE-bench paper uses. An empty
@@ -357,10 +378,15 @@ def main():
         print(f"Empty patches: {empty_count}  <-- run died, NOT a wrong patch")
     if error_count:
         print(f"Harness errors: {error_count}")
-    print(f"Success rate: {success_rate:.1f}%  (resolved/submitted)")
-    if graded_count != total_count:
-        print(f"              {success_rate_graded:.1f}%  (resolved/graded, "
-              f"n={graded_count}; excludes empty patches and errors)")
+    if rate_is_valid:
+        print(f"Success rate: {success_rate:.1f}%  (resolved/submitted)")
+        if graded_count != total_count:
+            print(f"              {success_rate_graded:.1f}%  (resolved/graded, "
+                  f"n={graded_count}; excludes empty patches and errors)")
+    else:
+        print("Success rate: WITHHELD -- resolved exceeds submitted, so the")
+        print("              classification double-counted an instance. The")
+        print("              per-instance rows below are still valid.")
     print("=" * 60)
 
     # Save results
@@ -374,8 +400,11 @@ def main():
             "harness_errors": error_count,
             "resolved": resolved_count,
             "unresolved": total_count - resolved_count - empty_count - error_count,
-            "success_rate": success_rate,
-            "success_rate_graded": success_rate_graded,
+            # Null rather than a wrong number: a rate above 100% must never be
+            # written where a reader could pick it up.
+            "success_rate": success_rate if rate_is_valid else None,
+            "success_rate_graded": success_rate_graded if rate_is_valid else None,
+            "success_rate_is_valid": rate_is_valid,
             "results": results,
         }, f, indent=2, default=str)
     print(f"Results saved to {output_file}")
