@@ -1,9 +1,9 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-09-30 22:50 WIB
-**Status:** **SIAP run 50 issue.** Keputusan user: **budget skala referensi (200 turn, total sama 200/200/200)** + **trajectory penuh seluruh aktivitas agen**. Guard context window ditambahkan (sebelumnya tidak ada). **349 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk menjalankan 150 run.**
+**Last Updated:** 2026-10-01 01:05 WIB
+**Status:** **SIAP run 50 issue** (setelah verifikasi pilot ulang). Budget 200 turn (total sama 200/200/200). Trajectory penuh + guard context window. **7 cacat prompt & penegakan diperbaiki** (3 prompt + 2 lubang penegakan + fallback diam + referensi mati). **408 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
 **Active Branch:** `19/toolcall-commandcode`
-**Detail sesi terakhir:** [`VERIFY_FIXES_P7.md`](VERIFY_FIXES_P7.md) · [`VERIFY_FIXES_P8.md`](VERIFY_FIXES_P8.md) · [`AUDIT_RUN_READINESS.md`](AUDIT_RUN_READINESS.md) · [`AUDIT_DATA_INTEGRITY.md`](AUDIT_DATA_INTEGRITY.md) · [`RESEARCH_BUDGET_20260929.md`](RESEARCH_BUDGET_20260929.md)
+**Detail sesi terakhir:** [`AUDIT_PROMPTS_PARTNER.md`](AUDIT_PROMPTS_PARTNER.md) · [`AUDIT_RUN_TESTS_PARTNER.md`](AUDIT_RUN_TESTS_PARTNER.md) · [`RESEARCH_BUDGET_20260929.md`](RESEARCH_BUDGET_20260929.md)
 
 > ⛔ **GATE — WAJIB KONFIRMASI USER:** Jangan jalankan run besar (50 issue / multi-jam)
 > tanpa persetujuan eksplisit dari user. Boleh tanpa konfirmasi: unit test, smoke test
@@ -485,7 +485,70 @@ dijawab eksperimen: *"dengan 40 turn yang sama, strategi mana yang terbaik?"*
 → act revisinya dapat 1 turn, 0 edit → **tidak ada satu pun yang mengukur review+revisi.**
 Angka-angka itu **tidak komparabel** dengan run 50 yang akan datang.
 
-##### ✅ BUDGET NAIK KE SKALA REFERENSI: **200 turn** (keputusan user)
+##### 🔴 CACAT KRITIS: planner jalan dengan prompt NON-TOOL (ditemukan dari pilot 15 run)
+
+**Gejala:** planner **0 tool call di 6 dari 9 run**. Terlihat seperti planner "memilih tidak membaca
+kode". **Sebabnya bukan itu.**
+
+**Akar masalah:** `BaseAgent._tool_template()` memuat `<prompt>_tools.md` dan **jatuh ke prompt dasar
+secara diam-diam** kalau file itu tidak ada. `planner_tools.md` **tidak pernah ada**, jadi planner
+menerima `planner.md` — yang berbunyi *"Output ONLY valid JSON"* dan **tidak menyebut tool sama sekali**.
+
+**Akibatnya 3 instruksi saling bertabrakan** (dibuktikan partner dengan merender prompt nyata —
+planner menerima **7.393 karakter**):
+
+| Sumber | Isi |
+|---|---|
+| `shared_static.md` | *"produce a correct, minimal code change as a unified diff"* + 10 aturan patch |
+| `planner.md` (fallback) | *"Output ONLY valid JSON"* |
+| system prompt read-only | *"Explore with read_file / grep / list_files"* |
+
+**Perbaikan:** `planner_tools.md` dibuat — mewajibkan bukti **sebelum** hipotesis (cari dengan
+`grep`/`list_files` → baca → telusuri mekanisme → baru jawab). Fallback tetap ada (file hilang tidak
+boleh membuat sweep crash) tapi sekarang **memperingatkan dan menyebut nama file**.
+
+**Verifikasi end-to-end:** planner **0 → 7 tool call**, dan rencananya menyitir **nomor baris nyata**
+(`global_settings.py:307`, `storage.py:283-284`) alih-alih pengetahuan umum.
+
+##### 🔴 3 cacat prompt lain (semua diperbaiki)
+
+1. **`shared_static.md` menyuruh SEMUA role menulis patch.** Header ini di-prepend ke **keempat role**
+   (`PROMPT_CACHE_LAYOUT=true` di `.env`, aktif saat pilot). Planner & reviewer read-only disuruh
+   "produce a unified diff". Ditulis ulang: menyatakan role berbeda, aturan patch jadi **bersyarat**,
+   plus aturan bukti. Tiga contoh diff dihapus (5.893 → 3.660 char); `direct_prompt.md` &
+   `executor.md` tetap punya aturan hunk sendiri — ada test yang menjaganya.
+2. **4 prompt menyitir `SOURCE CODE (base commit)`** yang **tidak pernah diinjeksi**
+   (`Issue.to_agent_prompt()` selalu mengembalikan problem statement saja). Dihapus dari
+   `planner.md`, `reviewer.md`, `executor.md`, `direct_prompt.md`.
+3. **`_tool_template()` fallback diam-diam** → sekarang memperingatkan.
+
+##### 🔴 2 LUBANG PENEGAKAN (audit partner, dibuktikan konstruktif)
+
+**Lubang 1 — `execute_tool` tidak memeriksa role.** Provider hanya dikirim *schema* di `AGENT_TOOLS`
+— itu filter **apa yang ditawarkan**, bukan **apa yang boleh dijalankan**. Partner membuktikan:
+`execute_tool("write_file", ...)` **berhasil** untuk reviewer. Jadi premis *"reviewer tidak mengarang
+kode"* bergantung pada model tidak menebak nama tool yang tidak ditampilkan.
+
+**Lubang 2 — `run_tests` adalah shell arbitrer** (`shell=True`). Reviewer bisa menulis ulang file
+yang sedang ia nilai — dan di **jalur revisi** (`review_strategy.py:201` mengambil diff **setelah**
+act reviewer) tulisan itu **masuk ke patch yang dikirim**. Partner membuktikan **3/3 trial bocor**.
+
+**Tidak pernah terjadi di data** (0 dari 20 call reviewer), jadi ini menutup lubang yang bisa
+dieksploitasi, bukan memperbaiki kegagalan yang terukur.
+
+**Guard pertamaku SALAH dan ditangkap run nyata:** ia menolak
+`cd /tmp && cat > t.py <<'EOF'` — reviewer menulis **probe scratch di LUAR repo**, yang merupakan
+verifikasi sah. Batasnya sekarang **"apakah ini menulis KE DALAM repo"**, bukan "apakah ini menulis":
+target absolut di luar repo dan `cd` keluar repo **diizinkan**; target relatif & di dalam repo
+**ditolak**. `tools/verify_write_boundary.py` menguji 22 kasus di batas itu — **semua lulus**.
+
+**Kontrol negatif mengunci kedua classifier:** percobaan pertamaku menandai **setiap** panggilan
+pytest sebagai write (menganggap `2>&1` sebagai redirect), dan percobaan pertama partner
+menghasilkan **13 write palsu** dari `->` di dalam string yang di-print.
+
+**408 test lulus** (dari 363).
+
+---
 
 Keputusan user: berhenti memutar-mutar masalah truncation, pakai angka referensi.
 `TOTAL_TOOL_TURNS` **40 → 200**.
