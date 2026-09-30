@@ -37,6 +37,17 @@ class InferenceResult:
     # log warnings after the fact -- is how EXP-20260928-003 ended up reporting
     # 8/8/6 with no truncation count.
     truncated: bool = False
+    # The FULL turn-by-turn record of a tool-calling act: every assistant turn
+    # (its text, its reasoning, the tools it asked for) and every tool result it
+    # saw, in order. Without this the only trace of an act was its LAST message
+    # plus a flat list of calls, so the reasoning behind each individual step --
+    # why the agent read that file, why it abandoned that approach -- was not
+    # recoverable from the artifacts at all.
+    #
+    # Each entry is a dict with a "type" of "assistant" or "tool" (see
+    # providers/tool_loop.py). Kept on the result rather than reconstructed from
+    # the provider message list because that list is discarded when the act ends.
+    trajectory: list = field(default_factory=list)
 
     def __post_init__(self):
         if not self.timestamp:

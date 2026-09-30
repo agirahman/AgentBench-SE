@@ -68,16 +68,45 @@ ROOT = Path(__file__).resolve().parent.parent
 
 MODEL = "cbai/deepseek-v4.1-flash"
 
-#: The whole task's turn allowance. Identical for all three strategies.
-TOTAL_TURNS = 40
+#: The whole task's turn allowance, identical for all three strategies.
+#:
+#: 200, from the reference implementations rather than from tuning:
+#:
+#:   SWE-bench Pro (2025)   "maximum of 200 turns" per task  (arxiv 2509.16941v1)
+#:   mini-SWE-agent         step_limit 250 per task          (swebench.yaml L112)
+#:   OpenHands              max_iterations 500 per task      (config_utils.py)
+#:   SWE-agent              no step cap at all, $3 per task   (models.py)
+#:
+#: The earlier pool of 40 was 5-12x tighter than every published cap and caused
+#: the problem this replaces: acts ran out of turns mid-exploration, so their
+#: results measured the budget rather than the strategy. Measured cost of that:
+#: 3 truncated acts at pool 40 (EXP-20260929-003) and 5 in the 15-run pilot,
+#: including the revision act that then made 0 edits.
+#:
+#: 200 is chosen from the two turn-based references (200, 250) as the more
+#: conservative of the pair. At 200 a truncation is now informative -- it means
+#: the agent genuinely needed more than a reference-scale allowance, not that we
+#: picked a number 5x below everyone else's.
+TOTAL_TURNS = 200
 #: Turns review sets aside for revising, carved out of TOTAL_TURNS.
-REVISION_TURNS = 8
+#:
+#: 32 = 4 rounds x 8 turns. Sized from the measured need: in the pilot, acts that
+#: successfully edited used 6-17 turns, so 4 turns per act (the old reserve=8 split
+#: across 2 acts) could never revise anything -- the revision act spent all 4
+#: reading and made 0 edits, and the re-review then approved the unchanged patch.
+REVISION_TURNS = 32
 #: Guaranteed turns for each act still to come, in per_task mode.
 FLOOR = 10
 #: Dollar backstop per task -- the reference implementations' value ($3).
 COST_LIMIT_USD = 3.00
 #: Wall-clock bound per act, so retry backoff cannot hang a run for hours.
-ACT_TIMEOUT_SECONDS = 1800
+#:
+#: Raised from 1800: at a 200-turn allowance an act legitimately runs longer, and
+#: a bound that fires on a HEALTHY act converts a good run into a truncated one.
+#: Measured worst case at pool 100 was 5,992 s for a single review run (a 502,
+#: not a slow success), so 3600 still bounds the pathological case while leaving
+#: room for an honest long act.
+ACT_TIMEOUT_SECONDS = 3600
 
 
 def select_issues(limit: int | None) -> list[str]:
@@ -179,12 +208,18 @@ def main() -> int:
     print(f"  budget     : per_task, total {TOTAL_TURNS} turns per strategy")
     print(f"               direct {TOTAL_TURNS} | planning {TOTAL_TURNS} | "
           f"review {TOTAL_TURNS - REVISION_TURNS}+{REVISION_TURNS} = {TOTAL_TURNS}")
+    print(f"  reference  : SWE-bench Pro 200 / mini-SWE-agent 250 / OpenHands 500")
+    print(f"               (per task; ours was 40 = 5-12x tighter than all of them)")
     print(f"  cost cap   : ${COST_LIMIT_USD:.2f} per task (backstop, reference value)")
     print(f"  act timeout: {ACT_TIMEOUT_SECONDS}s per act (bounds retry backoff)")
     print()
     print(f"  Fairness   : every strategy's task budget is {TOTAL_TURNS} turns, so a")
     print(f"               review win cannot be explained by a larger budget.")
     print(f"               Review sets {REVISION_TURNS} of its own turns aside to revise.")
+    print()
+    print(f"  Trajectory : per turn -- assistant text + reasoning + tool calls, then")
+    print(f"               each tool result. Written to artifacts/<instance>/<strategy>/")
+    print(f"               trajectory.jsonl (and trajectory.md to read directly).")
     print()
     print("  Check first: python tools/preflight_repos.py")
     print()

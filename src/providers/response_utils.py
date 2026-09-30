@@ -19,6 +19,40 @@ def _extract_content(message) -> str:
     return content
 
 
+def _extract_reasoning(message) -> str:
+    """Read the model's reasoning channel, whatever shape the provider returns.
+
+    Providers disagree on the field name and the container type: DeepSeek and
+    most OpenAI-compatible routes use ``reasoning_content`` (a string), some
+    gateways use ``reasoning`` or ``thinking``, and a few return a LIST of parts
+    (or a dict) rather than one string. Reading only ``reasoning_content`` and
+    assuming a string silently discarded the reasoning of every provider that
+    spelled it differently -- and since the field is optional, the loss was
+    invisible: an empty string looks the same as "the model did not think".
+
+    Used both for the act's final answer and for every turn of the tool loop, so
+    a trajectory can show the reasoning that led to each tool call rather than
+    only the last one.
+    """
+    for field in ("reasoning_content", "reasoning", "thinking"):
+        value = getattr(message, field, None)
+        if not value:
+            continue
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            return "".join(str(part) for part in value)
+        if isinstance(value, dict):
+            # Some gateways nest it: {"content": "..."} or {"text": "..."}.
+            for key in ("content", "text", "summary"):
+                inner = value.get(key)
+                if isinstance(inner, str) and inner:
+                    return inner
+            return str(value)
+        return str(value)
+    return ""
+
+
 def _extract_cached_tokens(usage) -> int:
     """Read cached input tokens from provider usage (OpenAI / DeepSeek formats)."""
     if usage is None:
@@ -77,11 +111,7 @@ def build_openai_inference_result(response, *, role: str = "", model: str = "", 
         message = getattr(choice, "message", None)
         if message is not None:
             content = _extract_content(message)
-            reasoning = getattr(message, "reasoning_content", "") or ""
-            if isinstance(reasoning, list):
-                reasoning = "".join(str(p) for p in reasoning)
-            elif not isinstance(reasoning, str):
-                reasoning = str(reasoning)
+            reasoning = _extract_reasoning(message)
     else:
         finish = "EMPTY_RESPONSE"
         logger.warning(f"Provider returned no choices for role={role!r} model={model!r}")

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 from config import Config
@@ -29,7 +30,12 @@ from utils.logger import logger
 from models.inference import InferenceResult
 from evaluation.cost import PricingTable
 from evaluation.retry import call_with_retry
-from providers.response_utils import build_openai_inference_result, _extract_cached_tokens
+from providers.response_utils import (
+    build_openai_inference_result,
+    _extract_cached_tokens,
+    _extract_content,
+    _extract_reasoning,
+)
 from providers.system_prompts import TOOL_SYSTEM_PROMPT, EDITING_ROLES as _EDITING_ROLES
 from agents.tools import TOOL_SCHEMAS, execute_tool, set_repo_root
 
@@ -73,6 +79,37 @@ def _cost_so_far(usage_totals: dict, rates: dict) -> float:
     )
 
 
+def _trim_messages_for_context(messages: list[dict], keep_chars: int) -> None:
+    """Shrink the oldest tool outputs in place so one more request can fit.
+
+    Only called when a request has ALREADY been rejected for context length, so
+    the goal is narrow: make the next request fit without discarding the recent
+    evidence the agent needs to answer. The most recent tool results are kept
+    intact and the oldest are cut to a short head, because a decision about what
+    to do next depends on what was just read, not on the first file opened.
+
+    Rebuilding the conversation from scratch (the alternative) would throw away
+    the whole exploration, which is exactly the failure the per-request retry in
+    this module exists to avoid.
+    """
+    tool_indexes = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+    if not tool_indexes:
+        return
+
+    # Keep the last few results whole; shrink everything before them.
+    protected = set(tool_indexes[-3:])
+    for idx in tool_indexes:
+        if idx in protected:
+            continue
+        content = messages[idx].get("content") or ""
+        if len(content) <= keep_chars:
+            continue
+        messages[idx]["content"] = (
+            content[: keep_chars // 2]
+            + "\n… [trimmed to fit the model's context limit] …\n"
+        )
+
+
 def _retryable_response(resp) -> bool:
     """True when a single response would end the loop with nothing.
 
@@ -88,6 +125,33 @@ def _retryable_response(resp) -> bool:
     if getattr(msg, "tool_calls", None):
         return False
     return not (getattr(msg, "content", "") or "").strip()
+
+
+def _is_context_overflow(exc: Exception) -> bool:
+    """True when the provider rejected a request because the prompt is too long.
+
+    A context overflow is NOT a transient failure, so it must not be retried: the
+    conversation only grows, so the same request fails again, and each retry pays
+    for the tokens again. Worse, ``call_with_retry`` would classify it as a
+    provider error and the act would be marked failed -- reporting a context limit
+    as a strategy failure.
+
+    Matched by message text because providers disagree on the status code (some
+    use 400, some 413) and the OpenAI SDK surfaces the body text.
+    """
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "context length",
+            "context_length",
+            "maximum context",
+            "too many tokens",
+            "reduce the length",
+            "prompt is too long",
+            "input is too long",
+        )
+    )
 
 
 def run_tool_loop(
@@ -167,6 +231,7 @@ def run_tool_loop(
     cost_rates = PricingTable.rates_for(model, "off_peak") if capped else None
     cost_exceeded = False
     wall_exceeded = False
+    context_exceeded = False
 
     # Always sync the sandbox to THIS instance's repo root. Passing None resets
     # it to the shared base — never silently reuse a previous instance's root.
@@ -177,6 +242,13 @@ def run_tool_loop(
         {"role": "user", "content": prompt},
     ]
     recorded_calls: list[dict] = []
+    # Full turn-by-turn record. The provider's own ``messages`` list is discarded
+    # when the act ends, so without this the only surviving trace of an act was
+    # its final answer plus a flat call list: the reasoning behind each step, and
+    # what the agent saw when it decided, were both gone. Kept separate from
+    # ``recorded_calls`` (which stays for the existing per-call summary) so no
+    # consumer has to change at once.
+    trajectory: list[dict] = []
     usage_totals = {
         "prompt_tokens": 0,
         "completion_tokens": 0,
@@ -230,6 +302,11 @@ def run_tool_loop(
         return call_with_retry(
             _attempt,
             retry_on=_retryable_response,
+            # A context overflow cannot be cured by resending: the conversation
+            # only grows. Retrying it burns the backoff schedule AND pays for the
+            # same oversized prompt again, and it hides the error from the caller's
+            # own handler until the final attempt.
+            fatal_on=_is_context_overflow,
             label=label,
         )
 
@@ -245,6 +322,7 @@ def run_tool_loop(
         result.usage = dict(usage_totals)
         result.tool_calls = recorded_calls
         result.api_turns = max(1, api_turns)
+        result.trajectory = list(trajectory)
         return result
 
     for turn in range(1, max_tool_turns + 1):
@@ -306,10 +384,50 @@ def run_tool_loop(
                 )
             messages.append({"role": "user", "content": wrap_up})
 
-        response = _create(kwargs, f"tool_loop[{role}] turn {turn}")
+        try:
+            response = _create(kwargs, f"tool_loop[{role}] turn {turn}")
+        except Exception as exc:  # noqa: BLE001
+            # A context overflow is terminal, not transient: the conversation only
+            # grows, so retrying the same request fails again and is billed again.
+            # Stop the act and ask for a final answer from what is already known,
+            # the same recovery the turn/cost/clock bounds use. Without this the
+            # act is marked FAILED by the provider-error path, which reports a
+            # context limit as a strategy failure.
+            if not _is_context_overflow(exc):
+                raise
+            context_exceeded = True
+            logger.warning(
+                f"Tool loop hit the model's context limit for role={role} after "
+                f"{turn - 1} turn(s) -- stopping and requesting a final answer "
+                f"({str(exc)[:160]})"
+            )
+            break
         api_turns += 1
         choice = response.choices[0]
         msg = choice.message
+
+        # Record the assistant turn BEFORE branching on whether it called a tool,
+        # so the turn that ENDS the act is in the trajectory too. Recording only
+        # turns with tool calls would drop the final answer from the record and
+        # make it look like the act stopped mid-flight.
+        assistant_entry = {
+            "type": "assistant",
+            "turn": turn,
+            "role": role,
+            "content": getattr(msg, "content", "") or "",
+            "reasoning": _extract_reasoning(msg),
+            "finish_reason": getattr(choice, "finish_reason", "") or "",
+            "tool_calls": [
+                {
+                    "id": getattr(tc, "id", ""),
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                }
+                for tc in (getattr(msg, "tool_calls", None) or [])
+            ],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        trajectory.append(assistant_entry)
 
         if not getattr(msg, "tool_calls", None):
             return _finalize(response)
@@ -345,6 +463,23 @@ def run_tool_loop(
                 {"name": name, "arguments": args, "result": tool_out[:2000]}
             )
             logger.info(f"[toolcall] role={role} tool={name} args={args}")
+            # The trajectory keeps the FULL result; the summary above keeps the
+            # 2000-char preview. Truncating here would defeat the point of a
+            # trajectory: the line that explains a decision is often the one a
+            # preview cuts. Size is bounded by the run itself, not by this field.
+            trajectory.append(
+                {
+                    "type": "tool",
+                    "turn": turn,
+                    "role": role,
+                    "tool_call_id": getattr(tc, "id", ""),
+                    "name": name,
+                    "arguments": args,
+                    "result": tool_out,
+                    "result_chars": len(tool_out),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
             messages.append(
                 {
                     "role": "tool",
@@ -359,19 +494,87 @@ def run_tool_loop(
     # result truncated -- an act stopped by cost or by the clock is exactly as
     # unattributable to the strategy as one stopped by turns.
     if wall_exceeded:
+        stop_reason = "wall_clock"
         logger.warning(
             f"Tool loop stopped on wall clock for role={role} "
             f"(bound {max_wall_seconds:.0f}s, elapsed {time.perf_counter() - t0:.0f}s)"
         )
+    elif context_exceeded:
+        stop_reason = "context_limit"
+        # No extra log line: the warning was already emitted at the point of
+        # failure, where the turn number is known.
     elif cost_exceeded:
+        stop_reason = "cost"
         logger.warning(
             f"Tool loop stopped on cost for role={role} "
             f"(cap ${max_cost_usd}, spent ${_cost_so_far(usage_totals, cost_rates or {}):.4f})"
         )
     else:
+        stop_reason = "max_tool_turns"
         logger.warning(f"Tool loop hit max_tool_turns={max_tool_turns} for role={role}")
-    response = _create(_base_kwargs(), f"tool_loop[{role}] final-answer")
+
+    # Mark the cutoff in the trajectory itself. Reading it only from the log meant
+    # the record showed a run that "ended" with a summary, indistinguishable from
+    # one that finished on its own -- the exact confusion that made EXP-003's
+    # 8/8/6 headline number unreadable.
+    trajectory.append(
+        {
+            "type": "bound_reached",
+            "turn": api_turns,
+            "role": role,
+            "stop_reason": stop_reason,
+            "granted_turns": max_tool_turns,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+    # Ask for a final answer without tools. The one case where this cannot work is
+    # a CONTEXT overflow: the conversation is still too long, so the same request
+    # fails again -- and would raise out of the loop, losing the whole act. Trim the
+    # oldest tool outputs first so the request fits, because an act that returns a
+    # partial answer is worth far more than one that returns nothing.
+    if context_exceeded:
+        _trim_messages_for_context(messages, output_limit)
+
+    try:
+        response = _create(_base_kwargs(), f"tool_loop[{role}] final-answer")
+    except Exception as exc:  # noqa: BLE001
+        if not _is_context_overflow(exc):
+            raise
+        logger.warning(
+            f"Tool loop could not produce a final answer within the context limit "
+            f"for role={role}; returning what was established "
+            f"({str(exc)[:120]})"
+        )
+        result = InferenceResult(
+            role=role,
+            response="",
+            usage=dict(usage_totals),
+            execution_time=time.perf_counter() - t0,
+            finish_reason="context_limit",
+            model=model,
+            tool_calls=recorded_calls,
+            api_turns=max(1, api_turns),
+            trajectory=list(trajectory),
+        )
+        result.truncated = True
+        return result
     api_turns += 1
+    final_choice = response.choices[0] if getattr(response, "choices", None) else None
+    final_msg = getattr(final_choice, "message", None) if final_choice else None
+    trajectory.append(
+        {
+            "type": "assistant",
+            "turn": max_tool_turns + 1,
+            "role": role,
+            "content": _extract_content(final_msg) if final_msg is not None else "",
+            "reasoning": _extract_reasoning(final_msg) if final_msg is not None else "",
+            "finish_reason": getattr(final_choice, "finish_reason", "") or "",
+            "tool_calls": [],
+            "is_final_answer_after_bound": True,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    )
     result = _finalize(response)
     result.truncated = True
     return result

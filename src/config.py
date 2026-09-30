@@ -174,18 +174,27 @@ class Config:
     # Strategy-wide tool-turn pool, so the three strategies get the same TOTAL
     # instead of a total that is an accident of how many agents they have.
     # See agents/budget.py. Set to 0 to fall back to the legacy per-act cap.
+    #
+    # The default is 60, not 200: 200 is a RUN DECISION (tools/run_final_sweep.py
+    # sets it explicitly) sized from the reference implementations, while this
+    # default keeps an ad-hoc invocation from silently spending 5x the tokens.
     TOTAL_TOOL_TURNS = _get_int_env("TOTAL_TOOL_TURNS", 60)
     # Turns review sets aside, out of its OWN task pool, for revision acts.
     # Carved out of TOTAL_TOOL_TURNS rather than added to it, so every strategy's
-    # task still costs the same: with total=40 and this=8, direct and planning get
-    # 40 and review gets 32 base + 8 revision = 40. That equality is what makes
-    # the comparison fair; an earlier version added the reserve on top, giving
-    # review 48 turns against 40 and confounding any claim that review is better.
-    # EXP-20260928-003 measured the failure the reserve fixes: review's base acts
-    # spent the whole pool, the revision act was granted 1 turn, and the
-    # reviewer's correct diagnosis (django-11001: use re.DOTALL) could not be
-    # applied. 0 = legacy behaviour, where revisions draw the base remainder and
-    # get a floor of 1 turn -- and the review arm cannot really revise.
+    # task still costs the same: with total=200 and this=32, direct and planning
+    # get 200 and review gets 168 base + 32 revision = 200. That equality is what
+    # makes the comparison fair; an earlier version added the reserve on top,
+    # giving review a larger budget and confounding any claim that review is better.
+    #
+    # Sized from measurement, not taste. EXP-20260928-003 showed a revision with 1
+    # turn cannot edit (django-11001: the reviewer diagnosed re.DOTALL correctly
+    # and the fix could not be applied). The 15-run pilot then showed 4 turns is
+    # still not enough -- the revision act spent all four reading and made 0 edits,
+    # while acts that DID edit used 6-17 turns. 32 = 4 rounds x 8 turns, so each
+    # revision and re-review gets 8.
+    #
+    # 0 = legacy behaviour, where revisions draw the base remainder and get a floor
+    # of 1 turn -- and the review arm cannot really revise.
     REVISION_TOOL_TURNS = _get_int_env("REVISION_TOOL_TURNS", 0)
     # How the strategy-wide pool is handed out. "per_act" (default) splits the
     # remainder evenly at each act, which caps the first act and can leave a

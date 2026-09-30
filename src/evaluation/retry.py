@@ -114,6 +114,7 @@ def call_with_retry(
     retry_on: callable = None,
     rate_limit_base_delay: float = None,
     rate_limit_max_delay: float = None,
+    fatal_on: callable = None,
     label: str = "call",
 ):
     """Call ``func`` once, retrying that SINGLE call on failure.
@@ -128,6 +129,14 @@ def call_with_retry(
 
     Calling this INSIDE the loop keeps both the exploration and the budget
     intact — a timeout on turn N resends turn N only.
+
+    ``fatal_on`` is an optional callable ``(exc) -> bool`` marking errors that a
+    retry cannot fix. Such an exception is re-raised IMMEDIATELY, without the
+    backoff schedule. The case that needs it is a context overflow: the
+    conversation only grows, so every retry fails identically -- and is billed
+    again -- while the run sits through 2s + 4s of pointless sleeping. Without
+    this the caller's own handler never sees the error either, because the retry
+    wrapper swallows it until the last attempt.
 
     Same schedule and ``retry_on`` semantics as ``with_retry``: a retryable
     result on the final attempt is returned (not raised) so the caller can
@@ -170,6 +179,12 @@ def call_with_retry(
             return result
         except Exception as e:
             last_exc = e
+            if fatal_on is not None and fatal_on(e):
+                logger.warning(
+                    f"{label} failed with a non-retryable error after "
+                    f"{attempt} attempt(s) — not retrying: {e}"
+                )
+                raise
             if attempt >= retries:
                 logger.error(f"{label} failed after {retries} attempts: {e}")
                 raise

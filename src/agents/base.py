@@ -127,6 +127,12 @@ class BaseAgent(ABC):
             kind="result",
             bb_ops=ops,
             tool_calls=getattr(inference, "tool_calls", []),
+            # Carry the act's full turn-by-turn record onto the blackboard message,
+            # so messages.jsonl is the trajectory rather than a summary of it. The
+            # InferenceResult is consumed here and never serialised, so anything not
+            # copied onto the message is lost when the run ends.
+            trajectory=getattr(inference, "trajectory", []) or [],
+            truncated=bool(getattr(inference, "truncated", False)),
         )
         context.log(response)
         return AgentResponse(message=response, inference=inference)

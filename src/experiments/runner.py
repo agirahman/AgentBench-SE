@@ -52,6 +52,16 @@ def _save_artifacts(
 
     Dipisah per strategi agar ``messages.jsonl``, ``patch.txt``, dan ``<role>.md``
     setiap strategi tidak saling menimpa.
+
+    Berkas yang ditulis:
+
+    * ``trajectory.jsonl`` -- rekaman LENGKAP per turn: setiap turn asisten (teks +
+      reasoning + tool yang diminta) dan setiap hasil tool, berurutan. Ini trajectory
+      utama; ``messages.jsonl`` menyimpan percakapan antar-agen.
+    * ``trajectory.md`` -- versi manusiawi dari berkas di atas, untuk dibaca langsung.
+    * ``<role>.md`` -- respons FINAL agen tersebut. Nama berkas per-role berarti act
+      berikutnya MENIMPA act sebelumnya (review punya dua act executor), jadi berkas
+      ini hanya bertahan untuk act terakhir; trajectory.jsonl menyimpan semuanya.
     """
     art_dir = Path(f"{output_dir}/artifacts/{instance_id}/{strategy_name}")
     art_dir.mkdir(parents=True, exist_ok=True)
@@ -60,12 +70,41 @@ def _save_artifacts(
         if not inf.role:
             continue
         (art_dir / f"{inf.role}.md").write_text(inf.response, encoding="utf-8")
-        # Persist the model's reasoning channel separately (thinking mode).
-        # Critical for diagnosing premature-stop failures where content holds
-        # only a preamble while the actual reasoning lives here.
-        reasoning = getattr(inf, "reasoning_content", "") or ""
-        if reasoning.strip():
-            (art_dir / f"{inf.role}_reasoning.md").write_text(reasoning, encoding="utf-8")
+
+    # The reasoning channel, per role. Two sources, and the trajectory comes first
+    # because the final-response field alone is badly incomplete: measured on
+    # EXP-20260930-249 (thinking ON), 12 of 19 assistant turns carried reasoning
+    # while the FINAL turn carried none -- so writing only `inf.reasoning_content`
+    # produced no file at all, and a reader (or a check script) would conclude
+    # thinking was off while 12 turns of it sat unrecorded.
+    #
+    # Keeping the filename means existing tooling keeps working; the content is now
+    # every turn's reasoning rather than only the last one's.
+    for inf in inferences:
+        if not inf.role:
+            continue
+        turns = [
+            e for e in (getattr(inf, "trajectory", []) or [])
+            if e.get("type") == "assistant" and (e.get("reasoning") or "").strip()
+        ]
+        if turns:
+            blocks = [
+                f"## turn {e.get('turn')}\n\n{(e.get('reasoning') or '').strip()}"
+                for e in turns
+            ]
+            header = (
+                f"# Reasoning — role `{inf.role}`\n\n"
+                f"{len(turns)} turn(s) with a reasoning channel. "
+                f"See trajectory.jsonl for the full record.\n\n"
+            )
+            (art_dir / f"{inf.role}_reasoning.md").write_text(
+                header + "\n\n".join(blocks), encoding="utf-8"
+            )
+        elif (getattr(inf, "reasoning_content", "") or "").strip():
+            # Non-tool path: no turns to iterate, so the single response is the record.
+            (art_dir / f"{inf.role}_reasoning.md").write_text(
+                inf.reasoning_content, encoding="utf-8"
+            )
 
     (art_dir / "patch.txt").write_text(final_patch, encoding="utf-8")
 
@@ -73,6 +112,29 @@ def _save_artifacts(
         with (art_dir / "messages.jsonl").open("w", encoding="utf-8") as f:
             for msg in messages:
                 f.write(json.dumps(msg.to_dict(), ensure_ascii=False) + "\n")
+
+    # Full trajectory: one line per event, in order, across every act of the run.
+    # Written for ALL acts (not just the last of each role), which is the gap that
+    # made a rejected-then-revised run unreadable: <role>.md kept only the final
+    # act, so the reasoning behind the FIRST executor attempt -- the one the
+    # reviewer rejected -- was not in any artifact.
+    traj_lines: list[dict] = []
+    for act_index, inf in enumerate(inferences):
+        if not inf.role:
+            continue
+        for entry in getattr(inf, "trajectory", []) or []:
+            enriched = dict(entry)
+            enriched["act_index"] = act_index
+            enriched["act_role"] = inf.role
+            traj_lines.append(enriched)
+
+    if traj_lines:
+        with (art_dir / "trajectory.jsonl").open("w", encoding="utf-8") as f:
+            for entry in traj_lines:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        (art_dir / "trajectory.md").write_text(
+            _render_trajectory(traj_lines), encoding="utf-8"
+        )
 
     # Per-agent tool-call log: which tool, how many times, by which agent.
     # Each inference carries tool_calls (empty for non-tool agents).
@@ -93,6 +155,69 @@ def _save_artifacts(
         with (art_dir / "tool_calls.jsonl").open("w", encoding="utf-8") as f:
             for line in tool_lines:
                 f.write(json.dumps(line, ensure_ascii=False) + "\n")
+
+
+def _render_trajectory(entries: list[dict]) -> str:
+    """Render the trajectory as readable Markdown.
+
+    The JSONL is the machine-readable record; this is the same content a person
+    can read without a parser, which matters when the question is "what did the
+    agent actually do" and the answer is needed during a supervision session
+    rather than from a script.
+    """
+    out: list[str] = ["# Trajectory", ""]
+    for e in entries:
+        kind = e.get("type", "?")
+        turn = e.get("turn", "?")
+        role = e.get("act_role") or e.get("role") or "?"
+        if kind == "assistant":
+            out.append(f"## [{role}] turn {turn} — assistant")
+            out.append("")
+            reasoning = (e.get("reasoning") or "").strip()
+            if reasoning:
+                out.append("**Reasoning**")
+                out.append("")
+                out.append("```")
+                out.append(reasoning)
+                out.append("```")
+                out.append("")
+            content = (e.get("content") or "").strip()
+            if content:
+                out.append("**Content**")
+                out.append("")
+                out.append("```")
+                out.append(content)
+                out.append("```")
+                out.append("")
+            calls = e.get("tool_calls") or []
+            if calls:
+                out.append("**Tool calls**")
+                out.append("")
+                for c in calls:
+                    out.append(f"- `{c.get('name')}` `{c.get('arguments')}`")
+                out.append("")
+            if e.get("is_final_answer_after_bound"):
+                out.append(
+                    "_This answer was requested AFTER the act hit its bound "
+                    "(turns/cost/time), so the act did not finish on its own._"
+                )
+                out.append("")
+        elif kind == "tool":
+            out.append(f"### [{role}] turn {turn} — tool result: `{e.get('name')}`")
+            out.append("")
+            out.append(f"_{e.get('result_chars', 0)} chars_")
+            out.append("")
+            out.append("```")
+            out.append(str(e.get("result", "")))
+            out.append("```")
+            out.append("")
+        elif kind == "bound_reached":
+            out.append(
+                f"### [{role}] BOUND REACHED — {e.get('stop_reason')} "
+                f"(granted {e.get('granted_turns')} turns)"
+            )
+            out.append("")
+    return "\n".join(out)
 
 
 def _resume_key(instance_id: str, model: str, thinking: bool) -> str:
