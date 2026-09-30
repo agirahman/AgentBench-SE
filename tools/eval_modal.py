@@ -127,6 +127,62 @@ def enrich_instance_result(inst_id: str, resolved: bool, log_dir: Optional[Path]
     }
 
 
+def classify_summary(
+    summary: dict,
+    predictions_list: list,
+    log_dir: Optional[Path],
+) -> tuple[list, int, int, int, int]:
+    """Turn a Modal harness summary into per-instance rows plus counters.
+
+    Returns ``(results, resolved_count, total_count, empty_count, error_count)``.
+
+    Kept as a pure function (no Modal, no filesystem beyond the optional log_dir)
+    because the arithmetic here decides the headline number of the thesis, and it
+    was previously inlined in ``main()`` where no test could reach it -- which is
+    how an empty patch came to be counted as a strategy failure.
+
+    An empty patch is not a wrong patch. The official harness separates them
+    (``reporting.py``: `empty_patch_ids`, "Instances with empty patches"), and it
+    also drops them from the container run entirely (``run_evaluation.py:458``).
+    A run that died at the provider -- EXP-20260929-022 django-11019/review, a
+    502 -- must therefore not be averaged in as if the strategy had answered
+    wrongly.
+    """
+    resolved_ids = set(summary.get("resolved_ids", []))
+    error_ids = set(summary.get("error_ids", []))
+
+    # Prefer the harness's own submitted count; fall back to what we sent.
+    total_count = summary.get("submitted_instances") or len(predictions_list)
+
+    # The harness is authoritative about emptiness; re-derive only if it did not
+    # say, so the classification still works on an older summary schema.
+    empty_ids = set(summary.get("empty_patch_ids", []))
+    if not empty_ids:
+        empty_ids = {
+            p[KEY_INSTANCE_ID] for p in predictions_list
+            if not (p.get("model_patch") or "").strip()
+        }
+
+    results: list = []
+    resolved_count = 0
+    for pred in predictions_list:
+        inst_id = pred[KEY_INSTANCE_ID]
+        if inst_id in resolved_ids:
+            results.append(enrich_instance_result(inst_id, True, log_dir))
+            resolved_count += 1
+        elif inst_id in empty_ids:
+            row = enrich_instance_result(inst_id, False, log_dir)
+            # Do not let a stale report.json claim this patch was applied: there
+            # was no patch. The harness applies an empty diff as a no-op and its
+            # report then says applied=True, which is true but misleading.
+            row["patch_applied"] = False
+            row["failure_reason"] = "EMPTY_PATCH"
+            results.append(row)
+        else:
+            results.append(enrich_instance_result(inst_id, False, log_dir))
+    return results, resolved_count, total_count, len(empty_ids), len(error_ids)
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(
@@ -218,24 +274,22 @@ def main():
     from swebench.harness.constants import RUN_EVALUATION_LOG_DIR
     log_dir = Path(RUN_EVALUATION_LOG_DIR) / run_id / model_name
 
+    # An empty patch is not a wrong patch: the run died before producing one
+    # (provider 502 in EXP-20260929-022 django-11019/review). The official
+    # harness excludes these from the denominator and reports them in their own
+    # bucket -- reporting.py builds `empty_patch_ids` and prints "Instances with
+    # empty patches" separately. We must do the same, or a dead run silently
+    # counts as a strategy failure and drags the resolved rate down.
+    empty_count = 0
+    error_count = 0
+
     if summary_files:
         summary_file = summary_files[-1]
         print(f"Reading summary from {summary_file}")
         summary = json.loads(summary_file.read_text(encoding="utf-8"))
-        resolved_ids = set(summary.get("resolved_ids", []))
-        error_ids = set(summary.get("error_ids", []))
-        unresolved_ids = set(summary.get("unresolved_ids", []))
-        total_count = summary.get("submitted_instances", 0)
-
-        for pred in predictions_list:
-            inst_id = pred[KEY_INSTANCE_ID]
-            if inst_id in resolved_ids:
-                results.append(enrich_instance_result(inst_id, True, log_dir))
-                resolved_count += 1
-            elif inst_id in error_ids:
-                results.append(enrich_instance_result(inst_id, False, log_dir))
-            else:
-                results.append(enrich_instance_result(inst_id, False, log_dir))
+        results, resolved_count, total_count, empty_count, error_count = classify_summary(
+            summary, predictions_list, log_dir
+        )
     else:
         # Fallback: look for report.json in local logs (if Modal synced them)
         total_count = 0
@@ -248,16 +302,35 @@ def main():
             if resolved:
                 resolved_count += 1
 
+    # Rate over SUBMITTED instances -- the conservative headline, comparable
+    # across levels, and the same convention the SWE-bench paper uses. An empty
+    # patch counts as not resolved here, so a level cannot look better just
+    # because some of its runs died before producing anything.
     success_rate = (resolved_count / total_count * 100) if total_count > 0 else 0
+
+    # Rate over instances that were actually GRADED. Useful on its own, but
+    # never as the headline: review would read 100% here off two runs while
+    # direct reads 67% off three, which would flatter review for having LOST a
+    # data point to a provider outage. Both are reported so the reader can see
+    # exactly which it is.
+    graded_count = total_count - empty_count - error_count
+    success_rate_graded = (resolved_count / graded_count * 100) if graded_count > 0 else 0
 
     # Print summary
     print("\n" + "=" * 60)
     print(f"Evaluation Complete: {predictions_path.name}")
     print("=" * 60)
-    print(f"Total instances: {total_count}")
+    print(f"Total submitted: {total_count}")
     print(f"Resolved: {resolved_count}")
-    print(f"Unresolved: {total_count - resolved_count}")
-    print(f"Success rate: {success_rate:.1f}%")
+    print(f"Unresolved: {total_count - resolved_count - empty_count - error_count}")
+    if empty_count:
+        print(f"Empty patches: {empty_count}  <-- run died, NOT a wrong patch")
+    if error_count:
+        print(f"Harness errors: {error_count}")
+    print(f"Success rate: {success_rate:.1f}%  (resolved/submitted)")
+    if graded_count != total_count:
+        print(f"              {success_rate_graded:.1f}%  (resolved/graded, "
+              f"n={graded_count}; excludes empty patches and errors)")
     print("=" * 60)
 
     # Save results
@@ -266,9 +339,13 @@ def main():
             "predictions_file": str(predictions_path),
             "run_id": run_id,
             "total": total_count,
+            "graded": graded_count,
+            "empty_patches": empty_count,
+            "harness_errors": error_count,
             "resolved": resolved_count,
-            "unresolved": total_count - resolved_count,
+            "unresolved": total_count - resolved_count - empty_count - error_count,
             "success_rate": success_rate,
+            "success_rate_graded": success_rate_graded,
             "results": results,
         }, f, indent=2, default=str)
     print(f"Results saved to {output_file}")

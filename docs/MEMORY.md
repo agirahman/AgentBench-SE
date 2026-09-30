@@ -1,7 +1,7 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-09-29 21:40 WIB
-**Status:** Kurva budget **2 dari 3 level selesai** (40 ✅, 100 ✅ 8/9 usable, 200 ❌ abort). Evaluasi Modal level 100 **belum dijalankan**.
+**Last Updated:** 2026-09-30 14:45 WIB
+**Status:** Kurva budget **2 dari 3 level dievaluasi** — **40 dan 100 keduanya 2/3 di ketiga strategi (KURVA DATAR)**. Level 200 tidak jalan (abort health check).
 **Active Branch:** `19/toolcall-commandcode`
 **Detail sesi terakhir:** lihat [`HANDOFF_20260929.md`](HANDOFF_20260929.md)
 
@@ -28,7 +28,7 @@
 | **Budget tool-turn** | ✅ Done | `agents/budget.py` — total sama per strategi, sekarang **40** |
 | **Pre-flight validator** | ✅ Done | `tools/preflight_modal.py` — replikasi kontrak Modal secara lokal |
 | **Rate-limit handling** | ✅ Done | Backoff 429 + circuit breaker |
-| **Test suite** | ✅ Done | **283 lulus** (dari 274) |
+| **Test suite** | ✅ Done | **288 lulus** (dari 283) |
 | **Retry vs budget** | ✅ **FIXED** | Retry per-request di dalam tool loop (commit `dfc9fa8`) |
 | **Konteks per turn** | ✅ Done | `TOOL_OUTPUT_MAX_CHARS=2000`, head+tail (dari 8000 head-only) |
 | **Korupsi patch** | ✅ **FIXED** | `_normalize_newlines` merusak diff yang mengandung literal `\n` (commit `3cbd9d1`) |
@@ -36,11 +36,13 @@
 | **Reviewer oracle** | ⚠️ Terbatas | `run_tests` selalu gagal; reviewer hanya bisa menalar. Spike 2026-09-29: test pre-existing lokal **murah (2–3 s) tapi tidak mendiskriminasi** — lihat `docs/SPIKE_ORACLE_20260929.md` |
 | **Reserve act revisi** | ⚠️ **BELUM TERBUKTI** | Plumbing jalan (act dipanggil, executor yang eksekusi), tapi **0 edit di semua run**. Akar: `share()` di per_task tidak mereservasi untuk act revisi |
 | **Verdict parsing** | ✅ **FIXED** | `_extract_verdict` tahan prosa + JSON rusak + negasi; 94 respons diaudit, 0 mismatch |
+| **Klasifikasi patch kosong** | ✅ **FIXED** | Patch kosong ≠ kegagalan strategi; `EMPTY_PATCH` dilaporkan terpisah (bug wrapper evaluasi) |
+| **Verifikasi eval** | ✅ Done | `tools/verify_eval_consistency.py` — bandingkan wrapper vs harness resmi; sepakat di semua level |
 | **Race EXP-ID** | ✅ **FIXED** | Lock `O_CREAT\|O_EXCL` + deteksi lock basi; di Windows errno `EACCES`, bukan `EEXIST` |
 | **Split paralel** | ✅ Terverifikasi | `tools/verify_split.py`: 26 + 24 = 50, overlap 0 |
 | **`--resume`** | ✅ **FIXED** | Dulu selalu membuat direktori baru (inert); sekarang `--exp-id` + `--resume` benar-benar melanjutkan |
 | **Config awal run** | ✅ **FIXED** | `experiment.yaml` dulu ditulis setelah run selesai → crash = config hilang; sekarang `on_experiment_start` |
-| **Kurva budget** | ⚠️ 2/3 level | 40 ✅ (dievaluasi), 100 ✅ 8/9 (belum dievaluasi), 200 ❌ abort health check |
+| **Kurva budget** | ✅ **DATAR** | Level 40 = level 100 = **2/3 ketiga strategi**. Level 200 tidak jalan (health check) |
 
 ---
 
@@ -230,19 +232,42 @@ Tiga edit `edit_file` di `11001/review` (call #13, #19, #20) semuanya terjadi **
 
 **Koreksi estimasi waktu:** laju terukur **10,9–13,7 s/turn** (bukan asumsi 3,5 menit/run). Kurva jadi **1–6 jam** dengan level 200 mendominasi, bukan ~2,5 jam.
 
-#### ✅ HASIL LEVEL 100 (per_task, floor 10) — `EXP-20260929-022` — **BELUM DIEVALUASI MODAL**
+#### ✅ HASIL LEVEL 100 (per_task, floor 10) — `EXP-20260929-022` — **SUDAH DIEVALUASI**
 
 Sweep selesai **240,8 menit** untuk 9 run. **8 dari 9 run usable**; satu mati karena provider.
 
 | Instance | direct | planning | review |
 |---|---|---|---|
-| 10914 | ✅ VALID (27 turn) | ✅ VALID (17) | ✅ VALID (13) |
-| 11001 | ✅ VALID (8) | ✅ VALID (9) | ✅ VALID (9) |
-| 11019 | ✅ VALID (54) | ✅ VALID (7) | ❌ **TIMEOUT — patch KOSONG** |
+| 10914 | ✅ resolved | ✅ resolved | ✅ resolved |
+| 11001 | ✅ resolved | ✅ resolved | ✅ resolved |
+| 11019 | ❌ TESTS_ERROR | ❌ TESTS_ERROR | — **(patch kosong, bukan kegagalan strategi)** |
 
-**`11019/review` mati karena 502 provider** (`fetch failed (cause: ENOTFOUND ... opencode.ai)`), `api_turns=1`, patch 0 karakter. Ini **bukan** kegagalan strategi — ini kegagalan infrastruktur, dan **harus dilaporkan terpisah** (persis konvensi harness SWE-bench: `error` dihitung sendiri, tidak dihapus dari total). Terdeteksi oleh `tools/check_sweep_state.py`.
+**2/3 untuk ketiga strategi — identik dengan level 40.** Detail: `results/EXP-20260929-022/EVAL_NOTE.md`.
 
-**Truncation di level 100: 0 dari 8 run yang berguna.** Di level 40 ada **2** (`11001/review`, `11019/review`). Jadi pool 100 memang menghilangkan cap-hit — tapi lihat koreksi act revisi di atas: hilangnya truncation **tidak** membuat revisi mengedit.
+**KURVA DATAR antara 40 dan 100 turn.** Menaikkan pool 2,5× tidak mengubah satu pun hasil pada ketiga instance ini. Truncation turun dari 2 run (level 40) → **0** (level 100), jadi pool 100 memang menghilangkan cap-hit — tapi menghilangkan cap tidak mengubah verdict apa pun.
+
+**`11019` gagal di semua strategi di semua level.** Dua tafsir yang belum bisa dipisahkan datanya: (1) butuh >100 turn, atau (2) kegagalan kapabilitas murni. Level 200 akan memisahkannya. Sampai itu ada, laporkan `11019` sebagai **terkonfound budget**, bukan sebagai kekalahan strategi.
+
+#### 🐞 Bug evaluasi: patch kosong dihitung sebagai kegagalan strategi — DIPERBAIKI
+
+`tools/eval_modal.py` membaca `resolved_ids`/`error_ids`/`unresolved_ids` dari summary harness, lalu **jatuh ke cabang `else`** untuk instance apa pun yang tidak ada di ketiganya — dan mencatatnya `resolved=False`. Padahal harness **sengaja tidak menjalankan** patch kosong: `reporting.py:47-60` menaruhnya di `empty_patch_ids` ("Instances with empty patches"), dan `run_evaluation.py:458` mengeluarkannya dari dataset.
+
+Akibatnya `11019/review` (mati karena 502) dilaporkan `patch_applied=True reason=TESTS_ERROR` — seolah-olah strateginya menjawab salah, padahal **tidak ada patch sama sekali**.
+
+**Dua lapis masalah, keduanya diperbaiki:**
+1. **Klasifikasi salah** → sekarang `failure_reason="EMPTY_PATCH"`, `patch_applied=False`. Nilai `applied=True` yang lama datang dari `report.json` basi: harness mengaplikasikan diff kosong sebagai no-op, lalu melaporkan `applied=True` — benar secara teknis, menyesatkan secara praktis.
+2. **Logikanya tidak bisa ditest** karena inline di `main()`. Diekstrak jadi `classify_summary()` murni, sekarang 5 test menutupinya. Bug `UnboundLocalError` di perbaikan pertamaku **lolos test** karena alasan yang sama — itulah kenapa ekstraksi ini bukan sekadar kerapian.
+
+**Dua angka dilaporkan, dan tidak boleh tertukar:**
+
+| Bacaan | Nilai | Arti |
+|---|---|---|
+| resolved / **submitted** | **66,7%** | headline yang komparabel antar-level |
+| resolved / **graded** (n=2) | 100,0% | hanya run yang menghasilkan patch |
+
+Pakai **66,7%** untuk membandingkan level. Angka 100% akan membuat review tampak unggul justru karena **kehilangan** satu data point.
+
+**Tool verifikasi baru:** `tools/verify_eval_consistency.py` — membandingkan summary resmi harness dengan `*_results.json` kita per level/strategi, dan gagal kalau ada ketidaksepakatan. Hasil sekarang: **sepakat di semua level.** Ini pemeriksaan yang menemukan bug di atas; sebelumnya tidak ada yang membandingkan kedua catatan itu.
 
 #### ❌ LEVEL 200 — TIDAK PERNAH JALAN
 
@@ -407,10 +432,14 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 ---
 
-**Last working state:** commit `de3c12e` + `ee145e7` — **283 test lulus**. Kurva budget 2 dari 3 level: level 40 dievaluasi Modal (**2/3 ketiga strategi**, `11019` gagal di ketiganya), level 100 punya 8/9 run usable (**belum dievaluasi**), level 200 **abort** (health check).
+**Last working state:** commit `5661440` — **288 test lulus**. Kurva budget **2 dari 3 level dievaluasi**: level 40 = level 100 = **2/3 di ketiga strategi (DATAR)**. Level 200 tidak jalan.
 
 **Langkah berikutnya (prioritas):**
-1. **Evaluasi Modal level 100** — datanya sudah di disk, ~5 menit, gratis. Ini menjawab apakah kurva sudah datar di dua titik.
-2. **Perbaiki `budget.py`** agar act revisi benar-benar direservasi (di `per_task`, `share()` hanya menyisakan floor untuk act base).
-3. **Jalankan ulang level 200** hanya kalau evaluasi level 100 menunjukkan kurva masih naik.
-4. Putuskan model berbayar (`deepseek-v4-flash`) untuk run final — RQ3 butuh biaya nyata, bukan estimasi. Jalankan **off-peak** (harga 2× saat peak).
+
+1. **Kurva sudah datar di dua titik (40 dan 100) — keputusan user diperlukan.** Level 200 menjawab pertanyaan yang tersisa: apakah `11019` butuh lebih dari 100 turn, atau memang kegagalan kapabilitas. Tapi kalau yang dicari adalah "apakah budget 40 cukup", jawabannya sudah ada: **ya, pada tiga instance ini**. Level 200 (~4 jam) hanya menambah satu titik; nilainya perlu ditimbang.
+
+2. **Perbaiki `budget.py`** agar act revisi benar-benar direservasi di mode `per_task`. Ini **prasyarat** untuk klaim apa pun tentang review: sekarang act revisi 0 edit di semua run, jadi `review` sebenarnya mengukur *satu act executor*, bukan *review + revisi*.
+
+3. **Putuskan model berbayar** untuk run final (RQ3 butuh biaya nyata, bukan estimasi). Jalankan **off-peak** — harga 2× saat peak. Ini juga yang menentukan apakah run 50-issue layak dijalankan (butuh konfirmasi user).
+
+4. **Sebelum run besar apa pun:** `python tools/verify_eval_consistency.py` dan `python tools/check_sweep_state.py` — dua pemeriksaan yang menemukan bug sesi ini.
