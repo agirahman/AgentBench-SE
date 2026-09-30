@@ -1,9 +1,9 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-10-01 01:05 WIB
-**Status:** **SIAP run 50 issue** (setelah verifikasi pilot ulang). Budget 200 turn (total sama 200/200/200). Trajectory penuh + guard context window. **7 cacat prompt & penegakan diperbaiki** (3 prompt + 2 lubang penegakan + fallback diam + referensi mati). **408 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
+**Last Updated:** 2026-10-01 03:20 WIB
+**Status:** **SIAP run 50 issue** (setelah 2 audit partner). Budget 200 turn, total sama 200/200/200, **revisi 48 turn (4 putaran × 2 act × 6)**. Trajectory penuh + guard context window. **421 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
 **Active Branch:** `19/toolcall-commandcode`
-**Detail sesi terakhir:** [`AUDIT_PROMPTS_PARTNER.md`](AUDIT_PROMPTS_PARTNER.md) · [`AUDIT_RUN_TESTS_PARTNER.md`](AUDIT_RUN_TESTS_PARTNER.md) · [`RESEARCH_BUDGET_20260929.md`](RESEARCH_BUDGET_20260929.md)
+**Detail sesi terakhir:** [`AUDIT_PROMPTS_PARTNER.md`](AUDIT_PROMPTS_PARTNER.md) · [`AUDIT_RUN_TESTS_PARTNER.md`](AUDIT_RUN_TESTS_PARTNER.md) · [`AUDIT_OPS_PARTNER.md`](AUDIT_OPS_PARTNER.md) · [`AUDIT_SCALE_PARTNER.md`](AUDIT_SCALE_PARTNER.md) · [`RESEARCH_BUDGET_20260929.md`](RESEARCH_BUDGET_20260929.md)
 
 > ⛔ **GATE — WAJIB KONFIRMASI USER:** Jangan jalankan run besar (50 issue / multi-jam)
 > tanpa persetujuan eksplisit dari user. Boleh tanpa konfirmasi: unit test, smoke test
@@ -16,6 +16,35 @@
 
 ---
 
+## ✅ KESIAPAN RUN 50 (verifikasi terakhir 2026-10-01 03:20)
+
+| Verifikasi | Perintah | Hasil |
+|---|---|---|
+| Unit test | `pytest tests/ -q` | **421 lulus** |
+| Preflight repo | `tools/preflight_repos.py` | **50/50 pristine**, 0 masalah |
+| Fairness budget | `tools/check_budget_fairness.py` | **FAIR** — 200/200/200 |
+| Putaran revisi | `tools/verify_revision_rounds.py` | Setiap act revisi **6+6** (kebutuhan terukur: 6) |
+| Dry run sweep | `tools/run_final_sweep.py --dry-run` | 150 run, semua flag eksplisit |
+| Resume gate | `--resume` tanpa `--exp-id` | **exit 2** (tidak diam-diam mulai baru) |
+| Resume jalan | `--resume --exp-id X` | flag diteruskan ke runner |
+| Cross-check biaya | `tools/read_actual_bill.py --compare` | $0,551 vs $0,582 = **-5,28%** |
+
+**Perintah run:**
+```
+python tools/run_final_sweep.py
+```
+
+**Estimasi:** ~$7–11, ~14–17 jam (terukur dari pilot, bukan tebakan — token tumbuh
+sublinear terhadap cap karena 200 itu *batas*, bukan target).
+
+**Kalau terputus:**
+```
+python tools/run_final_sweep.py --resume --exp-id <EXP-id>
+```
+Sweep **tidak** mengulang dari nol; savepoint per run dibaca dan yang sudah selesai dilewati.
+
+---
+
 ## 📋 Current Project State
 
 | Aspect | Status | Notes |
@@ -25,28 +54,34 @@
 | **Repo cache** | ✅ Done | 50 instance pristine di `datasets/repos/` |
 | **Mekanisme patch** | ✅ Done | edit-then-diff: agen mengedit file, patch diambil dari `git diff` |
 | **Tool calling** | ✅ Done | Loop bersama di `providers/tool_loop.py` (3 provider berbagi) |
-| **Budget tool-turn** | ✅ Done | `agents/budget.py` — total sama per strategi, sekarang **40** |
+| **Budget tool-turn** | ✅ Done | `agents/budget.py` — total sama per strategi, sekarang **200** (skala referensi) |
 | **Pre-flight validator** | ✅ Done | `tools/preflight_modal.py` — replikasi kontrak Modal secara lokal |
 | **Rate-limit handling** | ✅ Done | Backoff 429 + circuit breaker |
-| **Test suite** | ✅ Done | **299 lulus** (dari 288) |
+| **Test suite** | ✅ Done | **421 lulus** (dari 408) |
 | **Retry vs budget** | ✅ **FIXED** | Retry per-request di dalam tool loop (commit `dfc9fa8`) |
 | **Konteks per turn** | ✅ Done | `TOOL_OUTPUT_MAX_CHARS=2000`, head+tail (dari 8000 head-only) |
 | **Korupsi patch** | ✅ **FIXED** | `_normalize_newlines` merusak diff yang mengandung literal `\n` (commit `3cbd9d1`) |
 | **Evaluasi EXP-003** | ✅ Done | Modal SWE-bench harness: **30/30 patch applied**, hasil di `EVAL_NOTE.md` |
 | **Reviewer oracle** | ⚠️ Terbatas | `run_tests` selalu gagal; reviewer hanya bisa menalar. Spike 2026-09-29: test pre-existing lokal **murah (2–3 s) tapi tidak mendiskriminasi** — lihat `docs/SPIKE_ORACLE_20260929.md` |
-| **Reserve act revisi** | ⚠️ **BELUM TERBUKTI** | Plumbing jalan (act dipanggil, executor yang eksekusi), tapi **0 edit di semua run**. Akar: `share()` di per_task tidak mereservasi untuk act revisi |
+| **Reserve act revisi** | ✅ **TERBUKTI MENGEDIT** | Pilot `EXP-20260930-415`: revisi **6 turn, 2 edit** (sebelumnya 0 edit). Config sweep kini `48`/4 putaran |
 | **Verdict parsing** | ✅ **FIXED** | `_extract_verdict` tahan prosa + JSON rusak + negasi; 94 respons diaudit, 0 mismatch |
 | **Klasifikasi patch kosong** | ✅ **FIXED** | Patch kosong ≠ kegagalan strategi; `EMPTY_PATCH` dilaporkan terpisah (bug wrapper evaluasi) |
 | **Verifikasi eval** | ✅ Done | `tools/verify_eval_consistency.py` — bandingkan wrapper vs harness resmi; sepakat di semua level |
 | **`--resume` mengulang kegagalan** | ✅ **FIXED** | Baris error dulu dihitung "selesai" → instance yang mati tidak pernah diulang. Sekarang hanya run ber-patch yang dianggap selesai |
 | **Label kegagalan** | ✅ **FIXED** | Semua exception dulu distempel `TIMEOUT`; sekarang `RATE_LIMIT`/`PROVIDER_ERROR`/`ERROR` |
 | **Akurasi vs budget** | ✅ **FIXED** | Patch kosong tidak lagi masuk hitungan (bucket 0-15: 67% → 100%) |
-| **⚠️ Validitas review** | ❌ **BELUM** | **78% penolakan reviewer bersandar file test yang tidak pernah dinilai harness** — lihat §"Temuan kritis audit" |
+| **Validitas review** | ✅ **FIXED** | Klaim "78% penolakan bersandar file test" **dikoreksi**: angka sebenarnya **12,5%**. Lihat §"Koreksi" |
 | **Race EXP-ID** | ✅ **FIXED** | Lock `O_CREAT\|O_EXCL` + deteksi lock basi; di Windows errno `EACCES`, bukan `EEXIST` |
 | **Split paralel** | ✅ Terverifikasi | `tools/verify_split.py`: 26 + 24 = 50, overlap 0 |
-| **`--resume`** | ✅ **FIXED** | Dulu selalu membuat direktori baru (inert); sekarang `--exp-id` + `--resume` benar-benar melanjutkan |
+| **`--resume` sweep** | ✅ **FIXED** | `run_final_sweep.py` dulu **tidak meneruskan** `--resume`/`--exp-id` → restart = 150 run diulang (B1) |
+| **Jendela tagihan** | ✅ **FIXED** | `sweep_started.json` dulu ditimpa tanpa syarat → jendela attempt pertama hilang (B2) |
+| **Cross-check biaya** | ✅ **FIXED** | `read_actual_bill.py --compare` dulu mencari field yang tidak pernah ada → RQ3 tak bisa divalidasi (B4). Kini: $0,551 vs $0,582 = **-5,28%** |
+| **Paritas tool** | ✅ **FIXED** | `direct` dulu **tidak punya `run_tests`** — confound: planning/review boleh verifikasi, direct tidak |
+| **Trajectory penuh** | ✅ Done | Setiap turn (teks + reasoning + tool + hasil) → `trajectory.jsonl`/`.md`, dibawa di `AgentMessage` |
+| **Guard context window** | ✅ Done | Overflow dideteksi & ditandai **fatal** (tidak di-retry, tidak ditagih ulang) |
 | **Config awal run** | ✅ **FIXED** | `experiment.yaml` dulu ditulis setelah run selesai → crash = config hilang; sekarang `on_experiment_start` |
 | **Kurva budget** | ✅ **DATAR** | Level 40 = level 100 = **2/3 ketiga strategi**. Level 200 tidak jalan (health check) |
+| **Evaluasi Modal (5 issue)** | ✅ Done | Ketiga strategi **4/5 (80%)**, himpunan resolve **sama persis**. `11019` gagal di ketiganya |
 
 ---
 
@@ -451,28 +486,35 @@ perbaikanku tidak menutup kasus utamanya — dan aku tidak akan menemukannya sen
 Keputusan user: **perbandingan turn harus sama di semua strategi**. Diimplementasikan
 sebagai **carve-out** — reserve dipotong **dari** `TOTAL_TOOL_TURNS`, bukan ditambahkan.
 
+**Versi terkini (setelah audit partner + keputusan user naikkan budget ke skala referensi):**
+
 | Strategi | Act base | Base | Revisi | **TOTAL** |
 |---|---|---|---|---|
-| direct | 40 | 40 | 0 | **40** |
-| planning | 30+10 | 40 | 0 | **40** |
-| review | 12+10+10 | **32** | **8** | **40** |
+| direct | 1 act | 200 | 0 | **200** |
+| planning | 190+10 | 200 | 0 | **200** |
+| review | 152 (50+51+51) | **152** | **48** (4 putaran × 6+6) | **200** |
 
-**Setiap strategi dapat total 40 turn.** Kemenangan `review` tidak bisa dijelaskan oleh
+**Setiap strategi dapat total 200 turn.** Kemenangan `review` tidak bisa dijelaskan oleh
 budget lebih besar — confound-nya hilang.
 
-**Trade-off yang disadari:** total sama, **base flow tidak** (40/40/32). Review
-menyisihkan 8 turn-nya sendiri untuk merevisi, seperti orang yang menganggarkan 40 aksi.
-Review yang tidak perlu merevisi **memakai lebih sedikit** dari jatahnya. Pertanyaan yang
-dijawab eksperimen: *"dengan 40 turn yang sama, strategi mana yang terbaik?"*
+Angka **200** diambil dari referensi, bukan tuning: SWE-bench Pro **200 turn/task**,
+mini-SWE-agent **250 step**, OpenHands 500 iterasi. Lihat
+[`RESEARCH_BUDGET_20260929.md`](RESEARCH_BUDGET_20260929.md).
 
-**Verifikasi:** `tools/check_budget_fairness.py` → **FAIR** di kedua mode (`per_task` dan
-`per_act`). 332 test lulus.
+**Trade-off yang disadari:** total sama, **base flow tidak** (200/200/152). Review
+menyisihkan 48 turn-nya sendiri untuk merevisi, seperti orang yang menganggarkan 200 aksi.
+Review yang tidak perlu merevisi **memakai lebih sedikit** dari jatahnya. Pertanyaan yang
+dijawab eksperimen: *"dengan 200 turn yang sama, strategi mana yang terbaik?"*
+
+**Verifikasi:** `tools/check_budget_fairness.py` → **FAIR** di kedua mode, dan
+`tools/verify_revision_rounds.py` → setiap act revisi dapat **6+6** (di atas kebutuhan
+terukur 6). **421 test lulus.**
 
 **Detail implementasi yang penting:**
 
 - `from_config(with_revisions=True)` wajib untuk memotong reserve, dan **hanya review**
-  yang memakainya. Kalau dipotong untuk semua, direct & planning dapat 32 sementara review
-  40 — ketidakadilan yang sama, arah berlawanan. Ada test yang mengunci ini.
+  yang memakainya. Kalau dipotong untuk semua, direct & planning dapat 152 sementara review
+  200 — ketidakadilan yang sama, arah berlawanan. Ada test yang mengunci ini.
 - Reserve lebih besar dari pool **di-clamp** (bukan dipatuhi): kalau dipatuhi, base act
   dapat pool negatif dan semua act jatuh ke floor 1 → review tidak bisa apa-apa.
 - `task_total` adalah **property**, bukan field: nilainya jumlah sisa, jadi melaporkan
@@ -484,6 +526,10 @@ dijawab eksperimen: *"dengan 40 turn yang sama, strategi mana yang terbaik?"*
 **⚠️ Semua angka `review` di disk (3 eksperimen sebelumnya) memakai `REVISION_TOOL_TURNS=0`**
 → act revisinya dapat 1 turn, 0 edit → **tidak ada satu pun yang mengukur review+revisi.**
 Angka-angka itu **tidak komparabel** dengan run 50 yang akan datang.
+
+**Catatan:** pilot `EXP-20260930-415` memakai **200/200/200** tapi **revisi 32 dengan 1 putaran**
+(16+16). Revisi di sana **benar-benar mengedit** (6 turn, 2 edit) — jadi plumbing-nya terbukti,
+tapi konfigurasinya bukan yang akan dipakai sweep (`48`, 4 putaran).
 
 ##### ✅ HASIL EVALUASI MODAL (pilot verifikasi, 200 turn) — `EXP-20260930-415`
 
@@ -522,6 +568,52 @@ tapi **tetap salah secara semantik**. Gold patch lulus 1/1 di instance ini (dibu
 
 **Konsekuensi untuk tesis:** `11019` boleh dilaporkan sebagai **batas kapabilitas** pada model dan
 budget ini — tidak perlu lagi dilaporkan sebagai "terkonfound budget".
+
+##### 🔴 AUDIT PARTNER (2 ronde) — 4 BLOCKER OPS + 1 BLOCKER BUDGET
+
+Dua partner di Herdr pane mengaudit pipeline 150-run. **Semuanya sudah diperbaiki** (commit `eae63b3`).
+
+| # | Blocker | Bukti | Perbaikan |
+|---|---|---|---|
+| **B1** | `run_final_sweep.py` **tidak meneruskan `--resume`/`--exp-id`** → restart = direktori EXP baru + **150 run diulang** | `build_cmd` diperiksa; `main.py:64-80` sudah punya flag-nya | Diteruskan + **gate**: `--resume` tanpa `--exp-id` → exit 2 |
+| **B2** | `sweep_started.json` **ditimpa tanpa syarat** → jendela tagihan attempt pertama **hilang** | `run_final_sweep.py:249` | Resume **append** ke `attempts`; sweep baru **mengarsipkan** |
+| **B3** | Docstring bilang `ACT_TIMEOUT_SECONDS=1800`, kodenya **3600**; 1 run review = 11 act → bisa **5 jam tanpa batas total** | grep: tidak ada budget keseluruhan | Docstring dikoreksi + jalur recovery dinyatakan |
+| **B4** | `read_actual_bill.py --compare` **tidak pernah bisa jalan** — mencari `total_cost_usd` yang tidak pernah ditulis | Diuji pada **8 eksperimen** → 0/8 menemukan biaya | Baca dari CSV `cost_usd_actual`; **menolak** menyajikan rata-rata sebagai total |
+
+**Verifikasi B4 hidup:** model kita **$0,551462** vs tagihan nyata **$0,582197** → **-5,28%**.
+
+##### 🔴 BLOCKER BUDGET: review mengukur konfigurasi yang **tidak ada yang memilih**
+
+| | Nilai | Masalah |
+|---|---|---|
+| `REVISION_TOOL_TURNS` | 32 | didokumentasikan sebagai *"4 putaran × 8"* — **mustahil secara aritmetika**: 4 × 2 act × 8 = **64** |
+| `MAX_REVISION_TURNS` (`.env`) | **1** | sweep **tidak pernah meng-override** → review hanya **1 putaran** |
+| Akibatnya | | 32 dibagi 2 act = **16+16** untuk 1 putaran; kalau 4 putaran → **4+4**, **di bawah kebutuhan terukur 6** |
+
+**Pengukuran yang menentukan** (`tools/audit_revision_edits.py`, `EXP-20260930-415`): act revisi yang
+**berhasil mengedit** memakai **6 turn, 2 edit**. Jadi `min_grant ≥ 6`.
+
+**Perbaikan:** `REVISION_TOOL_TURNS=48` = **4 × 2 × 6**, dan `MAX_REVISION_TURNS=4` **dipass eksplisit**
+oleh sweep supaya `.env` tidak bisa drift lagi.
+
+**Yang juga diperbaiki karena temuan ini:**
+
+- `check_budget_fairness.py` **tidak bisa melihat** masalah di atas — ia mensimulasikan **1 putaran**
+  dan default-nya 40/8/1. Sekarang menerima jumlah putaran, membaca config, dan **gagal** kalau
+  satu act revisi tidak bisa membaca **dan** mengedit. **Total sama itu perlu, tapi tidak cukup.**
+- Warning starvation menyala di **100 dari 150 run** dengan pesan yang **sendiri salah**
+  ("`REVISION_TOOL_TURNS=0`" padahal 48) — direct & planning memang tidak punya revisi.
+- Warning `PROMPT VARIANT MISSING` menyala untuk file yang **ada**: ia membaca hasil kosong dari
+  loader yang di-stub sebagai "file hilang". Sekarang bertanya ke **filesystem**.
+- `.env` **tidak menyetel** `BUDGET_MODE`/`BUDGET_FLOOR_PER_ACT` → default `per_act`/`0`, padahal
+  sweep memaksa `per_task`/`10`. Kini eksplisit.
+- Sweep sekarang **GATE pada preflight**, bukan sekadar mengingatkan. Checkout kotor membuat
+  `git diff` menangkap perubahan yang **bukan** buatan agen — terlihat seperti agen memecahkan
+  issue, dan itu **meninggikan skor secara tak terlihat**.
+
+**Tool baru:** `verify_revision_rounds.py`, `audit_revision_rounds.py`, `audit_revision_edits.py`.
+
+**421 test lulus** (dari 408).
 
 ---
 
