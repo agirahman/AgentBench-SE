@@ -26,7 +26,19 @@ class DirectStrategy:
         # Start from a pristine checkout: strategies share one repo per issue, so
         # without this the captured diff would include the previous strategy's
         # edits as well as this one's.
-        reset_working_tree(repo_root)
+        #
+        # A FAILED reset must stop the run, not be shrugged off. The captured patch
+        # is the working-tree diff, so a tree that could not be cleaned contributes
+        # its existing content to that diff -- and a leftover gold patch would then
+        # be recorded as this strategy's answer. Measured: 5 of 50 checkouts held
+        # the gold patch from EXP-20260930-098-gold-check, invisible in the results.
+        # A run that cannot be trusted must not be recorded as an outcome.
+        if repo_root is not None and not reset_working_tree(repo_root):
+            raise RuntimeError(
+                f"checkout for {issue.instance_id} could not be reset to a pristine "
+                f"state; refusing to run because the captured diff would include "
+                f"pre-existing changes. Run tools/clean_repos.py, then re-run."
+            )
         for agent in self.team.values():
             agent.repo_root = str(repo_root) if repo_root else None
         bb = Blackboard(issue=issue)

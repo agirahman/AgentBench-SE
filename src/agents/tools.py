@@ -632,16 +632,32 @@ def capture_diff(repo_root: str | Path | None = None) -> str:
     return out.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def reset_working_tree(repo_root: str | Path | None = None) -> None:
+def reset_working_tree(repo_root: str | Path | None = None) -> bool:
     """Return ``repo_root`` to a pristine checkout (no edits, no new files).
 
     Called before each strategy so the three strategies on the same issue each
     start from the same base commit. Without it, strategy N+1 would inherit
     strategy N's edits and its captured diff would contain both.
+
+    Returns True when the tree is verified clean afterwards. A caller that ignores
+    the result is no worse off than before, but one that checks it can refuse to
+    run rather than diff against a dirty tree.
+
+    WHY IT VERIFIES. ``_git_in`` returns a CompletedProcess and does NOT raise on a
+    non-zero exit code, so the old ``try/except`` here only ever caught a timeout or
+    an OSError -- a git command that FAILED (a stale index.lock, a permission error,
+    a corrupted index) returned normally and the function reported success. The
+    consequence is silent and severe: the captured diff would then include whatever
+    was already in the tree, which for this repo was a leftover GOLD PATCH from
+    EXP-20260930-098-gold-check. An agent run against that tree produces a patch
+    containing the reference solution, which reads as the agent solving the issue.
+
+    Measured before this fix: 5 of 50 checkouts held the gold patch (or its test
+    patch) with no indication anywhere in the results.
     """
     root = Path(repo_root) if repo_root else _repo_root()
     if not root.is_dir():
-        return
+        return False
     # A new strategy run is a new conversation: forget the previous run's
     # repeated-command history so the guard only fires within one run.
     reset_test_guard()
@@ -650,7 +666,26 @@ def reset_working_tree(repo_root: str | Path | None = None) -> None:
         _git_in(root, "checkout", "--", ".")
         _git_in(root, "clean", "-fdq", "--", ".")
     except Exception as e:  # noqa: BLE001
-        _warn(f"[reset_working_tree] failed for {root}: {e}")
+        _warn(f"[reset_working_tree] command failed for {root}: {e}")
+        return False
+
+    # Verify, because a git command can fail without raising.
+    try:
+        status = _git_in(root, "status", "--porcelain")
+        leftover = (status.stdout or b"").decode("utf-8", "replace").strip()
+    except Exception as e:  # noqa: BLE001
+        _warn(f"[reset_working_tree] could not verify {root}: {e}")
+        return False
+
+    if leftover:
+        paths = [l for l in leftover.splitlines() if l.strip()][:5]
+        _warn(
+            f"[reset_working_tree] {root} is STILL DIRTY after reset "
+            f"({len(leftover.splitlines())} path(s)): {paths}. The captured diff "
+            f"would include these, so the run should not be trusted."
+        )
+        return False
+    return True
 
 
 def finalize_patch(repo_root: str | Path | None, fallback_response: str) -> str:
