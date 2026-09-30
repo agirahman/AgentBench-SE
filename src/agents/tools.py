@@ -316,6 +316,14 @@ def _looks_like_env_failure(output: str) -> bool:
 
 # Repeat-call guard: an agent that retries the same failing command is wasting
 # its budget. Track the last few commands and refuse exact repeats.
+#
+# SCOPE: one ACT, not one strategy. This matters because a strategy has several
+# agents -- review runs planner, executor, reviewer, and possibly a revision --
+# and they do not share a turn budget or a conversation. Counting the planner's
+# test command against the executor's quota means a later agent is refused a
+# command it has never run, and the refusal reads as "the harness blocked me"
+# rather than as the agent's own choice. Each act starts fresh (see
+# providers/tool_loop.py), which is the same rule the turn budget follows.
 _RECENT_TEST_COMMANDS: list[str] = []
 _MAX_REPEATS = 2
 
@@ -674,13 +682,42 @@ TOOL_FUNCTIONS = {
 
 # Per-role tool assignment: tools match each agent's function so the
 # orchestration comparison stays meaningful (planner analyses, executor
-# builds+verifies, reviewer checks with evidence, direct is a cheap one-shot).
+# builds+verifies, reviewer checks with evidence, direct fixes in one act).
 #
 # Editing tools are granted only to roles that are supposed to change code:
 # planner is read-only by design (it produces a plan, not a patch), and the
 # reviewer inspects rather than authors (it may run tests to gather evidence).
+#
+# VERIFICATION PARITY (run_tests). Direct used to lack run_tests, on the theory
+# that it is "a cheap one-shot" that should not spend turns verifying. That made
+# the comparison uninterpretable: planning and review could verify a fix and
+# direct could not, so a planning/review win could not be separated from their
+# having a capability direct was denied. The pilot made the gap concrete --
+# run_tests was called 8x by planning and 13x by review, and 0x by direct, which
+# measured the GRANT, not the strategy's choice.
+#
+# Every strategy can now verify: direct through its own act, planning and review
+# through the executor. A strategy may still choose not to, and that choice is
+# then observable in the trajectory rather than imposed by the harness.
+#
+# reset_repo is granted to direct as well, on evidence. The earlier reasoning --
+# "direct has one act, so discarding the tree wastes its only attempt" -- was
+# contradicted by the pilot: on django__django-11019 the planning executor used
+# reset_repo at call 29 (after two edits) to abandon a bad approach and rewrite
+# from clean, and that run RESOLVED the instance while direct's did not. Abandoning
+# a wrong path is a legitimate capability, not a hazard, and denying it to direct
+# would repeat exactly the mistake run_tests was denied on: it would make direct's
+# results measure the harness rather than the strategy.
+#
+# The hazard is real but belongs to the STRATEGY, not the tool: a direct run that
+# resets and never edits again ships no patch. That is an outcome to record, not a
+# capability to withhold -- the same reasoning that lets an agent choose to stop
+# early.
 AGENT_TOOLS: dict[str, list[str]] = {
-    "direct": ["read_file", "grep", "list_files", "edit_file", "write_file", "git_diff"],
+    "direct": [
+        "read_file", "grep", "list_files", "run_tests",
+        "edit_file", "write_file", "git_diff", "reset_repo",
+    ],
     "planner": ["read_file", "grep", "list_files"],
     "executor": [
         "read_file", "grep", "list_files", "run_tests",

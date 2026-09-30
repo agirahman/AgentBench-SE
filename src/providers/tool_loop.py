@@ -37,7 +37,12 @@ from providers.response_utils import (
     _extract_reasoning,
 )
 from providers.system_prompts import TOOL_SYSTEM_PROMPT, EDITING_ROLES as _EDITING_ROLES
-from agents.tools import TOOL_SCHEMAS, execute_tool, set_repo_root
+from agents.tools import (
+    TOOL_SCHEMAS,
+    execute_tool,
+    reset_test_guard,
+    set_repo_root,
+)
 
 
 def _truncate_tool_output(text: str, limit: int) -> str:
@@ -236,6 +241,15 @@ def run_tool_loop(
     # Always sync the sandbox to THIS instance's repo root. Passing None resets
     # it to the shared base — never silently reuse a previous instance's root.
     set_repo_root(repo_root)
+    # ...and start this act with a clean repeat-call history. The guard exists to
+    # stop ONE agent from spinning on one command; a strategy has several agents
+    # (review: planner, executor, reviewer, revision) that share neither a turn
+    # budget nor a conversation, so carrying one act's history into the next would
+    # refuse a later agent a command it never ran. Measured: on
+    # django__django-11001 the planning executor and the review reviewer issued the
+    # IDENTICAL pytest command, and without this reset the second one would be
+    # refused -- silently, and through no fault of its own.
+    reset_test_guard()
 
     messages = [
         {"role": "system", "content": system_prompt},

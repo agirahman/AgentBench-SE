@@ -294,6 +294,133 @@ def test_editing_roles_can_edit():
         assert "edit_file" in names, role
 
 
+def test_every_code_writing_role_can_verify_with_run_tests():
+    """VERIFICATION PARITY: a role that writes code must be able to test it.
+
+    ``direct`` used to lack run_tests, on the theory that it is "a cheap one-shot"
+    that should not spend turns verifying. That made the strategy comparison
+    uninterpretable: planning and review could verify a fix and direct could not,
+    so a planning/review win could not be separated from their having a capability
+    direct was denied.
+
+    Measured in the 15-run pilot (EXP-20260930-215): run_tests was called 8x by
+    planning and 13x by review, and 0x by direct -- which measured the GRANT, not
+    the strategy's own choice.
+
+    The invariant: every role that can change code can also test it.
+    """
+    for role in ("direct", "executor"):
+        names = {s["function"]["name"] for s in T.get_tools_for_agent(role)}
+        assert "run_tests" in names, (
+            f"{role} can edit files but cannot run tests, so its results measure "
+            f"the harness rather than the strategy"
+        )
+
+
+def test_readonly_roles_cannot_edit_but_the_reviewer_can_test():
+    """planner is read-only; reviewer verifies with evidence but does not author.
+
+    The reviewer must be able to run tests -- it needs evidence to judge a patch --
+    while staying unable to modify the code it is judging.
+    """
+    planner = {s["function"]["name"] for s in T.get_tools_for_agent("planner")}
+    assert "run_tests" not in planner, "the planner plans; it does not verify a patch"
+    assert "edit_file" not in planner
+
+    reviewer = {s["function"]["name"] for s in T.get_tools_for_agent("reviewer")}
+    assert "run_tests" in reviewer, "the reviewer needs evidence to judge"
+    assert "edit_file" not in reviewer, "a reviewer that edits is not a reviewer"
+
+
+def test_all_three_strategies_have_the_same_tool_ceiling():
+    """A strategy's reachable toolset must not differ from the others.
+
+    Any tool one strategy can reach and another cannot is a confound: a win or loss
+    could not be separated from the capability gap. ``run_tests`` was one such gap
+    (direct lacked it while planning and review had it, and the pilot measured 0x vs
+    8x/13x calls -- the GRANT, not the choice). ``reset_repo`` was the second, kept
+    on the theory that a single-act strategy cannot afford to discard its tree; the
+    pilot contradicted that (planning used it mid-run to abandon a bad approach and
+    went on to resolve django-11019, which direct did not).
+
+    The per-role split is deliberate -- a reviewer must not edit the code it judges,
+    and a planner produces no patch -- but the STRATEGY-level union must match, so
+    every strategy has the same reach.
+    """
+    from agents.tools import AGENT_TOOLS
+
+    strategy_roles = {
+        "direct": ["direct"],
+        "planning": ["planner", "executor"],
+        "review": ["planner", "executor", "reviewer"],
+    }
+    reach = {
+        name: {t for r in roles for t in AGENT_TOOLS[r]}
+        for name, roles in strategy_roles.items()
+    }
+
+    reference = reach["direct"]
+    for name, tools in reach.items():
+        assert tools == reference, (
+            f"{name} can reach {sorted(tools - reference)} that direct cannot, "
+            f"and lacks {sorted(reference - tools)} that direct has"
+        )
+
+
+def test_reset_repo_is_available_to_every_code_writing_role():
+    """Abandoning a wrong approach is a capability, not a hazard.
+
+    Measured in the pilot (EXP-20260930-215, django__django-11019): the planning
+    executor called reset_repo at call 29 of 43, after two edits, then rewrote from
+    a clean tree -- and that run resolved the instance. Denying it to direct would
+    make direct's results measure the harness rather than the strategy.
+    """
+    for role in ("direct", "executor"):
+        names = {s["function"]["name"] for s in T.get_tools_for_agent(role)}
+        assert "reset_repo" in names, role
+
+
+def test_the_reviewer_cannot_edit_and_the_planner_cannot_verify():
+    """The per-role split is deliberate and must survive.
+
+    A reviewer that rewrites the code it is reviewing destroys the independence the
+    review strategy depends on, and the planner plans rather than verifies.
+    """
+    planner = {s["function"]["name"] for s in T.get_tools_for_agent("planner")}
+    assert "edit_file" not in planner and "run_tests" not in planner
+
+    reviewer = {s["function"]["name"] for s in T.get_tools_for_agent("reviewer")}
+    assert "edit_file" not in reviewer and "run_tests" in reviewer
+
+
+def test_the_repeat_test_guard_is_scoped_to_one_act():
+    """A later agent must not inherit an earlier agent's command history.
+
+    The guard stops ONE agent spinning on one command. A strategy has several
+    agents (review: planner, executor, reviewer, revision) that share neither a
+    turn budget nor a conversation, so carrying the history across acts would
+    refuse a later agent a command it never ran.
+
+    Measured: on django__django-11001 the planning executor and the review reviewer
+    issued the IDENTICAL pytest command.
+    """
+    T.reset_test_guard()
+    cmd = "python -m pytest tests/ordering/tests.py -x -q"
+    T.run_tests(cmd)
+    T.run_tests(cmd)
+    # Third identical call within the act is refused (the guard working as designed).
+    third = T.run_tests(cmd)
+    assert third.startswith("[stop]"), "the guard must still fire within one act"
+
+    # A new act starts clean.
+    T.reset_test_guard()
+    after_reset = T.run_tests(cmd)
+    assert not after_reset.startswith("[stop]"), (
+        "a new act must not inherit the previous act's command history"
+    )
+    T.reset_test_guard()
+
+
 def test_every_schema_has_a_function():
     """A schema without an implementation would make the model call a dead tool."""
     for schema in T.TOOL_SCHEMAS:

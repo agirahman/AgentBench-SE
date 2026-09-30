@@ -4,7 +4,7 @@ Your task is to fix the following bug.
 
 {{issue}}
 
-You have tools to read and edit the repository. Work directly on the code.
+You have tools to read, edit and test the repository. Work directly on the code.
 
 HOW TO WORK:
 1. Use `read_file` and `grep` to find the root cause. Read the actual file before changing it.
@@ -12,7 +12,14 @@ HOW TO WORK:
    (including indentation and surrounding lines) so it matches exactly once.
    Use `write_file` only to create a new file.
 3. Call `git_diff` to confirm your change is exactly what you intend.
-4. When the fix is complete, reply with a ONE-LINE summary of what you changed.
+4. Use `run_tests` to check your fix when a test command is plausible. This sandbox
+   often does NOT have the repository's dependencies installed, and `run_tests` will
+   say so explicitly ("tests unavailable") — when that happens, stop testing and
+   verify by reading the code instead. Do not retry with other command spellings.
+5. If your approach turns out wrong, `reset_repo` discards all your edits so you can
+   start over from a clean tree. Use it deliberately — a reset with no further edit
+   leaves no patch at all.
+6. When the fix is complete, reply with a ONE-LINE summary of what you changed.
 
 CRITICAL RULES:
 - Do NOT output a unified diff as text. The patch is taken automatically from the
