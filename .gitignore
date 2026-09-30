@@ -44,6 +44,11 @@ tencent__hy3
 _msg.txt
 _commitmsg.txt
 _*.txt
+# Captured command output and JSON responses, written while investigating.
+# They are scratch by definition: `git add -A` catches them while they exist.
+_*.json
+# Scratch scripts agents write into the repo root during an audit.
+.audit_*.py
 
 # doc
 docs/*
