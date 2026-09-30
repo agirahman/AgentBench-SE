@@ -485,7 +485,45 @@ dijawab eksperimen: *"dengan 40 turn yang sama, strategi mana yang terbaik?"*
 → act revisinya dapat 1 turn, 0 edit → **tidak ada satu pun yang mengukur review+revisi.**
 Angka-angka itu **tidak komparabel** dengan run 50 yang akan datang.
 
-##### 🔴 CACAT KRITIS: planner jalan dengan prompt NON-TOOL (ditemukan dari pilot 15 run)
+##### ✅ HASIL EVALUASI MODAL (pilot verifikasi, 200 turn) — `EXP-20260930-415`
+
+| Strategi | Resolved | Empty | Harness error | Rate |
+|---|---|---|---|---|
+| direct | **4/5** | 0 | 0 | **80%** |
+| planning | **4/5** | 0 | 0 | **80%** |
+| review | **4/5** | 0 | 0 | **80%** |
+
+Per instance — ketiganya resolve himpunan yang **sama persis**:
+
+| Instance | direct | planning | review |
+|---|:-:|:-:|:-:|
+| django-10914 | PASS | PASS | PASS |
+| django-10924 | PASS | PASS | PASS |
+| django-11001 | PASS | PASS | PASS |
+| **django-11019** | **fail** | **fail** | **fail** |
+| django-11039 | PASS | PASS | PASS |
+
+**Baseline naik: 2/3 (67%) → 4/5 (80%)**, dan kini pada **lima** instance, bukan tiga.
+
+##### 🎯 PERTANYAAN LAMA TERJAWAB: `11019` = **BATAS KAPABILITAS**, bukan budget
+
+Sejak `EXP-20260929-003` pertanyaan ini menggantung: apakah 11019 butuh lebih banyak turn, atau
+memang di luar kemampuan model? Sekarang terukur — **0 truncation** dan act-nya **berhenti sendiri**:
+
+| Strategi | Turn dipakai | Diberi |
+|---|---|---|
+| direct | **41** | 200 |
+| planning | 11 + **35** | 200 |
+| review | 13 + **44** + 18 | 200 |
+
+Ketiganya memakai **~20% anggaran**, menghasilkan patch **VALID** yang menyentuh file yang benar,
+tapi **tetap salah secara semantik**. Gold patch lulus 1/1 di instance ini (dibuktikan sebelumnya)
+→ **bukan artefak harness**.
+
+**Konsekuensi untuk tesis:** `11019` boleh dilaporkan sebagai **batas kapabilitas** pada model dan
+budget ini — tidak perlu lagi dilaporkan sebagai "terkonfound budget".
+
+---
 
 **Gejala:** planner **0 tool call di 6 dari 9 run**. Terlihat seperti planner "memilih tidak membaca
 kode". **Sebabnya bukan itu.**
