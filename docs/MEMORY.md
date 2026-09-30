@@ -1,9 +1,9 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-09-30 16:30 WIB
-**Status:** Kurva budget **2 dari 3 level dievaluasi** — 40 dan 100 keduanya 2/3 (DATAR). **Audit pipeline menemukan masalah validitas review yang belum diperbaiki.**
+**Last Updated:** 2026-09-30 18:15 WIB
+**Status:** **RQ3 (model berbayar) SELESAI** — kurva DATAR di tiga titik (40, 100, berbayar). 11019 terbukti **kegagalan kapabilitas nyata** (gold patch lulus 1/1). Biaya nyata terverifikasi dari bill.
 **Active Branch:** `19/toolcall-commandcode`
-**Detail sesi terakhir:** lihat [`HANDOFF_20260929.md`](HANDOFF_20260929.md) + [`AUDIT_PIPELINE_20260930.md`](AUDIT_PIPELINE_20260930.md)
+**Detail sesi terakhir:** [`HANDOFF_20260929.md`](HANDOFF_20260929.md) · [`AUDIT_PIPELINE_20260930.md`](AUDIT_PIPELINE_20260930.md)
 
 > ⛔ **GATE — WAJIB KONFIRMASI USER:** Jangan jalankan run besar (50 issue / multi-jam)
 > tanpa persetujuan eksplisit dari user. Boleh tanpa konfirmasi: unit test, smoke test
@@ -238,7 +238,37 @@ Tiga edit `edit_file` di `11001/review` (call #13, #19, #20) semuanya terjadi **
 
 #### 🚨 TEMUAN KRITIS AUDIT (2026-09-30) — reviewer menolak atas dasar file test yang tidak dinilai
 
-**Ini temuan paling penting sejauh ini, dan bukan bug kode — ini masalah validitas.**
+> ⚠️ **KOREKSI (2026-09-30, sebelum run model berbayar).** Klaim awal **78%** itu
+> **SALAH** dan berasal dari pengukuran yang terlalu lemah. Angka itu dihitung dengan
+> mencari *"teks review menyebut file test"* — dan kata "test" itu bahasa Inggris
+> biasa dalam review kode. Setelah setiap penolakan dibaca **utuh**
+> (`tools/analyze_rejection_basis.py`), angkanya:
+>
+> | Ukuran | Jumlah |
+> |---|---|
+> | Penolakan `NEEDS_REVISION` yang dibaca | 8 |
+> | Menyebut file test | 6 |
+> | **Eksplisit MENYANGKAL** file test sebagai alasan | 1 |
+> | **Seluruh `issues_found`-nya HANYA soal file test** | **1** |
+>
+> **Hanya 1 dari 8 (12,5%)** yang bisa berubah kalau reviewer diberi tahu file test
+> di-strip. Sisanya menolak karena alasan sah yang terlihat di kode: patch tidak
+> menyentuh mekanisme, memanggil method yang tidak ada (`_css_lists_paths`),
+> `merge()` masih dua-argumen, `OrderedDict()` tanpa import.
+>
+> Contoh yang paling jelas — `10914/review`, `issues_found` satu-satunya soal
+> **label dokumentasi** (`:ref:`collectstatic`` tidak ada), dan `11001/review`
+> menolak karena **fix-nya no-op**: pola lama dan baru sama-sama menghasilkan
+> `group(1)` yang sama.
+>
+> **Kesimpulan yang berubah:** masalah ini nyata tapi **kecil**, bukan kritis.
+> `review` tetap bisa diklaim mengukur review+revisi. Yang perlu dicatat hanya
+> bahwa **reviewer sesekali menyebut cacat file test yang tidak dinilai harness** —
+> dan itu **tidak** mengubah verdict di hampir semua kasus.
+
+Klaim awal (untuk catatan, **JANGAN dipakai**): "7 dari 9 penolakan (78%)" — dihitung
+dengan pencocokan frasa, bukan dengan membaca apakah file test itu **menentukan**
+verdict.
 
 `review_strategy.py:163` memicu ronde revisi saat reviewer bilang `NEEDS_REVISION`. Reviewer sering menolak karena **test yang ditambahkan agen rusak**. Tapi itu **tidak mungkin** mengubah grade:
 
@@ -277,6 +307,106 @@ Harness **me-reset file test** ke base commit lalu menjalankan **test-nya sendir
 **Catatan:** marker `is_provider_error` sengaja **tidak** memakai substring angka telanjang (`"502"`) karena cocok dengan nomor baris/jumlah token — ada test yang menjaganya.
 
 **Dua temuan partner TIDAK dikonfirmasi** (kode benar, tidak ada insiden nyata) dan **tidak** dijadikan dasar perbaikan: `COST_LIMIT_USD` bisa dilewati pada model ber-rate nol / jalur non-tool; kegagalan mid-act membuang edit parsial. Relevan hanya untuk run berbayar — dicatat di `docs/AUDIT_PIPELINE_20260930.md`.
+
+#### 💰 RUN BERBAYAR (RQ3) — model `cbai/deepseek-v4.1-flash` — `EXP-20260930-030`
+
+**Model berbayar pertama.** Bukan estimasi: 9router mencatat setiap request di database
+SQLite-nya (`%APPDATA%/9router/db/data.sqlite`, tabel `usageHistory`), jadi biaya bisa
+**dibaca dari bill nyata** dengan `tools/read_actual_bill.py`.
+
+**Kredensial:** route `cbai/` **HANYA** menerima `OPENCODE_API_KEY` (NINEROUTER).
+`COMMANDCODE_API_KEY` → 401. Diuji ke semua key di `.env`.
+
+**Cara pakai:**
+```bash
+python tools/probe_route.py --model cbai/deepseek-v4.1-flash --all   # cek sebelum belanja
+python tools/run_rq3_paid.py --smoke                                  # 1 issue, 1 strategi
+python tools/run_rq3_paid.py                                          # 3 issue × 3 strategi
+python tools/read_actual_bill.py --since <ISO> --until <ISO> --compare results/<EXP>
+```
+
+##### ⚠️ TEMUAN PENTING: cache hit TIDAK didiskon di route ini
+
+**Ini nyaris membuat angka RQ3 salah 2×.** Urutan temuannya:
+
+1. Rate card awal kuderivasi dari 5.698 baris historis: `$0.14 / $0.002833 / $0.28`
+   per 1M (regular/cached/output). 371 baris tanpa cache terprediksi **tepat 0.000%**.
+2. Smoke test: bill menagih **$0.003438**, akuntansi kita bilang **$0.001438** —
+   **kita under-report 2,05×**.
+3. Ternyata API **melaporkan** cache hit (256 & 896 token via
+   `prompt_tokens_details.cached_tokens`) — pipeline kita benar membacanya — tapi
+   9router menagih **harga penuh**: `charged/full-price = 1.0000`.
+4. Jadi diskon cache historis **tidak berlaku untuk request kita**. Kalau kupakai,
+   setiap angka biaya di tesis jadi **setengah dari kenyataan** — dan itu ke arah yang
+   **mempercantik klaim biaya**, arah yang paling berbahaya.
+
+**Perbaikan:** `cached_input_per_million` disetel **sama dengan** `input_per_million`
+(0,14). Card diberi label `...-no-cache-discount`. **Diverifikasi ulang:** bill
+$0.003438 vs akuntansi $0.003435 → **selisih 0,09%**.
+
+**Pelajaran metodologis:** rate card historis **bukan** jaminan harga yang berlaku
+sekarang. `read_actual_bill.py` adalah otoritasnya; kalau bill berbeda dengan card,
+**bill yang menang**.
+
+##### Hasil RQ3 (`EXP-20260930-030`) — **SELESAI**
+
+**Model:** `cbai/deepseek-v4.1-flash` (berbayar, biaya nyata dari bill 9router)
+**Durasi:** 14,9 menit untuk 9 run · **9/9 patch VALID** (tidak ada yang kosong)
+
+| | direct | planning | review |
+|---|---|---|---|
+| 10914 | ✅ | ✅ | ✅ |
+| 11001 | ✅ | ✅ | ✅ |
+| 11019 | ❌ | ❌ | ❌ |
+
+**2/3 di ketiganya.** Kurva tetap **DATAR** — sekarang di tiga titik (40, 100, berbayar).
+Wrapper dan harness resmi **sepakat** (`verify_eval_consistency.py`).
+
+**Biaya nyata: $0,298440** untuk 230 request (74 direct + 65 planning + 91 review).
+
+**Verifikasi bill:** bill mentah $0,325726 untuk 245 request. Selisihnya 15 request =
+**sesi agent-ku sendiri** (model sama, route sama). Setelah dipisah: $0,295003 vs
+akuntansi kita $0,298440 → **selisih 1,2%**. Rate card terverifikasi di skala run penuh.
+
+**11019 tetap gagal di semua strategi, di semua level, di semua model.** Tapi sekarang
+**patch-nya ada dan besar** (7.252 / 5.481 / 3.106 byte) — bukan lagi "tidak ada patch".
+Ketiganya `patch_applied=True`, `failure_reason=TESTS_ERROR`.
+
+##### ✅ 11019 BISA DINILAI — kegagalannya NYATA (gold patch check)
+
+**Pertanyaan:** 8 dari 9 run 11019 gagal dengan `TESTS_ERROR` — bukan kegagalan test
+biasa, tapi **test run-nya sendiri rusak**. Itu pola yang tidak dihasilkan patch salah.
+Kecurigaan: instance ini tidak bisa dinilai di setup kita, jadi semua "kegagalan" itu
+artefak pengukuran.
+
+**Diuji:** gold patch resmi dari dataset (4.929 byte, hanya `django/forms/widgets.py`)
+dikirim sebagai prediksi (`EXP-20260930-098-gold-check`) → **resolved = 1/1**.
+
+**Kesimpulan: instance ini BISA dinilai, dan kegagalan agen itu NYATA.**
+`TESTS_ERROR` bukan artefak harness — patch agen memang merusak test run. Ini
+menutup pertanyaan terbuka terakhir tentang 11019.
+
+**Implikasi untuk tesis:** 11019 adalah **kegagalan kapabilitas yang valid**, bukan
+terkonfound budget. Tiga strategi, tiga level budget, dua model (gratis & berbayar),
+semuanya gagal — sementara gold patch lulus. Ini temuan yang bisa diklaim.
+
+##### ⚠️ 11019: hipotesis file scratch TERBUKTI SALAH
+
+`direct` menyertakan `_check_merge.py` — script 36 baris yang agen tulis untuk menguji
+logikanya sendiri (`settings.configure()` + `django.setup()` di level import), di luar
+`django/`. planning & review tidak menyertakannya.
+
+**Hipotesis:** file itu merusak koleksi test → TESTS_ERROR.
+
+**Diuji:** patch yang sama **tanpa** file scratch dievaluasi terpisah
+(`EXP-20260930-099-scratch-test`) → **tetap `TESTS_ERROR`**.
+
+**Kesimpulan: hipotesis salah.** Ketiga strategi gagal dengan cara identik, jadi file
+scratch bukan penyebabnya.
+
+**Yang tetap perlu dicatat:** `runner.py:343-364` men-*strip* file test **gold** dari
+patch, tapi tidak ada yang men-*strip* file scratch buatan agen. Belum terbukti
+merusak grade di sini, tapi celahnya nyata.
 
 #### ✅ HASIL LEVEL 100 (per_task, floor 10) — `EXP-20260929-022` — **SUDAH DIEVALUASI**
 

@@ -161,6 +161,31 @@ class PricingTable:
             "currency": "USD",
             "pricing_version": "2026-07",
         },
+        # cbai route on 9router. The two input/output rates are MEASURED: solved
+        # from 9router's own usageHistory, they reproduce recorded charges to
+        # 0.000% on requests with no cache (verified line by line on 6 real
+        # requests: $0.000424 charged, $0.000424 predicted).
+        #
+        # The CACHED rate is deliberately set to the FULL input rate, because on
+        # this route a reported cache hit was not charged as one. Measured on two
+        # requests that reported real hits (256 and 896 cached tokens via
+        # prompt_tokens_details.cached_tokens), 9router charged charged/full-price
+        # = 1.0000 for both -- no discount. Pricing those tokens at the historical
+        # median cached rate ($0.002833/M, 49x cheaper) made our accounting read
+        # $0.001438 for a run the bill charged $0.002948: a 2.05x under-report,
+        # which is the direction that flatters a cost claim.
+        #
+        # The historical table does contain discounted rows (94% of 5,698), so the
+        # route CAN discount. It did not for ours, and a rate card must describe
+        # what was actually charged. tools/read_actual_bill.py remains the
+        # authority: if it disagrees with this card, the bill wins.
+        "cbai/deepseek-v4.1-flash": {
+            "input_per_million": 0.14,
+            "cached_input_per_million": 0.14,
+            "output_per_million": 0.28,
+            "currency": "USD",
+            "pricing_version": "2026-09-30-measured-from-9router-usageHistory-no-cache-discount",
+        },
         "tencent/hy3": {
             "input_per_million": 0.14,
             "output_per_million": 0.58,
