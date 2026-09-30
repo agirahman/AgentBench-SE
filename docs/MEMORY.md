@@ -1,9 +1,9 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-09-30 20:15 WIB
-**Status:** **SIAP run 50 issue.** Keputusan user: **total turn sama di semua strategi** (40/40/40, reserve revisi dipotong dari pool). Audit 2 partner + verifikasi adversarial: 7 cacat (4 KRITIS) ditemukan & diperbaiki. **332 test lulus. 50/50 repo pristine.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk menjalankan 150 run.**
+**Last Updated:** 2026-09-30 22:50 WIB
+**Status:** **SIAP run 50 issue.** Keputusan user: **budget skala referensi (200 turn, total sama 200/200/200)** + **trajectory penuh seluruh aktivitas agen**. Guard context window ditambahkan (sebelumnya tidak ada). **349 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk menjalankan 150 run.**
 **Active Branch:** `19/toolcall-commandcode`
-**Detail sesi terakhir:** [`VERIFY_FIXES_P7.md`](VERIFY_FIXES_P7.md) · [`VERIFY_FIXES_P8.md`](VERIFY_FIXES_P8.md) · [`AUDIT_RUN_READINESS.md`](AUDIT_RUN_READINESS.md) · [`AUDIT_DATA_INTEGRITY.md`](AUDIT_DATA_INTEGRITY.md)
+**Detail sesi terakhir:** [`VERIFY_FIXES_P7.md`](VERIFY_FIXES_P7.md) · [`VERIFY_FIXES_P8.md`](VERIFY_FIXES_P8.md) · [`AUDIT_RUN_READINESS.md`](AUDIT_RUN_READINESS.md) · [`AUDIT_DATA_INTEGRITY.md`](AUDIT_DATA_INTEGRITY.md) · [`RESEARCH_BUDGET_20260929.md`](RESEARCH_BUDGET_20260929.md)
 
 > ⛔ **GATE — WAJIB KONFIRMASI USER:** Jangan jalankan run besar (50 issue / multi-jam)
 > tanpa persetujuan eksplisit dari user. Boleh tanpa konfirmasi: unit test, smoke test
@@ -485,7 +485,75 @@ dijawab eksperimen: *"dengan 40 turn yang sama, strategi mana yang terbaik?"*
 → act revisinya dapat 1 turn, 0 edit → **tidak ada satu pun yang mengukur review+revisi.**
 Angka-angka itu **tidak komparabel** dengan run 50 yang akan datang.
 
-##### 🚀 SIAP: `tools/run_final_sweep.py` — run 50 issue
+##### ✅ BUDGET NAIK KE SKALA REFERENSI: **200 turn** (keputusan user)
+
+Keputusan user: berhenti memutar-mutar masalah truncation, pakai angka referensi.
+`TOTAL_TOOL_TURNS` **40 → 200**.
+
+| Sistem | Limit | Per apa | Sumber |
+|---|---|---|---|
+| SWE-bench Pro (2025) | **200 turn** | per task | arxiv 2509.16941v1 |
+| mini-SWE-agent | **250 step** | per task | `swebench.yaml` L112 |
+| OpenHands | 500 iterasi | per task | `config_utils.py` |
+| SWE-agent | tanpa step cap, $3 | per instance | `models.py` |
+
+**Pool 40 sebelumnya 5–12× lebih ketat** dari semua cap yang dipublikasikan — itu sebabnya
+act terus kehabisan turn di tengah eksplorasi, sehingga hasilnya mengukur budget, bukan
+strategi. 200 dipilih dari dua referensi berbasis turn (200, 250) sebagai yang lebih konservatif.
+
+**`REVISION_TOOL_TURNS` 8 → 32** (4 ronde × 8). Diukur, bukan selera: revisi 1 turn tidak
+bisa mengedit (EXP-20260928-003), dan **4 turn masih tidak cukup** (pilot 15 run: act revisi
+memakai keempatnya untuk membaca, **0 edit**, lalu re-review menyetujui patch yang tidak
+berubah — sementara act yang **berhasil** mengedit memakai 6–17 turn).
+
+**Carve-out dipertahankan:** direct 200, planning 200, review 148+10+10 base + 32 revisi =
+**200**. Total tetap sama → kemenangan review tetap tidak bisa dijelaskan oleh budget lebih besar.
+
+**Verifikasi:** `check_budget_fairness.py --total 200 --reserve 32` → **FAIR**.
+`ACT_TIMEOUT_SECONDS` 1800 → 3600 untuk act yang kini lebih panjang.
+
+##### ✅ TRAJECTORY PENUH: seluruh aktivitas agen terekam
+
+Sebelum ini, jejak satu act hanya **pesan terakhir** + daftar call datar dengan preview
+2000 char. Akibat yang **terukur**, bukan dibayangkan:
+
+- `<role>.md` dikunci per-role → di run review, act executor **kedua menimpa yang pertama**
+  → percobaan yang ditolak reviewer **tidak ada di artefak mana pun**.
+- Tidak ada nomor turn → tidak bisa tahu call mana dari turn mana.
+- Reasoning hanya ada untuk respons **final**.
+
+**Sekarang setiap turn terekam:** teks asisten, **reasoning**, tool yang diminta, lalu
+setiap hasil tool **utuh** → `trajectory.jsonl` + `trajectory.md` (versi manusiawi), dan
+dibawa di `AgentMessage` sehingga **`messages.jsonl` ADALAH trajectory**-nya.
+
+**Cutoff ditandai di dalam rekaman** (`bound_reached` + `stop_reason`) → "selesai sendiri"
+vs "dihentikan bound" bisa dibedakan **tanpa grep log** — pembedaan yang dulu membuat
+angka 8/8/6 EXP-003 tidak terbaca.
+
+**Reasoning dibaca dari semua nama field** yang dipakai provider (`reasoning_content` /
+`reasoning` / `thinking`, string / list / dict bersarang). Membaca hanya
+`reasoning_content` diam-diam membuang reasoning provider yang menamainya lain.
+
+**Diverifikasi end-to-end dengan thinking ON** (`EXP-20260930-250`): **15 turn reasoning
+terekam, 10 KB**. Uji itu juga **menemukan bug nyata**: penulis lama menghasilkan **0 file
+reasoning** ketika respons final tidak punya reasoning — padahal **12 dari 19 turn punya**.
+Jadi artefaknya membuat run thinking **terlihat seperti non-thinking**. Diperbaiki: artefak
+dibangun dari trajectory. `tools/check_thinking_mode.py` juga diperbaiki (dulu memeriksa
+`messages.jsonl` yang tidak punya field itu → selalu melaporkan 0).
+
+##### ✅ GUARD CONTEXT WINDOW (konsekuensi dari 200 turn — sebelumnya tidak ada sama sekali)
+
+Pada 200 turn, satu act bisa mengumpulkan konteks melebihi window (terukur di pool 100:
+**166k char** output tool dalam satu act). Sebelumnya **tidak ada penanganan apa pun**.
+Overflow akan di-retry `MAX_RETRIES` kali dengan backoff — gagal identik, **ditagih ulang
+tiap kali** — lalu dilaporkan sebagai **kegagalan strategi**.
+
+**Sekarang:** dideteksi dari teks pesan (provider berbeda soal status code), ditandai
+**fatal sehingga TIDAK di-retry**, act berhenti dan meminta jawaban final dengan output
+tool tertua dipangkas, dan berhentinya diberi label `stop_reason=context_limit`. Kalau itu
+pun overflow, hasilnya tetap membawa pekerjaan yang sudah dilakukan (bukan raise).
+
+---
 
 Skrip run final: **50 issue × 3 strategi = 150 run**, semua knob dipass **eksplisit**
 (bukan diwarisi dari `.env`). Ini bukan gaya penulisan: variabel shell yang diam-diam
@@ -501,9 +569,9 @@ mengubah budget adalah persis penyebab hasil lama tidak komparabel.
 
 **Verifikasi sebelum run:** `python tools/preflight_repos.py` → **50/50 repo pristine**.
 
-**Estimasi:** ~$5 dan ~4–6 jam untuk 150 run (dari 3-issue run: $0.298 / 14,9 menit).
-Arm review akan **lebih mahal** dari sebelumnya karena revisi benar-benar terjadi — itu
-tujuannya, dan itu temuan nyata, bukan cacat.
+**Estimasi:** ~$7–11 dan **~14–17 jam** untuk 150 run (dihitung `tools/estimate_sweep_cost.py`
+dari run berbayar di disk, bukan tebakan). Arm review akan **lebih mahal** dari sebelumnya
+karena revisi benar-benar terjadi — itu tujuannya, dan itu temuan nyata, bukan cacat.
 
 **Setelah run:** `check_sweep_state.py` (kelengkapan) → evaluasi Modal →
 `verify_eval_consistency.py` → `read_actual_bill.py --compare`.
