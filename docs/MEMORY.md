@@ -1,9 +1,9 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-09-30 14:45 WIB
-**Status:** Kurva budget **2 dari 3 level dievaluasi** — **40 dan 100 keduanya 2/3 di ketiga strategi (KURVA DATAR)**. Level 200 tidak jalan (abort health check).
+**Last Updated:** 2026-09-30 16:30 WIB
+**Status:** Kurva budget **2 dari 3 level dievaluasi** — 40 dan 100 keduanya 2/3 (DATAR). **Audit pipeline menemukan masalah validitas review yang belum diperbaiki.**
 **Active Branch:** `19/toolcall-commandcode`
-**Detail sesi terakhir:** lihat [`HANDOFF_20260929.md`](HANDOFF_20260929.md)
+**Detail sesi terakhir:** lihat [`HANDOFF_20260929.md`](HANDOFF_20260929.md) + [`AUDIT_PIPELINE_20260930.md`](AUDIT_PIPELINE_20260930.md)
 
 > ⛔ **GATE — WAJIB KONFIRMASI USER:** Jangan jalankan run besar (50 issue / multi-jam)
 > tanpa persetujuan eksplisit dari user. Boleh tanpa konfirmasi: unit test, smoke test
@@ -28,7 +28,7 @@
 | **Budget tool-turn** | ✅ Done | `agents/budget.py` — total sama per strategi, sekarang **40** |
 | **Pre-flight validator** | ✅ Done | `tools/preflight_modal.py` — replikasi kontrak Modal secara lokal |
 | **Rate-limit handling** | ✅ Done | Backoff 429 + circuit breaker |
-| **Test suite** | ✅ Done | **288 lulus** (dari 283) |
+| **Test suite** | ✅ Done | **299 lulus** (dari 288) |
 | **Retry vs budget** | ✅ **FIXED** | Retry per-request di dalam tool loop (commit `dfc9fa8`) |
 | **Konteks per turn** | ✅ Done | `TOOL_OUTPUT_MAX_CHARS=2000`, head+tail (dari 8000 head-only) |
 | **Korupsi patch** | ✅ **FIXED** | `_normalize_newlines` merusak diff yang mengandung literal `\n` (commit `3cbd9d1`) |
@@ -38,6 +38,10 @@
 | **Verdict parsing** | ✅ **FIXED** | `_extract_verdict` tahan prosa + JSON rusak + negasi; 94 respons diaudit, 0 mismatch |
 | **Klasifikasi patch kosong** | ✅ **FIXED** | Patch kosong ≠ kegagalan strategi; `EMPTY_PATCH` dilaporkan terpisah (bug wrapper evaluasi) |
 | **Verifikasi eval** | ✅ Done | `tools/verify_eval_consistency.py` — bandingkan wrapper vs harness resmi; sepakat di semua level |
+| **`--resume` mengulang kegagalan** | ✅ **FIXED** | Baris error dulu dihitung "selesai" → instance yang mati tidak pernah diulang. Sekarang hanya run ber-patch yang dianggap selesai |
+| **Label kegagalan** | ✅ **FIXED** | Semua exception dulu distempel `TIMEOUT`; sekarang `RATE_LIMIT`/`PROVIDER_ERROR`/`ERROR` |
+| **Akurasi vs budget** | ✅ **FIXED** | Patch kosong tidak lagi masuk hitungan (bucket 0-15: 67% → 100%) |
+| **⚠️ Validitas review** | ❌ **BELUM** | **78% penolakan reviewer bersandar file test yang tidak pernah dinilai harness** — lihat §"Temuan kritis audit" |
 | **Race EXP-ID** | ✅ **FIXED** | Lock `O_CREAT\|O_EXCL` + deteksi lock basi; di Windows errno `EACCES`, bukan `EEXIST` |
 | **Split paralel** | ✅ Terverifikasi | `tools/verify_split.py`: 26 + 24 = 50, overlap 0 |
 | **`--resume`** | ✅ **FIXED** | Dulu selalu membuat direktori baru (inert); sekarang `--exp-id` + `--resume` benar-benar melanjutkan |
@@ -231,6 +235,48 @@ Tiga edit `edit_file` di `11001/review` (call #13, #19, #20) semuanya terjadi **
 - `patch_status = VALID`, `experiment.yaml` mencatat semua knob kurva
 
 **Koreksi estimasi waktu:** laju terukur **10,9–13,7 s/turn** (bukan asumsi 3,5 menit/run). Kurva jadi **1–6 jam** dengan level 200 mendominasi, bukan ~2,5 jam.
+
+#### 🚨 TEMUAN KRITIS AUDIT (2026-09-30) — reviewer menolak atas dasar file test yang tidak dinilai
+
+**Ini temuan paling penting sejauh ini, dan bukan bug kode — ini masalah validitas.**
+
+`review_strategy.py:163` memicu ronde revisi saat reviewer bilang `NEEDS_REVISION`. Reviewer sering menolak karena **test yang ditambahkan agen rusak**. Tapi itu **tidak mungkin** mengubah grade:
+
+```python
+# swebench/harness/test_spec/utils.py:66-69, 87, 93
+test_files = get_modified_files(test_patch)   # HANYA test_patch gold
+reset_tests_command = f"git checkout {base_commit} {' '.join(test_files)}"
+```
+
+Harness **me-reset file test** ke base commit lalu menjalankan **test-nya sendiri**. File test yang ditulis agen tidak pernah masuk `FAIL_TO_PASS`/`PASS_TO_PASS`, jadi tidak pernah dinilai.
+
+**Bukti terukur — `11001/review` level 40:**
+
+| Fakta | Nilai |
+|---|---|
+| Penolakan reviewer | *"test mengimpor `RawSQL` dari `django.db.models`, tidak diekspor … modul test gagal diimpor"* |
+| File yang dimaksud | `tests/ordering/tests.py` |
+| Test yang BENAR-BENAR dinilai | `expressions.tests.BasicExpressionsTests` (2 test) |
+| Patch yang dikirim | memuat file test "rusak" itu |
+| **Hasil** | **resolved = True** |
+
+**7 dari 9 verdict `NEEDS_REVISION` (78%) menyebut file test.** Tool: `tools/analyze_test_based_rejections.py`.
+
+**Implikasi untuk tesis:** kalau mayoritas penolakan tidak bisa mempengaruhi grade, maka `review` **bukan** mengukur "review + revisi" — ia mengukur *satu act executor* plus ronde sia-sia. **Klaim apa pun tentang review harus menyebut ini.** Ini juga menjelaskan kenapa act revisi "0 edit": sering kali **memang tidak ada yang perlu diperbaiki**.
+
+**Belum diperbaiki** karena ini keputusan desain, bukan bug: melarang reviewer menolak atas dasar file test akan mengubah perilaku eksperimen. **Butuh keputusan user.**
+
+#### 🐞 Tiga bug lain dari audit — SUDAH DIPERBAIKI
+
+| Bug | Bukti | Perbaikan |
+|---|---|---|
+| **`--resume` tidak pernah mengulang run gagal** | Baris error ditulis dengan kunci resume sama seperti sukses, dan `_load_existing_ids` membaca semua baris tanpa filter status → instance mati dianggap "selesai" selamanya. Ini kali **ketiga** `--resume` bermasalah | `_is_finished_entry()`: hanya run ber-patch non-kosong yang dianggap selesai. 4 test (2 gagal sebelum) |
+| **Semua error distempel `TIMEOUT`** | `runner.py` hardcode `TIMEOUT` di 3 tempat untuk setiap exception. 502 gateway, 429, dan error git jadi tak terbedakan. Terukur: EXP-022 mencatat 502 sebagai TIMEOUT; EXP-20260824-005 mencatat 11× 429 + error git dengan cara sama | `is_provider_error()` di `retry.py`; status jadi `RATE_LIMIT`/`PROVIDER_ERROR`/`ERROR`. 7 test |
+| **Patch kosong menyeret akurasi** | `analyze_accuracy_vs_budget.py` menghitung patch kosong sebagai "converged"; `total_turns=0` → selalu jatuh ke bucket terendah. Bucket 0-15: 67% → **100%** | Non-attempt dikecualikan |
+
+**Catatan:** marker `is_provider_error` sengaja **tidak** memakai substring angka telanjang (`"502"`) karena cocok dengan nomor baris/jumlah token — ada test yang menjaganya.
+
+**Dua temuan partner TIDAK dikonfirmasi** (kode benar, tidak ada insiden nyata) dan **tidak** dijadikan dasar perbaikan: `COST_LIMIT_USD` bisa dilewati pada model ber-rate nol / jalur non-tool; kegagalan mid-act membuang edit parsial. Relevan hanya untuk run berbayar — dicatat di `docs/AUDIT_PIPELINE_20260930.md`.
 
 #### ✅ HASIL LEVEL 100 (per_task, floor 10) — `EXP-20260929-022` — **SUDAH DIEVALUASI**
 
@@ -432,14 +478,20 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 ---
 
-**Last working state:** commit `5661440` — **288 test lulus**. Kurva budget **2 dari 3 level dievaluasi**: level 40 = level 100 = **2/3 di ketiga strategi (DATAR)**. Level 200 tidak jalan.
+**Last working state:** commit `c2e71d7` — **299 test lulus**. Kurva budget **datar** (40 = 100 = 2/3 ketiga strategi). Audit pipeline: 3 bug diperbaiki, 1 masalah validitas belum.
 
 **Langkah berikutnya (prioritas):**
 
-1. **Kurva sudah datar di dua titik (40 dan 100) — keputusan user diperlukan.** Level 200 menjawab pertanyaan yang tersisa: apakah `11019` butuh lebih dari 100 turn, atau memang kegagalan kapabilitas. Tapi kalau yang dicari adalah "apakah budget 40 cukup", jawabannya sudah ada: **ya, pada tiga instance ini**. Level 200 (~4 jam) hanya menambah satu titik; nilainya perlu ditimbang.
+1. **KEPUTUSAN USER — masalah validitas review.** 78% penolakan reviewer bersandar pada file test yang tidak pernah dinilai harness. Ini menjelaskan kenapa act revisi 0 edit (sering memang tak ada yang perlu diperbaiki). Pilihannya:
+   - **(a) Larang reviewer menolak atas dasar file test** — perubahan perilaku eksperimen, perlu run ulang untuk mengukur efeknya.
+   - **(b) Biarkan, tapi laporkan sebagai temuan** — `review` diakui sebagai "executor + ronde review yang sebagian sia-sia", bukan "review + revisi".
+   - **(c) Ukur dulu**: jalankan 3 issue review dengan reviewer diberi tahu file test di-strip harness, lihat apakah verdict berubah.
+   Rekomendasi: **(c)** — murah, dan memberi data sebelum mengubah desain.
 
-2. **Perbaiki `budget.py`** agar act revisi benar-benar direservasi di mode `per_task`. Ini **prasyarat** untuk klaim apa pun tentang review: sekarang act revisi 0 edit di semua run, jadi `review` sebenarnya mengukur *satu act executor*, bukan *review + revisi*.
+2. **Perbaiki `budget.py`** agar act revisi direservasi di mode `per_task`. Tapi lihat temuan kritis dulu: kalau penolakan sering salah, reservasi saja tidak akan menolong — revisi perlu **alasan yang sah** untuk mengedit.
 
-3. **Putuskan model berbayar** untuk run final (RQ3 butuh biaya nyata, bukan estimasi). Jalankan **off-peak** — harga 2× saat peak. Ini juga yang menentukan apakah run 50-issue layak dijalankan (butuh konfirmasi user).
+3. **Level 200** hanya kalau keputusan user ingin memisahkan "`11019` butuh >100 turn" dari "kegagalan kapabilitas". ~4 jam.
 
-4. **Sebelum run besar apa pun:** `python tools/verify_eval_consistency.py` dan `python tools/check_sweep_state.py` — dua pemeriksaan yang menemukan bug sesi ini.
+4. **Model berbayar untuk run final** (RQ3). Sebelum itu, selesaikan dua bug laten yang relevan hanya saat berbayar: `COST_LIMIT_USD` bisa dilewati pada model ber-rate nol / jalur non-tool, dan kegagalan mid-act membuang biaya yang sudah terpakai (keduanya di `docs/AUDIT_PIPELINE_20260930.md`).
+
+5. **Sebelum run besar apa pun:** `verify_eval_consistency.py` + `check_sweep_state.py`.
