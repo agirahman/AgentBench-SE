@@ -14,26 +14,42 @@ feature but was inert.
 
 These tests pin the desired behaviour: given an experiment to continue, the
 runner must write into THAT directory and skip the runs already recorded there.
+
+Note the stub SUCCEEDS. A failing strategy also appends a savepoint row, and an
+earlier version of these tests used one for convenience -- but a row written by
+the error path has an empty patch, and an empty patch must be retried rather than
+skipped (tests/test_resume_skips_failures.py). So only a successful run may be
+treated as done, and the stub has to model that.
 """
 from experiments.runner import run_experiments
+from models.inference import InferenceResult, InferenceRun
 from models.issue import Issue
+from models.patch import Patch
+from models.result import ExperimentResult, ExecutionResult, EvaluationResult
+from evaluation.cost import CostCalculator
 
 
 class _RecordingStrategy:
-    """Records which instances it was asked to run, then fails.
-
-    Failing is deliberate: the runner's error path still appends a savepoint
-    line to predictions/<strategy>.jsonl, and that line carries exactly the
-    fields the resume scan reads (instance_id, model, thinking). So a failing
-    strategy exercises the resume machinery without needing a live provider.
-    """
+    """Records which instances it was asked to run, then returns a real patch."""
 
     def __init__(self, calls: list[str]):
         self.calls = calls
 
     def run(self, issue):
         self.calls.append(issue.instance_id)
-        raise RuntimeError("stub: no provider in tests")
+        inf = InferenceResult(role="direct", response="diff --git a/x b/x")
+        run = InferenceRun(
+            patch="diff --git a/x b/x", inferences=[inf], messages=[]
+        )
+        result = ExperimentResult(
+            instance_id=issue.instance_id,
+            strategy="direct",
+            model="test-model",
+            execution=ExecutionResult(run=run),
+            cost=CostCalculator().aggregate([inf]),
+            evaluation=EvaluationResult(success=True, error=""),
+        )
+        return Patch(response="diff --git a/x b/x"), result
 
 
 def _issue(i: int) -> Issue:

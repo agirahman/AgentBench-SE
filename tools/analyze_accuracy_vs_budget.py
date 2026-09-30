@@ -52,6 +52,13 @@ def resolved_map(exp: str) -> dict[tuple[str, str], bool]:
     The CSV records what the AGENT did (turns, tokens) but not the grade: the
     verdict comes from the separate harness run in predictions/<strategy>_results.json.
     Joining the two is what makes an accuracy-vs-budget analysis possible at all.
+
+    A run whose patch is EMPTY is recorded as a non-attempt, not as a failure.
+    It never produced an answer, so it says nothing about how many turns the task
+    needs -- counting it as a wrong answer would drag down whichever turn bucket
+    it lands in (an empty patch has total_turns=0, so it always lands in the
+    lowest one) and make the budget look less sufficient than it is. Measured on
+    EXP-20260929-022 django-11019/review, a provider 502.
     """
     out: dict[tuple[str, str], bool] = {}
     for strat in ("direct", "planning", "review"):
@@ -65,6 +72,9 @@ def resolved_map(exp: str) -> dict[tuple[str, str], bool]:
         except Exception:  # noqa: BLE001
             continue
         for rec in data.get("results", []):
+            # Skip non-attempts entirely (key absent => excluded downstream).
+            if rec.get("failure_reason") == "EMPTY_PATCH":
+                continue
             out[(strat, rec["instance_id"])] = bool(rec.get("resolved"))
     return out
 

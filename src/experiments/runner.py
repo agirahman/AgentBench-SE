@@ -28,7 +28,7 @@ from experiments.swebench_adapter import (
 from agents.tools import ensure_repo_root
 from evaluation.statistics import export_statistics_json, generate_summary_md
 from evaluation.cost import PricingTable
-from evaluation.retry import is_rate_limit_error
+from evaluation.retry import is_provider_error, is_rate_limit_error
 from config import Config
 from experiment_id import generate_experiment_id, create_experiment_dir
 from experiments.observability import build_experiment_manifest, write_issue_run_summary
@@ -103,10 +103,39 @@ def _resume_key(instance_id: str, model: str, thinking: bool) -> str:
     return f"{instance_id}|{model}|{thinking}"
 
 
+#: A row counts as "done" only if the run actually produced a patch. An errored
+#: row is appended with the same resume keys as a success so that a later
+#: --resume can RETRY it; treating it as done would make --resume silently
+#: preserve the failures it exists to recover from.
+_PATCH_STATUS_FAILED = {"TIMEOUT", "ERROR", "FAILED"}
+
+
+def _is_finished_entry(entry: dict) -> bool:
+    """Did this jsonl row represent a completed run?
+
+    A row is finished when it carries a non-empty patch. The error path writes
+    ``model_patch: ""`` together with ``patch_status: "TIMEOUT"``
+    (runner.py:452-465), so an empty patch is the reliable signal that the
+    instance still needs to run.
+    """
+    status = str(entry.get("patch_status") or "").upper()
+    if status in _PATCH_STATUS_FAILED:
+        return False
+    if entry.get("error_type"):
+        return False
+    return bool((entry.get("model_patch") or "").strip())
+
+
 def _load_existing_ids(jsonl_path: str) -> set[str]:
     """Baca file jsonl yang sudah ada, return set composite resume keys.
 
     Each key is ``instance_id|model|thinking`` (see ``_resume_key``).
+
+    Only FINISHED runs are returned. A run that died (provider 502, rate limit,
+    git failure) leaves a row with an empty patch and ``patch_status: TIMEOUT``;
+    counting it as done would skip the instance on every later --resume, so the
+    failure would never be retried and would stay in the results as if it were a
+    real outcome. Measured on EXP-20260929-022 django-11019/review, a 502.
     """
     ids = set()
     if not os.path.exists(jsonl_path):
@@ -123,6 +152,8 @@ def _load_existing_ids(jsonl_path: str) -> set[str]:
                     continue
                 model = entry.get("model_name_or_path", "")
                 thinking = entry.get("thinking", False)
+                if not _is_finished_entry(entry):
+                    continue
                 ids.add(_resume_key(iid, model, thinking))
             except json.JSONDecodeError:
                 continue
@@ -449,12 +480,29 @@ def run_experiments(
                 else:
                     consecutive_rate_limits = 0
 
+                # Label the failure by CAUSE, not by a single catch-all. Every
+                # unhandled exception used to be stamped "TIMEOUT", so a provider
+                # 502, an HTTP 429 and a git error were indistinguishable in the
+                # results and all read as time-outs downstream. Measured:
+                # EXP-20260929-022 django-11019/review recorded a 502
+                # (ENOTFOUND opencode.ai) as TIMEOUT, and EXP-20260824-005
+                # recorded 11 consecutive 429s plus a git failure the same way.
+                # The distinction matters because only some of these are worth
+                # retrying, and a run that died at the provider must not be read
+                # as a strategy that ran out of time.
+                if is_rate_limit_error(e):
+                    failure_status = "RATE_LIMIT"
+                elif is_provider_error(e):
+                    failure_status = "PROVIDER_ERROR"
+                else:
+                    failure_status = "ERROR"
+
                 error_entry = {
                     "instance_id": issue.instance_id,
                     "model_patch": "",
                     "model_name_or_path": effective_model,
                     "strategy": name,
-                    "patch_status": "TIMEOUT",
+                    "patch_status": failure_status,
                     # Keep resume keys symmetric with success rows; otherwise
                     # --resume under thinking mode re-runs every errored instance.
                     "thinking": Config.DEEPSEEK_THINKING,
@@ -480,7 +528,7 @@ def run_experiments(
                     execution=empty_exec,
                     cost=empty_cost,
                     evaluation=empty_eval,
-                    patch_status="TIMEOUT",
+                    patch_status=failure_status,
                 ))
 
                 # Persist an issue-level summary even on failure so manifest
@@ -489,7 +537,7 @@ def run_experiments(
                     output_dir=str(exp_dir),
                     issue=issue,
                     strategy_name=name,
-                    patch_status="TIMEOUT",
+                    patch_status=failure_status,
                     elapsed_seconds=elapsed_err,
                     total_tokens=0,
                     success=False,

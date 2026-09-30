@@ -19,6 +19,37 @@ _RATE_LIMIT_MARKERS = (
     "resource exhausted",
 )
 
+# Markers for provider-side / infrastructure failures (see is_provider_error).
+# "error code: 5" covers the gateway's "Error code: 502 - {...}" form without
+# matching an arbitrary number that happens to appear in a message (a bare "502"
+# substring would also fire on a token count or a line number).
+_PROVIDER_ERROR_MARKERS = (
+    "error code: 5",
+    "http 5",
+    "status 5",
+    "bad gateway",
+    "bad_gateway",
+    "service unavailable",
+    "gateway timeout",
+    "internal server error",
+    "internalservererror",
+    "connection error",
+    "connection reset",
+    "connection aborted",
+    "remote end closed",
+    "timed out",
+    "fetch failed",
+    "enotfound",
+    "getaddrinfo",
+    "name or service not known",
+    "temporary failure in name resolution",
+    "name resolution",
+    "connecterror",
+    "connection refused",
+    "server disconnected",
+    "broken pipe",
+)
+
 
 def is_rate_limit_error(exc: BaseException) -> bool:
     """True if ``exc`` looks like a provider rate-limit / quota rejection.
@@ -35,6 +66,30 @@ def is_rate_limit_error(exc: BaseException) -> bool:
         return True
     text = f"{type(exc).__name__}: {exc}".lower()
     return any(marker in text for marker in _RATE_LIMIT_MARKERS)
+
+
+def is_provider_error(exc: BaseException) -> bool:
+    """True if ``exc`` looks like a provider/infrastructure failure, not our bug.
+
+    These are the failures that are NOT the strategy's fault and must not be read
+    as a bad answer: a 5xx from the gateway, a DNS failure, a dropped connection,
+    a request timeout. The runner labels them separately so the results can say
+    "the provider was down" instead of silently recording another strategy
+    failure — measured on EXP-20260929-022 django-11019/review, where a 502
+    ("ENOTFOUND opencode.ai") was recorded as patch_status TIMEOUT, making an
+    infrastructure outage look like a budget problem.
+
+    A 4xx other than 429 is deliberately NOT included: that is a request our code
+    built wrong, which is our bug and should stay visible as one.
+    """
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(status, int) and 500 <= status < 600:
+        return True
+
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(marker in text for marker in _PROVIDER_ERROR_MARKERS)
 
 
 def _backoff_delay(
