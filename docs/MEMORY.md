@@ -1,7 +1,7 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-09-30 19:20 WIB
-**Status:** **Persiapan run 50.** Audit 2 partner + **verifikasi adversarial** menemukan **7 cacat** (4 KRITIS) — semua diperbaiki & teruji. **2 di antaranya ada di perbaikanku sendiri**, ditemukan justru karena partner diminta membongkarnya. 328 test lulus. **1 keputusan menunggu user: opsi reserve budget (a/b/c).**
+**Last Updated:** 2026-09-30 20:15 WIB
+**Status:** **SIAP run 50 issue.** Keputusan user: **total turn sama di semua strategi** (40/40/40, reserve revisi dipotong dari pool). Audit 2 partner + verifikasi adversarial: 7 cacat (4 KRITIS) ditemukan & diperbaiki. **332 test lulus. 50/50 repo pristine.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk menjalankan 150 run.**
 **Active Branch:** `19/toolcall-commandcode`
 **Detail sesi terakhir:** [`VERIFY_FIXES_P7.md`](VERIFY_FIXES_P7.md) · [`VERIFY_FIXES_P8.md`](VERIFY_FIXES_P8.md) · [`AUDIT_RUN_READINESS.md`](AUDIT_RUN_READINESS.md) · [`AUDIT_DATA_INTEGRITY.md`](AUDIT_DATA_INTEGRITY.md)
 
@@ -446,41 +446,67 @@ perbaikanku tidak menutup kasus utamanya — dan aku tidak akan menemukannya sen
 
 ---
 
-##### ⚠️ KEPUTUSAN TERBUKA: reserve revisi membuat total budget TIDAK SAMA
+##### ✅ KEPUTUSAN DIAMBIL: reserve revisi **DIPOTONG** dari pool (opsi b)
 
-Perbaikan reserve (#3) memunculkan konsekuensi desain yang **harus diputuskan sadar**,
-bukan ditemukan belakangan di hasil. Diukur dengan `tools/check_budget_fairness.py`:
+Keputusan user: **perbandingan turn harus sama di semua strategi**. Diimplementasikan
+sebagai **carve-out** — reserve dipotong **dari** `TOTAL_TOOL_TURNS`, bukan ditambahkan.
 
 | Strategi | Act base | Base | Revisi | **TOTAL** |
 |---|---|---|---|---|
 | direct | 40 | 40 | 0 | **40** |
 | planning | 30+10 | 40 | 0 | **40** |
-| review | 20+10+10 | 40 | **8** | **48** |
+| review | 12+10+10 | **32** | **8** | **40** |
 
-**Base flow tetap setara (40/40/40)** — itu yang dijamin desain. Tapi **total** review
-bisa 48 (20% lebih), karena reserve adalah allowance **tambahan**, bukan potongan pool.
+**Setiap strategi dapat total 40 turn.** Kemenangan `review` tidak bisa dijelaskan oleh
+budget lebih besar — confound-nya hilang.
 
-**Konsekuensi untuk tesis:**
+**Trade-off yang disadari:** total sama, **base flow tidak** (40/40/32). Review
+menyisihkan 8 turn-nya sendiri untuk merevisi, seperti orang yang menganggarkan 40 aksi.
+Review yang tidak perlu merevisi **memakai lebih sedikit** dari jatahnya. Pertanyaan yang
+dijawab eksperimen: *"dengan 40 turn yang sama, strategi mana yang terbaik?"*
 
-- **RQ1 (efektivitas):** kalau `review` menang, kemenangan itu **tidak bisa diatribusikan
-  ke strategi saja** — dia punya budget lebih besar. Harus dilaporkan bersama totalnya.
-  Kalau `review` **kalah**, itu tetap informatif: gagal **dengan** ruang lebih.
-- **RQ2 (efisiensi):** terdampak langsung — turn/token review diukur terhadap allowance
-  yang lebih besar.
-- **RQ3 (biaya):** biaya review naik saat revisi jalan. Itu **nyata** dan boleh dilaporkan
-  sebagai biaya struktural strategi.
+**Verifikasi:** `tools/check_budget_fairness.py` → **FAIR** di kedua mode (`per_task` dan
+`per_act`). 332 test lulus.
 
-**Opsi (semua defensible kalau dinyatakan):**
+**Detail implementasi yang penting:**
 
-| Opsi | Isi | Trade-off |
+- `from_config(with_revisions=True)` wajib untuk memotong reserve, dan **hanya review**
+  yang memakainya. Kalau dipotong untuk semua, direct & planning dapat 32 sementara review
+  40 — ketidakadilan yang sama, arah berlawanan. Ada test yang mengunci ini.
+- Reserve lebih besar dari pool **di-clamp** (bukan dipatuhi): kalau dipatuhi, base act
+  dapat pool negatif dan semua act jatuh ke floor 1 → review tidak bisa apa-apa.
+- `task_total` adalah **property**, bukan field: nilainya jumlah sisa, jadi melaporkan
+  total awal setelah dibelanjakan akan salah.
+- **4 test lama** mengunci invarian lama (base sama, reserve ekstra) — **ditulis ulang**
+  dengan docstring yang menjelaskan apa yang berubah, supaya pembalikan ini tidak
+  disalahartikan sebagai regresi.
+
+**⚠️ Semua angka `review` di disk (3 eksperimen sebelumnya) memakai `REVISION_TOOL_TURNS=0`**
+→ act revisinya dapat 1 turn, 0 edit → **tidak ada satu pun yang mengukur review+revisi.**
+Angka-angka itu **tidak komparabel** dengan run 50 yang akan datang.
+
+##### 🚀 SIAP: `tools/run_final_sweep.py` — run 50 issue
+
+Skrip run final: **50 issue × 3 strategi = 150 run**, semua knob dipass **eksplisit**
+(bukan diwarisi dari `.env`). Ini bukan gaya penulisan: variabel shell yang diam-diam
+mengubah budget adalah persis penyebab hasil lama tidak komparabel.
+
+| Setelan | Nilai | Alasan |
 |---|---|---|
-| **(a)** Terima | Laporkan base=40 + 8 tambahan review sebagai biaya struktural | Paling jujur soal realita; tapi RQ1 perlu kualifikasi |
-| **(b)** Samakan total | Naikkan `--total` direct/planning jadi 48 | Perbandingan bersih; tapi angka "40" di kurva tidak lagi sama |
-| **(c)** reserve=0 | Tetap seperti 3 eksperimen lalu | Jujur, tapi **review tidak diukur sama sekali** |
+| `REVISION_TOOL_TURNS` | **8** | Tanpa ini, arm review tidak benar-benar merevisi |
+| `COST_LIMIT_USD` | **3.00** | Nilai referensi mini-SWE-agent & SWE-agent |
+| `ACT_TIMEOUT_SECONDS` | **1800** | Backoff retry tidak bisa menggantung satu act berjam-jam |
+| `BUDGET_MODE` | `per_task` | Struktur yang dipakai semua referensi |
+| `BUDGET_FLOOR_PER_ACT` | 10 | |
 
-**Catatan penting:** hanya opsi (c) yang dilakukan tiga eksperimen di disk. **Setiap angka
-`review` yang ada sekarang berasal dari run yang act revisinya dapat 1 turn** — jadi tidak
-ada satu pun yang benar-benar mengukur review.
+**Verifikasi sebelum run:** `python tools/preflight_repos.py` → **50/50 repo pristine**.
+
+**Estimasi:** ~$5 dan ~4–6 jam untuk 150 run (dari 3-issue run: $0.298 / 14,9 menit).
+Arm review akan **lebih mahal** dari sebelumnya karena revisi benar-benar terjadi — itu
+tujuannya, dan itu temuan nyata, bukan cacat.
+
+**Setelah run:** `check_sweep_state.py` (kelengkapan) → evaluasi Modal →
+`verify_eval_consistency.py` → `read_actual_bill.py --compare`.
 
 ---
 
