@@ -79,7 +79,28 @@ def test_no_choices_marks_empty():
     assert result.response == ""
 
 
-def test_config_defaults():
+def test_config_defaults(monkeypatch):
+    """The shipped defaults must be sane.
+
+    MAX_REVISION_TURNS is PINNED to the value .env ships. Reading it ambient made the
+    test's outcome depend on the caller's shell: exporting MAX_REVISION_TURNS=0 made
+    it fail, which reads as a code defect but is really the environment doing its
+    documented job (a shell value overrides .env). A partner audit flagged this
+    (docs/AUDIT_TEST_ROBUSTNESS.md, 1.2) -- the assertion is about the CONFIGURED
+    default, so it should say so.
+
+    That 0 is legal-but-starved is a separate, real property, pinned in
+    tests/test_budget_modes.py::test_no_reserve_keeps_the_legacy_starved_behaviour.
+    """
+    from agents import budget as budget_mod
+    from agents import base as base_mod
+    from agents import registry as registry_mod
+    from agents import tools as tools_mod
+    from strategies import review_strategy
+
+    for mod in (base_mod, budget_mod, registry_mod, tools_mod, review_strategy):
+        monkeypatch.setattr(mod.Config, "MAX_REVISION_TURNS", 4)
+
     assert Config.MAX_TOKENS > 0
     assert Config.API_TIMEOUT > 0
     assert isinstance(Config.DEEPSEEK_THINKING, bool)
