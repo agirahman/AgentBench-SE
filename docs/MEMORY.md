@@ -252,7 +252,13 @@ Tiga edit `edit_file` di `11001/review` (call #13, #19, #20) semuanya terjadi **
 
 **Akar masalahnya ada di `budget.py`:** di mode `per_task`, `share()` hanya menyisakan floor untuk **act base** yang belum jalan. Act revisi bukan bagian base flow, jadi **tidak ada yang direservasi untuknya**. Di pool 40 act base bisa menghabiskan semuanya → revisi jatuh ke floor 1 turn. Di pool 100 masih ada sisa, tapi tetap tidak mengedit.
 
-**Status jujur:** perbaikan reserve **belum terbukti bekerja**. Yang terbukti hanya plumbing-nya (act revisi benar-benar dipanggil, `inference_count` naik, executor yang menjalankannya — bukan reviewer).
+**Status jujur (per 2026-09-29):** perbaikan reserve **belum terbukti bekerja**. Yang terbukti hanya plumbing-nya (act revisi benar-benar dipanggil, `inference_count` naik, executor yang menjalankannya — bukan reviewer).
+
+> ✅ **UPDATE (2026-10-01): SUDAH TERBUKTI.** Pilot `EXP-20260930-415` menunjukkan act revisi
+> **benar-benar mengedit** (6 turn, 2 edit) — diverifikasi `tools/audit_revision_edits.py`.
+> Yang salah bukan plumbing-nya, tapi **konfigurasi**: reserve 32 dengan `MAX_REVISION_TURNS=1`
+> memberi **4+4** per act untuk 4 putaran, di bawah kebutuhan terukur **6**. Kini
+> `REVISION_TOOL_TURNS=48` / 4 putaran. Blok di atas tetap ada sebagai catatan sejarah.
 
 **11019 masih gagal di ketiganya (`TESTS_ERROR`)** — konsisten dengan temuan lama bahwa instance ini mengukur batas budget, bukan strategi. Di level 40 review masih `truncated` di 11001 **dan** 11019 (pool 40 harus menutup 5 act review: plan, exec, review, revisi, re-review). Level 100/200 menguji apakah pool lebih besar mengubahnya.
 
