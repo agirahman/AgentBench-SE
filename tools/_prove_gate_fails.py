@@ -19,14 +19,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 TARGET = ROOT / "tests" / "test_budget_modes.py"
 
-original = TARGET.read_text(encoding="utf-8")
+original_bytes = TARGET.read_bytes()
+original = original_bytes.decode("utf-8")
+# Preserve the file's own line endings. Writing text converted the whole file to CRLF
+# once and produced a large diff of unchanged content.
+newline = "\r\n" if b"\r\n" in original_bytes else "\n"
+normalised = original.replace("\r\n", "\n")
 marker = "def test_no_reserve_keeps_the_legacy_starved_behaviour():"
-if marker not in original:
+if marker not in normalised:
     print(f"anchor not found in {TARGET.name}; aborting rather than guessing")
     sys.exit(2)
 
 # Insert a deliberately failing test at the top of the file.
-broken = original.replace(
+broken = normalised.replace(
     marker,
     'def test_deliberately_broken_for_the_gate_check():\n'
     '    assert False, "injected failure: the readiness gate must not say READY"\n\n\n'
@@ -35,7 +40,7 @@ broken = original.replace(
 )
 
 try:
-    TARGET.write_text(broken, encoding="utf-8")
+    TARGET.write_bytes(broken.replace("\n", newline).encode("utf-8"))
     out = subprocess.run(
         [sys.executable, "tools/readiness_report.py"],
         cwd=str(ROOT), capture_output=True, text=True,
@@ -61,5 +66,6 @@ try:
         print("PROBLEM -- the gate can say READY while the suite is red.")
     sys.exit(0 if ok else 1)
 finally:
-    TARGET.write_text(original, encoding="utf-8")
+    # Byte-for-byte restore, so the check leaves no diff behind.
+    TARGET.write_bytes(original_bytes)
     print("\nfile restored")
