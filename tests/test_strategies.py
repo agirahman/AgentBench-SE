@@ -76,14 +76,29 @@ def test_review_strategy_approved_uses_three_agents(issue):
     assert [inf.role for inf in result.execution.inferences] == ["planner", "executor", "reviewer"]
 
 
-def test_review_strategy_revision_adds_executor_and_re_review(issue):
+def test_review_strategy_revision_adds_executor_and_re_review(issue, monkeypatch):
     """One revision turn costs two inferences: the executor's rewrite AND a
     re-review of it.
 
     Re-reviewing is the point: without it the strategy shipped whichever diff the
     working tree held last, so a rejected rewrite replaced a working patch with
     nothing checking it (EXP-20260927-007, django-10924).
+
+    MAX_REVISION_TURNS is PINNED to 1. Left to the ambient environment this test
+    passed only while the shell happened to export 1; with the configured value of 4
+    the loop correctly runs four rounds and the assertion below (5 inferences) is
+    simply the wrong expectation. A test whose outcome depends on the caller's
+    environment is not testing the code.
     """
+    from agents import base as base_mod
+    from agents import budget as budget_mod
+    from agents import registry as registry_mod
+    from agents import tools as tools_mod
+    from strategies import review_strategy
+
+    for mod in (base_mod, budget_mod, registry_mod, tools_mod, review_strategy):
+        monkeypatch.setattr(mod.Config, "MAX_REVISION_TURNS", 1)
+
     provider = DummyProvider(reviewer_verdict='{"verdict": "NEEDS_REVISION"}')
     patch, result = ReviewStrategy(provider).run(issue)
 
@@ -194,6 +209,13 @@ def test_revision_act_gets_a_usable_share_from_the_reserve(issue, monkeypatch):
     32 here and review's whole task still costs 40 turns -- the same as direct and
     planning. The earlier design kept the base flow at 40 and let the reserve be
     extra, which gave review 48 turns and confounded the comparison.
+
+    MAX_REVISION_TURNS is PINNED to 1 so the reserve-8 figure means "8 turns for the
+    one round". The reserve is divided across every revision act still to come, so
+    the same 8 with the configured 4 rounds grants 8 // (2 x 4) = 1 turn per act --
+    starved. That combination is exactly what the sweep would have run, and it is
+    what test_a_small_reserve_with_many_rounds_starves_every_round pins below.
+    Pinning here keeps each test about ONE variable.
     """
     from agents import base as base_mod
     from agents import budget as budget_mod
@@ -205,6 +227,7 @@ def test_revision_act_gets_a_usable_share_from_the_reserve(issue, monkeypatch):
         monkeypatch.setattr(mod.Config, "TOOLCALL_ENABLED", True)
         monkeypatch.setattr(mod.Config, "TOTAL_TOOL_TURNS", 40)
         monkeypatch.setattr(mod.Config, "REVISION_TOOL_TURNS", 8)
+        monkeypatch.setattr(mod.Config, "MAX_REVISION_TURNS", 1)
     monkeypatch.setattr(
         "agents.base.load_prompt_or_default",
         lambda filename, default="": str(default),
@@ -276,4 +299,93 @@ def test_every_revision_round_gets_a_usable_grant(issue, monkeypatch):
     )
     assert len(set(revision_grants)) == 1, (
         f"rounds got unequal grants, so later rounds are penalised: {revision_grants}"
+    )
+
+
+def test_a_small_reserve_with_many_rounds_starves_every_round(issue, monkeypatch):
+    """The configuration the sweep would have run, pinned as the FAILURE it is.
+
+    REVISION_TOOL_TURNS=8 with MAX_REVISION_TURNS=4 gives review a correct total and
+    a correct number of rounds, and still cannot revise: the reserve is divided
+    across every revision act still to come, so each of the 8 acts (4 rounds x 2)
+    gets 8 // 8 = 1 turn. One turn reads a file; it cannot edit one.
+
+    Every other check passed on this shape -- the totals were equal (200/200/200)
+    and the round count was the intended one -- which is why the failure survived
+    408 tests. This test makes the gap between "the budget is fair" and "the budget
+    is usable" explicit.
+    """
+    from agents import base as base_mod
+    from agents import budget as budget_mod
+    from agents import registry as registry_mod
+    from agents import tools as tools_mod
+    from strategies import review_strategy
+
+    for mod in (base_mod, budget_mod, registry_mod, tools_mod, review_strategy):
+        monkeypatch.setattr(mod.Config, "TOOLCALL_ENABLED", True)
+        monkeypatch.setattr(mod.Config, "TOTAL_TOOL_TURNS", 200)
+        monkeypatch.setattr(mod.Config, "REVISION_TOOL_TURNS", 8)
+        monkeypatch.setattr(mod.Config, "MAX_REVISION_TURNS", 4)
+    monkeypatch.setattr(
+        "agents.base.load_prompt_or_default",
+        lambda filename, default="": str(default),
+    )
+
+    provider = BudgetRecordingProvider(reviewer_verdict='{"verdict": "NEEDS_REVISION"}')
+    ReviewStrategy(provider).run(issue)
+
+    executor_grants = [t for role, t in provider.tool_turns if role == "executor"]
+    revision_grants = executor_grants[1:]
+    assert revision_grants, "four rounds were allowed, so revision acts must run"
+    assert all(g == 1 for g in revision_grants), (
+        f"this shape is supposed to starve every round; got {revision_grants}. "
+        f"If the split changed, re-derive the numbers rather than deleting the check"
+    )
+
+
+def test_the_configured_reserve_can_fund_every_configured_round(issue, monkeypatch):
+    """The shipped configuration must NOT be the starved shape above.
+
+    Reads the values the sweep actually passes (REVISION_TOOL_TURNS=48,
+    MAX_REVISION_TURNS=4) and asserts every revision act gets enough turns to edit.
+    Measured need: 6 turns (the revision that changed a patch used 6, made 2 edits).
+    """
+    from agents import base as base_mod
+    from agents import budget as budget_mod
+    from agents import registry as registry_mod
+    from agents import tools as tools_mod
+    from strategies import review_strategy
+
+    reserve = 48
+    rounds = 4
+    for mod in (base_mod, budget_mod, registry_mod, tools_mod, review_strategy):
+        monkeypatch.setattr(mod.Config, "TOOLCALL_ENABLED", True)
+        monkeypatch.setattr(mod.Config, "TOTAL_TOOL_TURNS", 200)
+        monkeypatch.setattr(mod.Config, "REVISION_TOOL_TURNS", reserve)
+        monkeypatch.setattr(mod.Config, "MAX_REVISION_TURNS", rounds)
+    monkeypatch.setattr(
+        "agents.base.load_prompt_or_default",
+        lambda filename, default="": str(default),
+    )
+
+    provider = BudgetRecordingProvider(reviewer_verdict='{"verdict": "NEEDS_REVISION"}')
+    ReviewStrategy(provider).run(issue)
+
+    executor_grants = [t for role, t in provider.tool_turns if role == "executor"]
+    assert len(executor_grants) == 1 + rounds, (
+        f"expected 1 base + {rounds} revision acts, got {executor_grants}"
+    )
+    revision_grants = executor_grants[1:]
+    assert all(g >= 6 for g in revision_grants), (
+        f"a revision act needs >= 6 turns to read AND edit; got {revision_grants} "
+        f"from reserve={reserve} over {rounds} rounds"
+    )
+
+    # And the whole task still costs exactly what the other strategies get.
+    base_total = sum(t for role, t in provider.tool_turns
+                     if role in ("planner", "reviewer")) + executor_grants[0]
+    revision_total = sum(revision_grants)
+    assert base_total + revision_total <= 200, (
+        f"review was granted {base_total + revision_total} turns, above the 200 "
+        f"every strategy is supposed to get"
     )

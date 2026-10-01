@@ -26,6 +26,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from agents.budget import ToolTurnBudget  # noqa: E402
 
+#: Turns a revision act needs to read AND edit. MEASURED: the revision that changed
+#: a patch in EXP-20260930-415 used 6 turns (2 edits). Kept in one place so this
+#: checker and tools/verify_revision_rounds.py cannot disagree about the threshold.
+USABLE_REVISION_GRANT = 6
+
 
 def simulate(
     total: int,
@@ -162,8 +167,9 @@ def main() -> None:
         pairs = [f"{grants[i]}+{grants[i + 1]}" for i in range(0, len(grants) - 1, 2)]
         print(f"    rounds={review['rounds']}  " + "  ".join(pairs))
         smallest = min(grants)
-        if smallest < 4:
-            print(f"    SMALLEST GRANT = {smallest} -- an act with fewer than 4 turns")
+        if smallest < USABLE_REVISION_GRANT:
+            print(f"    SMALLEST GRANT = {smallest} -- an act with fewer than "
+                  f"{USABLE_REVISION_GRANT} turns")
             print("    reads files and runs out before editing, so the round is")
             print("    decorative. Raise REVISION_TOOL_TURNS or lower the round count.")
 
@@ -208,11 +214,12 @@ def main() -> None:
 
     print()
     print("=" * 78)
-    starved = bool(grants) and min(grants) < 4
+    starved = bool(grants) and min(grants) < USABLE_REVISION_GRANT
     if starved:
-        print("  UNFAIR: a revision act gets fewer than 4 turns, so review cannot")
-        print("          revise even though its budget is nominally equal. Equal")
-        print("          TOTALS are not enough -- the reserve must also be usable.")
+        print(f"  UNFAIR: a revision act gets fewer than {USABLE_REVISION_GRANT} turns,")
+        print("          so review cannot revise even though its budget is nominally")
+        print("          equal. Equal TOTALS are not enough -- the reserve must also be")
+        print("          usable.")
     elif len(uniq_grand) == 1:
         print("  FAIR: every strategy's task budget is identical, and every revision")
         print("        act can both read and edit.")

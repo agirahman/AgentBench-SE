@@ -166,7 +166,20 @@ def test_rejected_revision_does_not_replace_the_initial_patch(monkeypatch):
     single patch on the same issue resolved. The old code shipped whatever the
     working tree held last; it now ships a patch the reviewer actually approved,
     falling back to the first attempt when every candidate was rejected.
+
+    MAX_REVISION_TURNS is PINNED to 1: this test is about WHICH patch gets shipped,
+    not how many rounds run. With the configured 4 the loop correctly runs four
+    rounds and the executor-call count below is the wrong expectation.
     """
+    from agents import base as base_mod
+    from agents import budget as budget_mod
+    from agents import registry as registry_mod
+    from agents import tools as tools_mod
+    from strategies import review_strategy
+
+    for mod in (base_mod, budget_mod, registry_mod, tools_mod, review_strategy):
+        monkeypatch.setattr(mod.Config, "MAX_REVISION_TURNS", 1)
+
     provider = ChangingExecutorProvider()
     strategy = ReviewStrategy(provider)
 

@@ -28,10 +28,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-#: Turns an act needs to actually edit. Measured: a revision act granted 4 turns
-#: used all 4 and made 1 edit (EXP-20260929-001, django-11001); acts that edited
-#: successfully in later pilots used 6-17. Below this a round is decorative.
-USABLE_GRANT = 4
+#: Turns an act needs to actually edit. MEASURED, not chosen: the revision act that
+#: changed a patch in EXP-20260930-415 used 6 turns and made 2 edits. An earlier
+#: figure of 4 came from EXP-20260929-001, where a revision granted exactly 4 used
+#: all 4 and made a single edit -- it worked, but hit its cap precisely, so 4 is the
+#: edge rather than the requirement. Below this a round is decorative.
+USABLE_GRANT = 6
 
 
 def split(reserve: int, rounds: int) -> list[tuple[int, int]]:
@@ -113,12 +115,18 @@ def main() -> int:
             f"round(s) run -- the arm under-revises relative to what the reserve says"
         )
 
-    # The documentation claims reserve = 8 * rounds in several places; check it.
-    expected = 8 * rounds
-    if reserve != expected:
+    # The reserve must cover every act of every round at the measured need:
+    # rounds x 2 acts per round x USABLE_GRANT. This is the check that would have
+    # caught the shipped configuration. The earlier form here asserted
+    # reserve == 8 * rounds -- which is the SAME impossible arithmetic that caused
+    # the defect (4 rounds x 2 acts x 8 = 64, not 32), so the checker reproduced
+    # the bug it was written to find and flagged the CORRECT value of 48 as wrong.
+    # A checker must derive the requirement, not repeat a remembered constant.
+    expected = 2 * rounds * USABLE_GRANT
+    if reserve < expected:
         problems.append(
-            f"REVISION_TOOL_TURNS={reserve} but {rounds} round(s) need >= {expected} "
-            f"for a {USABLE_GRANT}-turn grant per act"
+            f"REVISION_TOOL_TURNS={reserve} but {rounds} round(s) x 2 acts need "
+            f">= {expected} for a {USABLE_GRANT}-turn grant per act"
         )
 
     if problems:
@@ -126,7 +134,7 @@ def main() -> int:
         for p in problems:
             print(f"    - {p}")
         print()
-        print("  Fix: set REVISION_TOOL_TURNS >= 8 * MAX_REVISION_TURNS, and make the")
+        print("  Fix: set REVISION_TOOL_TURNS >= 2 * MAX_REVISION_TURNS * 6, and make")
         print("  sweep pass both explicitly so .env cannot drift from the script.")
         print()
         return 1
