@@ -1,9 +1,10 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-10-01 03:20 WIB
-**Status:** **SIAP run 50 issue** (setelah 2 audit partner). Budget 200 turn, total sama 200/200/200, **revisi 48 turn (4 putaran × 2 act × 6)**. Trajectory penuh + guard context window. **421 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
+**Last Updated:** 2026-10-01 03:40 WIB
+**Status:** **SIAP run 50 issue** (setelah 2 audit partner, **5 blocker diperbaiki**). Budget 200 turn, total sama 200/200/200, **revisi 48 turn (4 putaran × 2 act × 6)**. Trajectory penuh + guard context window. **421 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
 **Active Branch:** `19/toolcall-commandcode`
-**Detail sesi terakhir:** [`AUDIT_PROMPTS_PARTNER.md`](AUDIT_PROMPTS_PARTNER.md) · [`AUDIT_RUN_TESTS_PARTNER.md`](AUDIT_RUN_TESTS_PARTNER.md) · [`AUDIT_OPS_PARTNER.md`](AUDIT_OPS_PARTNER.md) · [`AUDIT_SCALE_PARTNER.md`](AUDIT_SCALE_PARTNER.md) · [`RESEARCH_BUDGET_20260929.md`](RESEARCH_BUDGET_20260929.md)
+**Handoff sesi terakhir:** [`HANDOFF_20261001.md`](HANDOFF_20261001.md)
+**Detail audit sesi terakhir:** [`AUDIT_OPS_PARTNER.md`](AUDIT_OPS_PARTNER.md) · [`AUDIT_SCALE_PARTNER.md`](AUDIT_SCALE_PARTNER.md) · [`AUDIT_PROMPTS_PARTNER.md`](AUDIT_PROMPTS_PARTNER.md) · [`AUDIT_RUN_TESTS_PARTNER.md`](AUDIT_RUN_TESTS_PARTNER.md) · [`RESEARCH_BUDGET_20260929.md`](RESEARCH_BUDGET_20260929.md)
 
 > ⛔ **GATE — WAJIB KONFIRMASI USER:** Jangan jalankan run besar (50 issue / multi-jam)
 > tanpa persetujuan eksplisit dari user. Boleh tanpa konfirmasi: unit test, smoke test
@@ -325,11 +326,21 @@ Harness **me-reset file test** ke base commit lalu menjalankan **test-nya sendir
 | Patch yang dikirim | memuat file test "rusak" itu |
 | **Hasil** | **resolved = True** |
 
-**7 dari 9 verdict `NEEDS_REVISION` (78%) menyebut file test.** Tool: `tools/analyze_test_based_rejections.py`.
+**Klaim lama: "7 dari 9 verdict `NEEDS_REVISION` (78%) menyebut file test."** Angka itu
+**tidak salah sebagai hitungan penyebutan**, tapi **salah sebagai dasar kesimpulan** — "menyebut"
+bukan "menentukan". Diukur dengan `tools/analyze_rejection_basis.py`: **6 dari 8 menyebut**,
+tapi hanya **1 dari 8 (12,5%)** yang **seluruh** `issues_found`-nya soal file test
+(`EXP-20260928-003 django__django-11001 msg[13]`).
 
-**Implikasi untuk tesis:** kalau mayoritas penolakan tidak bisa mempengaruhi grade, maka `review` **bukan** mengukur "review + revisi" — ia mengukur *satu act executor* plus ronde sia-sia. **Klaim apa pun tentang review harus menyebut ini.** Ini juga menjelaskan kenapa act revisi "0 edit": sering kali **memang tidak ada yang perlu diperbaiki**.
+**Implikasi untuk tesis (versi terkoreksi):** `review` **tetap** boleh diklaim mengukur
+review+revisi. Yang perlu dicatat hanya bahwa **reviewer sesekali menyebut cacat file test yang
+tidak dinilai harness**, dan itu **tidak mengubah verdict** di hampir semua kasus. Alasan act
+revisi dulu "0 edit" bukan karena penolakan salah, tapi karena **jatahnya tidak cukup**
+(1–4 turn; lihat §blocker budget) — dan itu **sudah diperbaiki** (`REVISION_TOOL_TURNS=48`).
 
-**Belum diperbaiki** karena ini keputusan desain, bukan bug: melarang reviewer menolak atas dasar file test akan mengubah perilaku eksperimen. **Butuh keputusan user.**
+**Status:** **tidak ada keputusan user yang dibutuhkan.** Setelah diukur, masalahnya kecil
+(12,5%, bukan 78%). Melarang reviewer menolak atas dasar file test akan mengubah perilaku
+eksperimen dan **tidak sepadan** untuk 1 dari 8 kasus. Cukup dicatat sebagai temuan di tesis.
 
 #### 🐞 Tiga bug lain dari audit — SUDAH DIPERBAIKI
 
@@ -946,24 +957,26 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 | Key | Nilai | Catatan |
 |---|---|---|
-| `OPENCODE_MODEL` | `oc/space-bunny-free` | via 9router |
+| `OPENCODE_MODEL` | `cbai/deepseek-v4.1-flash` | via 9router (**berbayar** — RQ3 butuh ini) |
 | `OPENCODE_BASE_URL` | `http://localhost:20128/v1` | 9router harus hidup |
 | `TOOLCALL_ENABLED` | `true` | edit-then-diff |
-| `TOTAL_TOOL_TURNS` | `40` | pool per strategi: direct 40; planning 20+20; review 13+13+14 |
+| `TOTAL_TOOL_TURNS` | `200` | pool per strategi: direct 200; planning 190+10; review 152+48 |
 | `MAX_TOOL_TURNS` | `20` | fallback per-act, hanya jika TOTAL=0 |
-| `BUDGET_MODE` | `per_act` | `per_task` = mode referensi; kurva memakai per_task |
-| `BUDGET_FLOOR_PER_ACT` | `0` | hanya berlaku di per_task; kurva memakai 10 |
+| `BUDGET_MODE` | `per_task` | **eksplisit** (dulu tidak diset → default `per_act`, beda dari sweep) |
+| `BUDGET_FLOOR_PER_ACT` | `10` | **eksplisit** (dulu tidak diset → default 0) |
+| `REVISION_TOOL_TURNS` | `48` | = 4 putaran × 2 act × 6 turn (kebutuhan terukur: 6) |
+| `MAX_REVISION_TURNS` | `4` | batas ronde revisi; **sweep mem-pass ini eksplisit** |
 | `COST_LIMIT_USD` | `3.0` | pengaman dolar per task (referensi SWE-agent $3) |
 | `PRICING_MODEL_OVERRIDE` | *(kosong)* | isi `deepseek-v4-flash` → token model gratis dihargai rate card berbayar (**estimasi**) |
 | `TOOL_OUTPUT_MAX_CHARS` | `2000` | cap per hasil tool, head+tail |
-| `MAX_REVISION_TURNS` | `1` | batas ronde revisi |
 | `API_TIMEOUT` | `600` | dinaikkan dari 180 |
 | `PROMPT_CACHE_LAYOUT` | `true` | prefix caching terbukti nyata (~90% hit) |
 | `SOURCE_CONTEXT_ENABLED` | `false` | agen eksplorasi pakai tool |
 
-> **Catatan:** `.env` saat ini `BUDGET_MODE=per_act`, `BUDGET_FLOOR_PER_ACT=0`,
-> `REVISION_TOOL_TURNS=8`. Driver kurva **menimpa** nilai-nilai ini per level lewat
-> `run_with_env.py --set`, jadi `.env` tidak berubah saat sweep.
+> **Catatan:** `tools/run_final_sweep.py` mem-pass **semua** nilai di atas lewat
+> `run_with_env.py --set`, jadi sweep tidak bergantung pada `.env`. Nilai di `.env`
+> disamakan agar `python src/main.py` langsung **tidak** mengukur jadwal budget yang
+> berbeda — dulu `BUDGET_MODE`/`BUDGET_FLOOR_PER_ACT` tidak diset dan itu terjadi.
 
 ---
 
@@ -985,6 +998,10 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 11. **Verifikasi atribusi act sebelum mengklaim penyebab.** Sempat kuklaim "act revisi mengedit 3×" padahal itu act base — karena `tool_calls.jsonl` tidak memisahkan act. Batas act harus direkonstruksi dari urutan role (reviewer pertama = akhir act executor base). Lihat `tools/analyze_run_anatomy.py`.
 12. **`json.loads()` pada seluruh respons model rapuh** — model membungkus JSON dengan prosa atau menghasilkan JSON sedikit rusak. Ekstraksi harus tahan terhadap keduanya, dan default-nya harus **menolak** (aman), bukan menyetujui.
 13. **Health check bisa membatalkan run berjam-jam dalam 2 menit** — dan tetap keluar `rc=0`, jadi sweep menganggapnya sukses. Selalu cek `predictions/*.jsonl` per level, jangan percaya exit code saja.
+14. **Checkout kotor membuat skor naik secara tak terlihat.** Strategi berbagi satu repo per issue, dan runner membersihkan **sebelum** tiap strategi tapi **tidak sesudah** — jadi run terakhir meninggalkan jejak. Kalau sweep di-`--resume` dengan tree kotor, `git diff` menangkap perubahan yang **bukan** buatan agen, dan itu terbaca sebagai "agen memecahkan issue". Ditemukan saat preflight: **5 dari 50 repo kotor** setelah pilot. Sweep sekarang **gate pada preflight** (bukan sekadar mengingatkan). Bersihkan: `tools/clean_repos.py`.
+15. **Konfigurasi bisa "benar" di total tapi tidak bisa dijalankan.** `REVISION_TOOL_TURNS=32` dengan `MAX_REVISION_TURNS=4` memberi review total yang sama, tapi split per putarannya **4+4** — di bawah 6 turn yang dibutuhkan act revisi untuk membaca **dan** mengedit. **Total sama itu perlu, tapi tidak cukup:** periksa juga apakah tiap act dapat jatah yang cukup. `tools/verify_revision_rounds.py` memeriksa ini; `check_budget_fairness.py` sekarang ikut gagal kalau tidak.
+16. **Aritmetika di komentar bisa salah dan bertahan lama.** `32 = 4 putaran × 8` tertulis di **tiga tempat** (`.env`, `.env.example`, `run_final_sweep.py`) — padahal 4 × 2 act × 8 = **64**. Komentar yang salah lebih berbahaya daripada tidak ada komentar, karena ia terdengar seperti sudah diperiksa.
+17. **Warning yang salah lebih buruk daripada tidak ada warning.** Dua warning menyala untuk kondisi yang tidak ada: `PROMPT VARIANT MISSING` untuk file yang **ada** (membaca hasil kosong dari loader yang di-stub sebagai "file hilang"), dan starvation `REVISION_TOOL_TURNS=0` untuk direct & planning yang memang tidak punya revisi. Yang pertama membuat aku sendiri hampir mengejar bug hantu; yang kedua menyala di **100 dari 150 run**. Kalau warning berbunyi, periksa apakah **pesannya** benar sebelum mempercayainya.
 
 ---
 
@@ -997,9 +1014,17 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 | `src/strategies/review_strategy.py` | Loop review + re-review revisi |
 | `src/agents/tools.py` | Definisi tool + guard (termasuk `[tests unavailable]`) |
 | `tools/run_with_env.py` | **Wrapper wajib** — membuat `.env` menang |
+| `tools/run_final_sweep.py` | **Entry point run 50 issue** — gate preflight, pass semua config eksplisit |
+| `tools/preflight_repos.py` | Cek 50 repo pristine; sweep **gagal** kalau tidak |
+| `tools/clean_repos.py` | Bersihkan checkout yang kotor |
+| `tools/verify_revision_rounds.py` | Apakah reserve membiayai **setiap** putaran revisi? |
+| `tools/audit_revision_rounds.py` | Berapa putaran revisi yang **benar-benar** jalan? |
+| `tools/audit_revision_edits.py` | Apakah act revisi **mengedit** apa pun? |
+| `tools/read_actual_bill.py` | Rekonsiliasi biaya vs tagihan 9router (`--compare`) |
 | `tools/preflight_modal.py` | Replikasi kontrak `git apply` Modal secara lokal |
-| `docs/HANDOFF_20260929.md` | **Detail sesi terakhir + plan berikutnya** |
-| `docs/HANDOFF_20260928.md` | Sesi sebelumnya (latar bug retry-reset-budget) |
+| `docs/HANDOFF_20261001.md` | **Detail sesi terakhir + plan berikutnya** |
+| `docs/AUDIT_OPS_PARTNER.md` | Audit operasional 14 jam (4 blocker) |
+| `docs/AUDIT_SCALE_PARTNER.md` | Audit integritas data skala 150 run |
 | `docs/RUNBOOK.md` | Prosedur menjalankan eksperimen |
 | `tools/analyze_run_anatomy.py` | Anatomi per-run: act, edit base vs revisi, verdict, retry |
 | `tools/check_sweep_state.py` | Status per level kurva; mendeteksi level yang abort |
@@ -1008,40 +1033,46 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 ## 💡 Tips untuk Sesi Berikutnya
 
-1. **Baca `docs/HANDOFF_20260928.md` dulu** — berisi plan lengkap dan bug yang harus diperbaiki.
-2. **Perbaiki bug retry sebelum run apa pun** — kalau tidak, budget tidak benar-benar ditegakkan.
-3. **Selalu** lewat `tools/run_with_env.py`.
-4. **Cek cap warning** di `results/EXP-*/logs/experiment.log` — kalau ada, ada yang terpotong.
-5. **Verifikasi dengan `--resume`** bila run terputus.
+1. **Baca `docs/HANDOFF_20261001.md` dulu** — berisi plan lengkap, status kesiapan run, dan blocker yang sudah diperbaiki.
+2. **Jangan jalankan run besar tanpa izin user** (gate di atas).
+3. **Sebelum run apa pun:** `python tools/run_final_sweep.py --dry-run` — cek 200/200/200 dan semua flag.
+4. **Selalu** lewat `tools/run_with_env.py` (sweep sudah melakukannya).
+5. **Kalau terputus:** `python tools/run_final_sweep.py --resume --exp-id <EXP-id>` — jangan jalankan ulang dari nol.
+6. **Setelah run:** `tools/check_sweep_state.py --exp <EXP-id>` + `tools/read_actual_bill.py --compare`.
+7. **Cek cap warning** di `results/EXP-*/logs/experiment.log` — kalau ada, ada yang terpotong.
 
 ---
 
 ## 📝 Catatan
 
-- **Commit sudah di-push:** `4d89434`, `8e6db35`, `97a71f7`, `dfc9fa8`, `973172a`, `3cbd9d1` (branch `19/toolcall-commandcode`).
+- **Commit sudah di-push:** `eae63b3` (fix sweep), `1597379` (memory), `d3d7ffe` (audit sendiri), `2349eb1`, `cfaf0ae`, `fb8f6ca` (branch `19/toolcall-commandcode`).
 - **Temuan untuk skripsi:** reviewer tanpa execution feedback tidak menambah kemampuan verifikasi; test tersembunyi adalah oracle yang tidak bisa digantikan penalaran.
 - **Temuan tambahan (2026-09-28):** retry yang membungkus loop — bukan request — membatalkan batas budget. Satu act bisa memakai 180 turn alih-alih 60. Ini kelas bug yang mudah terlewat karena tidak muncul sampai timeout benar-benar terjadi.
 - **Temuan tambahan (2026-09-29):** bug di jalur patch dapat **memanipulasi hasil penelitian secara diam-diam**. `_normalize_newlines` merusak 4 patch di EXP-003, dan pelabelannya salah **dua kali** — patch rusak disebut "VALID" *dan* "NOT_APPLYABLE", sehingga angkanya tampak masuk akal (patch tidak apply = model salah), padahal pipeline-nya yang merusak. **Pelajaran metodologis:** verdict yang dihasilkan pipeline yang sama yang memproduksi artefak tidak boleh dipercaya begitu saja; verifikasi silang dengan `git apply` pada checkout bersih.
 - **Sudah dievaluasi (2026-09-29):** `EXP-20260928-003` dijalankan di Modal SWE-bench harness. Hasil: direct 8/10, planning 8/10, review 6/10.
-- **Temuan tambahan (2026-09-29, evaluasi):** kegagalan `review` di 10924 & 11001 **bukan** kegagalan penalaran — keduanya artefak pembagian budget. Di 11001 reviewer mendiagnosis dengan benar tapi act revisi hanya dapat 1 turn (cukup untuk *membaca*, tidak untuk *mengedit*). Di 10924 executor dipotong di cap 15 turn lalu patch setengah jadi disetujui reviewer (false approval). **Implikasi untuk skripsi:** dengan budget 40, strategi 3-act (`review`) berada di bawah strategi 2-act (`planning`) bukan karena review tidak berguna, tapi karena split `total//n` menghukum strategi dengan lebih banyak act. Kalau `review` ingin diuji secara adil, act revisi butuh jatah minimum yang terjamin (mis. reservasi eksplisit), atau total budget per strategi dinaikkan proporsional terhadap jumlah act.
+- **Temuan tambahan (2026-09-29, evaluasi):** kegagalan `review` di 10924 & 11001 **bukan** kegagalan penalaran — keduanya artefak pembagian budget. Di 11001 reviewer mendiagnosis dengan benar tapi act revisi hanya dapat 1 turn (cukup untuk *membaca*, tidak untuk *mengedit*). Di 10924 executor dipotong di cap 15 turn lalu patch setengah jadi disetujui reviewer (false approval). **Implikasi untuk skripsi:** dengan budget 40, strategi 3-act (`review`) berada di bawah strategi 2-act (`planning`) bukan karena review tidak berguna, tapi karena split `total//n` menghukum strategi dengan lebih banyak act.
 - **Implikasi metodologis:** `APPROVED` tidak berkorelasi dengan `resolved` (9 approved → 6 resolved). Reviewer tanpa oracle tidak bisa memverifikasi; verdict-nya tidak boleh dipakai sebagai sinyal kualitas patch di analisis.
+- **Temuan metodologis (2026-10-01, audit 2 partner):** **lima blocker** di pipeline 150-run, semuanya **tak terlihat dari angka hasil**. Yang paling berbahaya bukan bug yang membuat run gagal, tapi yang membuat run **sukses dengan pengukuran yang salah**: (1) `--resume` tidak diteruskan → restart mengulang 150 run; (2) review mengukur **1 putaran** padahal reserve untuk **4**; (3) `--compare` biaya **mati total** sehingga RQ3 tak tervalidasi; (4) checkout kotor → skor naik tanpa jejak; (5) warning yang salah membuat pembaca mengejar bug hantu. **Pola:** semua lolos dari 408 test karena test-nya memeriksa **total**, bukan **apakah konfigurasi itu bisa dijalankan**. Pelajaran: audit pipeline yang akan memakan 14 jam harus menanyakan "apa yang **tidak** diuji", bukan "apakah test lulus".
 
 ---
 
-**Last working state:** commit `c2e71d7` — **299 test lulus**. Kurva budget **datar** (40 = 100 = 2/3 ketiga strategi). Audit pipeline: 3 bug diperbaiki, 1 masalah validitas belum.
+**Last working state:** commit `1597379` — **421 test lulus**. Pipeline **SIAP run 50 issue** setelah 2 audit partner (5 blocker diperbaiki). Budget **200/200/200**, revisi **48 (4 putaran × 6+6)**. Preflight **50/50 pristine**.
 
 **Langkah berikutnya (prioritas):**
 
-1. **KEPUTUSAN USER — masalah validitas review.** 78% penolakan reviewer bersandar pada file test yang tidak pernah dinilai harness. Ini menjelaskan kenapa act revisi 0 edit (sering memang tak ada yang perlu diperbaiki). Pilihannya:
-   - **(a) Larang reviewer menolak atas dasar file test** — perubahan perilaku eksperimen, perlu run ulang untuk mengukur efeknya.
-   - **(b) Biarkan, tapi laporkan sebagai temuan** — `review` diakui sebagai "executor + ronde review yang sebagian sia-sia", bukan "review + revisi".
-   - **(c) Ukur dulu**: jalankan 3 issue review dengan reviewer diberi tahu file test di-strip harness, lihat apakah verdict berubah.
-   Rekomendasi: **(c)** — murah, dan memberi data sebelum mengubah desain.
+1. **KEPUTUSAN USER — jalankan sweep 50 issue?** ~$7–11, ~14–17 jam. Semua verifikasi sudah lulus (lihat tabel "KESIAPAN RUN 50" di atas). **Gate: butuh izin eksplisit user.**
+   ```
+   python tools/run_final_sweep.py
+   ```
+   Kalau terputus: `python tools/run_final_sweep.py --resume --exp-id <EXP-id>`.
 
-2. **Perbaiki `budget.py`** agar act revisi direservasi di mode `per_task`. Tapi lihat temuan kritis dulu: kalau penolakan sering salah, reservasi saja tidak akan menolong — revisi perlu **alasan yang sah** untuk mengedit.
+2. **Setelah sweep selesai:**
+   - `python tools/check_sweep_state.py --exp <EXP-id>` — setiap run hadir?
+   - Evaluasi Modal → `python tools/eval_modal.py ...`
+   - `python tools/read_actual_bill.py --since ... --until ... --model cbai/deepseek-v4.1-flash --compare results/<EXP-id>` — RQ3, cross-check biaya.
 
-3. **Level 200** hanya kalau keputusan user ingin memisahkan "`11019` butuh >100 turn" dari "kegagalan kapabilitas". ~4 jam.
+3. **Masalah validitas review (78% → 12,5%)** — **sudah dikoreksi**, tidak perlu keputusan lagi. Angka sebenarnya: **1 dari 8 (12,5%)** penolakan yang bergantung pada file test. Lihat §"Koreksi" baris 276-304.
 
-4. **Model berbayar untuk run final** (RQ3). Sebelum itu, selesaikan dua bug laten yang relevan hanya saat berbayar: `COST_LIMIT_USD` bisa dilewati pada model ber-rate nol / jalur non-tool, dan kegagalan mid-act membuang biaya yang sudah terpakai (keduanya di `docs/AUDIT_PIPELINE_20260930.md`).
+4. **Ablation reviewer (opsional, untuk tesis):** `review` tanpa ronde review = `planning`. Kalau ketiga strategi seri di 50 issue, ablation ini memisahkan "review berguna" dari "review tidak berpengaruh".
 
-5. **Sebelum run besar apa pun:** `verify_eval_consistency.py` + `check_sweep_state.py`.
+5. **`11019`** sudah dijawab: **batas kapabilitas**, bukan budget (0 truncation, act berhenti di ~20% anggaran, patch VALID tapi salah semantik). Tidak perlu run tambahan.
