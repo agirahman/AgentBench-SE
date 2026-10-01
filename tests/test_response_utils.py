@@ -87,17 +87,82 @@ def test_config_defaults():
     assert Config.MAX_REVISION_TURNS >= 1
 
 
-def test_config_from_env(monkeypatch):
-    monkeypatch.setenv("MAX_TOKENS", "8192")
-    monkeypatch.setenv("API_TIMEOUT", "120")
-    monkeypatch.setenv("DEEPSEEK_THINKING", "true")
-    monkeypatch.setenv("DEEPSEEK_REASONING_EFFORT", "medium")
-    monkeypatch.setenv("MAX_REVISION_TURNS", "2")
+def test_config_from_env():
+    """Env vars must reach Config at import time, and be undone afterwards.
+
+    NO monkeypatch, and no fixture ordering. `importlib.reload(config)` installs a
+    NEW Config class, so the env must be restored BEFORE the restoring reload -- and
+    relying on fixture teardown order to arrange that is exactly what went wrong
+    here: a fixture declared to the right of `monkeypatch` is torn down FIRST
+    (pytest finalises in reverse), so it reloaded while the test's env values were
+    still installed and the leak survived.
+
+    Doing both steps in one `finally`, in the right order, removes the ordering
+    question entirely. Verified load-bearing by tools/_prove_containment.py: with
+    the restoring reload removed, test_config_values_are_restored_after_the_reload
+    FAILS with `assert 8192 != 8192`.
+    """
     import importlib
+    import os
+
     import config as config_module
-    reloaded = importlib.reload(config_module)
-    assert reloaded.Config.MAX_TOKENS == 8192
-    assert reloaded.Config.API_TIMEOUT == 120
-    assert reloaded.Config.DEEPSEEK_THINKING is True
-    assert reloaded.Config.DEEPSEEK_REASONING_EFFORT == "medium"
-    assert reloaded.Config.MAX_REVISION_TURNS == 2
+
+    overrides = {
+        "MAX_TOKENS": "8192",
+        "API_TIMEOUT": "120",
+        "DEEPSEEK_THINKING": "true",
+        "DEEPSEEK_REASONING_EFFORT": "medium",
+        "MAX_REVISION_TURNS": "2",
+    }
+    before = {k: os.environ.get(k) for k in overrides}
+
+    try:
+        os.environ.update(overrides)
+        reloaded = importlib.reload(config_module)
+        assert reloaded.Config.MAX_TOKENS == 8192
+        assert reloaded.Config.API_TIMEOUT == 120
+        assert reloaded.Config.DEEPSEEK_THINKING is True
+        assert reloaded.Config.DEEPSEEK_REASONING_EFFORT == "medium"
+        assert reloaded.Config.MAX_REVISION_TURNS == 2
+    finally:
+        # Restore the environment FIRST, then reload, so the class the rest of the
+        # session sees is built from the real .env rather than from this test.
+        for key, value in before.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        importlib.reload(config_module)
+
+
+def test_config_values_are_restored_after_the_reload():
+    """The reload must not leave the test's env values installed for the session.
+
+    `test_config_from_env` sets MAX_TOKENS=8192, API_TIMEOUT=120 and
+    MAX_REVISION_TURNS=2, then reloads config. Without the restore fixture,
+    config.Config keeps THOSE values for every later test in the session -- a real
+    leak, and a deterministic one.
+
+    This checks that leak directly. A FIRST version of this test asserted instead
+    that all modules share one Config class after the reload, and it was WRONG: it
+    passed even with the fixture disabled, because whether the modules agree depends
+    on import ORDER (a module imported after the reload picks up the new class). A
+    check whose outcome depends on import order is not a check. Verified with
+    tools/_prove_containment.py, which disables the fixture and confirms the failure.
+
+    The class split is real and is proven in a fresh process by
+    tools/check_config_reload_poison.py. It is worked around where it matters:
+    tests/test_tool_loop_retry.py patches both module references on purpose.
+    """
+    from config import Config
+
+    assert Config.MAX_TOKENS != 8192, (
+        "config.Config still holds MAX_TOKENS=8192 from test_config_from_env; the "
+        "reload was not undone and every later test reads a poisoned value"
+    )
+    assert Config.API_TIMEOUT != 120, (
+        "config.Config still holds API_TIMEOUT=120 from test_config_from_env"
+    )
+    assert Config.MAX_REVISION_TURNS != 2, (
+        "config.Config still holds MAX_REVISION_TURNS=2 from test_config_from_env"
+    )

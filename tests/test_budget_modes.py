@@ -226,17 +226,25 @@ def test_a_reserve_larger_than_the_pool_is_clamped():
     assert b.task_total == 40, "the clamp must not inflate the task budget"
 
 
-def test_from_config_only_carves_the_reserve_for_a_strategy_that_revises():
+def test_from_config_only_carves_the_reserve_for_a_strategy_that_revises(monkeypatch):
     """direct and planning must NOT lose 8 turns for an act they never run.
 
     ``from_config()`` is called by all three strategies. Carving the reserve out
     unconditionally would give direct and planning 32 turns while review got 40 --
     the same unfairness as the bug this replaced, pointing the other way.
+
+    PATCHED, NOT ASSIGNED. This used to write straight to the Config class and never
+    restore it, so every test AFTER this file ran with TOTAL_TOOL_TURNS=40 and
+    REVISION_TOOL_TURNS=8 -- values no configuration chose. Measured with
+    tools/_find_config_leak.py: after the suite, Config.REVISION_TOOL_TURNS was 8
+    while .env said 48, and this file was the source.
     """
-    Config.TOTAL_TOOL_TURNS = 40
-    Config.REVISION_TOOL_TURNS = 8
-    Config.BUDGET_MODE = "per_task"
-    Config.BUDGET_FLOOR_PER_ACT = 10
+    from agents import budget as budget_mod
+
+    monkeypatch.setattr(budget_mod.Config, "TOTAL_TOOL_TURNS", 40)
+    monkeypatch.setattr(budget_mod.Config, "REVISION_TOOL_TURNS", 8)
+    monkeypatch.setattr(budget_mod.Config, "BUDGET_MODE", "per_task")
+    monkeypatch.setattr(budget_mod.Config, "BUDGET_FLOOR_PER_ACT", 10)
 
     without = ToolTurnBudget.from_config()
     with_rev = ToolTurnBudget.from_config(with_revisions=True)
@@ -300,45 +308,59 @@ def test_per_act_revision_still_uses_the_reserve():
 
 
 # ------------------------------------------------------------------- cost guard
-def test_cost_share_splits_the_task_cap_across_acts():
-    Config.COST_LIMIT_USD = 3.0
+# These all set Config.COST_LIMIT_USD. They used to ASSIGN it and leave it set, so
+# every later test ran with whatever value the last one wrote. monkeypatch restores
+# it. Found with tools/_find_config_leak.py, which reported Config.REVISION_TOOL_TURNS
+# stuck at 8 (the .env value is 48) after a full suite run.
+def test_cost_share_splits_the_task_cap_across_acts(monkeypatch):
+    from agents import budget as budget_mod
+
+    monkeypatch.setattr(budget_mod.Config, "COST_LIMIT_USD", 3.0)
     b = ToolTurnBudget(total=100)
     assert b.cost_share(3) == pytest.approx(1.0)
     assert b.cost_share(1) == pytest.approx(3.0)
 
 
-def test_cost_share_returns_zero_when_disabled():
+def test_cost_share_returns_zero_when_disabled(monkeypatch):
     """None means 'no cap' and must be distinguishable from an exhausted 0.0.
 
     Callers test `is not None` to arm the guard. Returning 0.0 for the disabled
     case would be a silent hole the other way round: an exhausted budget would
     read as 'unlimited'.
     """
-    Config.COST_LIMIT_USD = 0.0
+    from agents import budget as budget_mod
+
+    monkeypatch.setattr(budget_mod.Config, "COST_LIMIT_USD", 0.0)
     b = ToolTurnBudget(total=100)
     assert b.cost_share(3) is None
 
 
-def test_cost_share_returns_zero_not_none_when_exhausted():
+def test_cost_share_returns_zero_not_none_when_exhausted(monkeypatch):
     """The cap being spent must ARM the guard, not disable it."""
-    Config.COST_LIMIT_USD = 3.0
+    from agents import budget as budget_mod
+
+    monkeypatch.setattr(budget_mod.Config, "COST_LIMIT_USD", 3.0)
     b = ToolTurnBudget(total=100)
     b.spend_cost(3.0)
     assert b.cost_share(3) == 0.0
     assert b.cost_share(3) is not None
 
 
-def test_spend_cost_frees_the_unused_allowance():
-    Config.COST_LIMIT_USD = 3.0
+def test_spend_cost_frees_the_unused_allowance(monkeypatch):
+    from agents import budget as budget_mod
+
+    monkeypatch.setattr(budget_mod.Config, "COST_LIMIT_USD", 3.0)
     b = ToolTurnBudget(total=100)
     b.spend_cost(0.5)               # used half of its 1.0 share
     assert b.cost_remaining == pytest.approx(2.5)
     assert b.cost_share(2) == pytest.approx(1.25)  # the remainder is redistributed
 
 
-def test_cost_share_never_goes_negative():
+def test_cost_share_never_goes_negative(monkeypatch):
     """A run that overshoots must not produce a negative allowance."""
-    Config.COST_LIMIT_USD = 3.0
+    from agents import budget as budget_mod
+
+    monkeypatch.setattr(budget_mod.Config, "COST_LIMIT_USD", 3.0)
     b = ToolTurnBudget(total=100)
     b.spend_cost(99.0)
     assert b.cost_share(1) == 0.0

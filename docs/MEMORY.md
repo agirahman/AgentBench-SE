@@ -963,7 +963,7 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 | Key | Nilai | Catatan |
 |---|---|---|
-| `OPENCODE_MODEL` | `cbai/deepseek-v4.1-flash` | via 9router (**berbayar** — RQ3 butuh ini) |
+| `OPENCODE_MODEL` | `oc/space-bunny-free` | **model gratis** — untuk smoke test. **Sweep meng-override ke `cbai/deepseek-v4.1-flash` (berbayar) lewat `--set`**; RQ3 butuh yang berbayar |
 | `OPENCODE_BASE_URL` | `http://localhost:20128/v1` | 9router harus hidup |
 | `TOOLCALL_ENABLED` | `true` | edit-then-diff |
 | `TOTAL_TOOL_TURNS` | `200` | pool per strategi: direct 200; planning 190+10; review 152+48 |

@@ -186,7 +186,7 @@ def test_no_bound_keeps_the_previous_unbounded_behaviour():
     assert result.response == "done"
 
 
-def test_config_supplies_the_default_bound():
+def test_config_supplies_the_default_bound(monkeypatch):
     """All three providers inherit the bound from Config, not from each call site.
 
     Threading a new parameter through three providers invites one of them being
@@ -195,26 +195,18 @@ def test_config_supplies_the_default_bound():
     completions = _SlowCompletions(per_call_seconds=0.05)
     client = _FakeClient(completions)
 
-    original = tool_loop.Config.ACT_TIMEOUT_SECONDS
-    try:
-        tool_loop.Config.ACT_TIMEOUT_SECONDS = 1  # 1 s: 0.05 s per call -> ~20 calls
-        result = _run(client, max_tool_turns=40)  # no explicit bound
-        assert completions.calls < 40, "Config.ACT_TIMEOUT_SECONDS was ignored"
-        assert result.truncated is True
-    finally:
-        tool_loop.Config.ACT_TIMEOUT_SECONDS = original
+    monkeypatch.setattr(tool_loop.Config, "ACT_TIMEOUT_SECONDS", 1)  # 0.05 s per call
+    result = _run(client, max_tool_turns=40)  # no explicit bound
+    assert completions.calls < 40, "Config.ACT_TIMEOUT_SECONDS was ignored"
+    assert result.truncated is True
 
 
-def test_zero_in_config_means_unbounded():
+def test_zero_in_config_means_unbounded(monkeypatch):
     """0 must disable the guard so a historical configuration stays reproducible."""
     completions = _SlowCompletions(per_call_seconds=0.0, calls_before_final=3)
     client = _FakeClient(completions)
 
-    original = tool_loop.Config.ACT_TIMEOUT_SECONDS
-    try:
-        tool_loop.Config.ACT_TIMEOUT_SECONDS = 0
-        result = _run(client, max_tool_turns=10)
-        assert result.response == "done"
-        assert result.truncated is False
-    finally:
-        tool_loop.Config.ACT_TIMEOUT_SECONDS = original
+    monkeypatch.setattr(tool_loop.Config, "ACT_TIMEOUT_SECONDS", 0)
+    result = _run(client, max_tool_turns=10)
+    assert result.response == "done"
+    assert result.truncated is False
