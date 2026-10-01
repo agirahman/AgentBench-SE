@@ -28,6 +28,13 @@ STRIP = ("TOTAL_TOOL_TURNS", "REVISION_TOOL_TURNS", "MAX_REVISION_TURNS",
          "BUDGET_MODE", "BUDGET_FLOOR_PER_ACT", "COST_LIMIT_USD")
 
 CHECKS: list[tuple[str, list[str], str]] = [
+    # FIRST, because it is the only check that covers the code the others merely
+    # configure. A partner audit found this gate reporting "READY, all 7 checks pass"
+    # while the unit suite was RED -- the 7 checks all passed because none of them
+    # runs the tests. A gate that can be green with a broken suite is worse than no
+    # gate: it converts "I did not check" into "I checked and it is fine".
+    ("unit tests", ["-m", "pytest", "tests/", "-q"],
+     "the suite passes (the other checks only verify configuration)"),
     ("preflight repos", ["tools/preflight_repos.py", "--quiet"],
      "every checkout pristine at its base_commit"),
     ("budget fairness", ["tools/check_budget_fairness.py"],
@@ -39,9 +46,11 @@ CHECKS: list[tuple[str, list[str], str]] = [
     ("disk budget", ["tools/check_disk_budget.py"],
      "artifacts fit on disk for the whole sweep"),
     ("resume logic", ["tools/verify_resume_logic.py"],
-    "completed runs are skipped, failures retried"),
+     "completed runs are skipped, failures retried"),
     ("resume keys", ["tools/verify_resume_keys_match.py"],
      "real jsonl rows carry the fields the loader keys on"),
+    ("sweep command", ["tools/run_final_sweep.py", "--dry-run"],
+     "the sweep builds a command with every flag set explicitly"),
 ]
 
 

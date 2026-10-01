@@ -1,7 +1,7 @@
-# 🧠 AI Agent Memory — AgentBench-SE
+﻿# 🧠 AI Agent Memory — AgentBench-SE
 
 **Last Updated:** 2026-10-01 03:40 WIB
-**Status:** **SIAP run 50 issue** (setelah 2 audit partner, **5 blocker diperbaiki**). Budget 200 turn, total sama 200/200/200, **revisi 48 turn (4 putaran × 2 act × 6)**. Trajectory penuh + guard context window. **421 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
+**Status:** **SIAP run 50 issue** (setelah 2 audit partner, **5 blocker diperbaiki**). Budget 200 turn, total sama 200/200/200, **revisi 48 turn (4 putaran × 2 act × 6)**. Trajectory penuh + guard context window. **426 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
 **Active Branch:** `19/toolcall-commandcode`
 **Handoff sesi terakhir:** [`HANDOFF_20261001.md`](HANDOFF_20261001.md)
 **Detail audit sesi terakhir:** [`AUDIT_OPS_PARTNER.md`](AUDIT_OPS_PARTNER.md) · [`AUDIT_SCALE_PARTNER.md`](AUDIT_SCALE_PARTNER.md) · [`AUDIT_PROMPTS_PARTNER.md`](AUDIT_PROMPTS_PARTNER.md) · [`AUDIT_RUN_TESTS_PARTNER.md`](AUDIT_RUN_TESTS_PARTNER.md) · [`RESEARCH_BUDGET_20260929.md`](RESEARCH_BUDGET_20260929.md)
@@ -17,18 +17,24 @@
 
 ---
 
-## ✅ KESIAPAN RUN 50 (verifikasi terakhir 2026-10-01 03:20)
+## ✅ KESIAPAN RUN 50 (verifikasi terakhir 2026-10-01 05:00)
 
-| Verifikasi | Perintah | Hasil |
-|---|---|---|
-| Unit test | `pytest tests/ -q` | **421 lulus** |
-| Preflight repo | `tools/preflight_repos.py` | **50/50 pristine**, 0 masalah |
-| Fairness budget | `tools/check_budget_fairness.py` | **FAIR** — 200/200/200 |
-| Putaran revisi | `tools/verify_revision_rounds.py` | Setiap act revisi **6+6** (kebutuhan terukur: 6) |
-| Dry run sweep | `tools/run_final_sweep.py --dry-run` | 150 run, semua flag eksplisit |
-| Resume gate | `--resume` tanpa `--exp-id` | **exit 2** (tidak diam-diam mulai baru) |
-| Resume jalan | `--resume --exp-id X` | flag diteruskan ke runner |
-| Cross-check biaya | `tools/read_actual_bill.py --compare` | $0,551 vs $0,582 = **-5,28%** |
+**Satu perintah memverifikasi semuanya:** `python tools/readiness_report.py` → **READY, 9/9**.
+Ia **menjalankan unit test suite juga** (versi pertamanya tidak, dan itu blocker: gate bisa
+hijau sementara suite merah). Terbukti **bisa gagal**: `tools/_prove_gate_fails.py`
+menyuntikkan test rusak → gate melaporkan **NOT READY**, exit 1.
+
+| Verifikasi | Hasil |
+|---|---|
+| Unit test | **426 lulus** |
+| Preflight repo | **50/50 pristine** |
+| Fairness budget | **FAIR** — 200/200/200 |
+| Putaran revisi | Setiap act revisi **6+6** (kebutuhan terukur: 6) |
+| Model efektif | Sweep memanggil **`cbai/deepseek-v4.1-flash`** (berbayar) |
+| Disk | 211 MB worst-case vs **98 GB free** |
+| Resume | `--resume` tanpa `--exp-id` → **exit 2**; dengan `--exp-id` diteruskan |
+| Sweep command | 150 run, semua flag eksplisit |
+| Cross-check biaya | $0,551 vs $0,582 = **-5,28%** |
 
 **Perintah run:**
 ```
@@ -58,7 +64,7 @@ Sweep **tidak** mengulang dari nol; savepoint per run dibaca dan yang sudah sele
 | **Budget tool-turn** | ✅ Done | `agents/budget.py` — total sama per strategi, sekarang **200** (skala referensi) |
 | **Pre-flight validator** | ✅ Done | `tools/preflight_modal.py` — replikasi kontrak Modal secara lokal |
 | **Rate-limit handling** | ✅ Done | Backoff 429 + circuit breaker |
-| **Test suite** | ✅ Done | **421 lulus** (dari 408) |
+| **Test suite** | ✅ Done | **426 lulus** (dari 408). **Lulus di env bersih MAUPUN env kotor** — dulu tidak, dan itu bug |
 | **Retry vs budget** | ✅ **FIXED** | Retry per-request di dalam tool loop (commit `dfc9fa8`) |
 | **Konteks per turn** | ✅ Done | `TOOL_OUTPUT_MAX_CHARS=2000`, head+tail (dari 8000 head-only) |
 | **Korupsi patch** | ✅ **FIXED** | `_normalize_newlines` merusak diff yang mengandung literal `\n` (commit `3cbd9d1`) |
@@ -525,7 +531,7 @@ dijawab eksperimen: *"dengan 200 turn yang sama, strategi mana yang terbaik?"*
 
 **Verifikasi:** `tools/check_budget_fairness.py` → **FAIR** di kedua mode, dan
 `tools/verify_revision_rounds.py` → setiap act revisi dapat **6+6** (di atas kebutuhan
-terukur 6). **421 test lulus.**
+terukur 6). **426 test lulus.**
 
 **Detail implementasi yang penting:**
 
@@ -630,7 +636,7 @@ oleh sweep supaya `.env` tidak bisa drift lagi.
 
 **Tool baru:** `verify_revision_rounds.py`, `audit_revision_rounds.py`, `audit_revision_edits.py`.
 
-**421 test lulus** (dari 408).
+**426 test lulus** (dari 408).
 
 ---
 
@@ -973,16 +979,26 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 | `REVISION_TOOL_TURNS` | `48` | = 4 putaran × 2 act × 6 turn (kebutuhan terukur: 6) |
 | `MAX_REVISION_TURNS` | `4` | batas ronde revisi; **sweep mem-pass ini eksplisit** |
 | `COST_LIMIT_USD` | `3.0` | pengaman dolar per task (referensi SWE-agent $3) |
-| `PRICING_MODEL_OVERRIDE` | *(kosong)* | isi `deepseek-v4-flash` → token model gratis dihargai rate card berbayar (**estimasi**) |
+| `ACT_TIMEOUT_SECONDS` | `3600` | **per act**. Dulu tidak ada di `.env` → default 1800, padahal sweep pass 3600 |
 | `TOOL_OUTPUT_MAX_CHARS` | `2000` | cap per hasil tool, head+tail |
 | `API_TIMEOUT` | `600` | dinaikkan dari 180 |
 | `PROMPT_CACHE_LAYOUT` | `true` | prefix caching terbukti nyata (~90% hit) |
 | `SOURCE_CONTEXT_ENABLED` | `false` | agen eksplorasi pakai tool |
 
+**Tidak ada di `.env`** (ada di `src/config.py`, ambil default):
+
+| Key | Default | Kenapa tidak diset |
+|---|---|---|
+| `PRICING_MODEL_OVERRIDE` | `""` | diisi hanya saat mau menghargai token model gratis dengan rate card berbayar (**estimasi**) |
+
 > **Catatan:** `tools/run_final_sweep.py` mem-pass **semua** nilai di atas lewat
 > `run_with_env.py --set`, jadi sweep tidak bergantung pada `.env`. Nilai di `.env`
 > disamakan agar `python src/main.py` langsung **tidak** mengukur jadwal budget yang
-> berbeda — dulu `BUDGET_MODE`/`BUDGET_FLOOR_PER_ACT` tidak diset dan itu terjadi.
+> berbeda — dulu `BUDGET_MODE`/`BUDGET_FLOOR_PER_ACT`/`ACT_TIMEOUT_SECONDS` tidak diset
+> dan itu terjadi (audit partner: `docs/AUDIT_FINAL_VERIFY.md` B5).
+>
+> **Verifikasi:** `tools/readiness_report.py` membandingkan config efektif dan
+> **mengabaikan** env shell yang menimpa `.env` (itu pernah menipu dua kali).
 
 ---
 
@@ -1008,6 +1024,11 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 15. **Konfigurasi bisa "benar" di total tapi tidak bisa dijalankan.** `REVISION_TOOL_TURNS=32` dengan `MAX_REVISION_TURNS=4` memberi review total yang sama, tapi split per putarannya **4+4** — di bawah 6 turn yang dibutuhkan act revisi untuk membaca **dan** mengedit. **Total sama itu perlu, tapi tidak cukup:** periksa juga apakah tiap act dapat jatah yang cukup. `tools/verify_revision_rounds.py` memeriksa ini; `check_budget_fairness.py` sekarang ikut gagal kalau tidak.
 16. **Aritmetika di komentar bisa salah dan bertahan lama.** `32 = 4 putaran × 8` tertulis di **tiga tempat** (`.env`, `.env.example`, `run_final_sweep.py`) — padahal 4 × 2 act × 8 = **64**. Komentar yang salah lebih berbahaya daripada tidak ada komentar, karena ia terdengar seperti sudah diperiksa.
 17. **Warning yang salah lebih buruk daripada tidak ada warning.** Dua warning menyala untuk kondisi yang tidak ada: `PROMPT VARIANT MISSING` untuk file yang **ada** (membaca hasil kosong dari loader yang di-stub sebagai "file hilang"), dan starvation `REVISION_TOOL_TURNS=0` untuk direct & planning yang memang tidak punya revisi. Yang pertama membuat aku sendiri hampir mengejar bug hantu; yang kedua menyala di **100 dari 150 run**. Kalau warning berbunyi, periksa apakah **pesannya** benar sebelum mempercayainya.
+18. **Test bisa bocor ke test lain lewat `Config`.** `test_budget_modes.py` menugaskan langsung (`Config.REVISION_TOOL_TURNS = 8`) tanpa monkeypatch dan tanpa memulihkan → setiap test **setelahnya** membaca `8` padahal `.env` bilang `48`. `monkeypatch.setattr` memulihkan sendiri; **penugasan langsung tidak**. Ditemukan canary partner (`tests/test_zz_probe_config_leak.py`) + `tools/_find_config_leak.py`. **Pelajaran:** test yang lulus bisa lulus karena nilai yang bocor dari test lain, bukan karena kode benar.
+19. **`importlib.reload(config)` memecah identitas `Config`.** Reload memasang class **baru**, sementara modul yang sudah `from config import Config` memegang class **lama** — jadi `monkeypatch.setattr(mod.Config, ...)` bisa **meleset** dan test tetap lulus dengan nilai basi. Dibuktikan `tools/check_config_reload_poison.py`. Workaround yang benar: patch **setiap** modul yang memegang binding sendiri (lihat `tests/test_tool_loop_retry.py`).
+20. **Gate yang bisa hijau sementara suite merah lebih buruk daripada tidak ada gate.** `tools/readiness_report.py` versi pertama menjalankan 7 check konfigurasi dan **tidak menjalankan test suite**, lalu mencetak "READY". Ia mengubah "aku belum memeriksa" menjadi "aku sudah periksa dan aman". Sekarang ia menjalankan suite **pertama**, dan `tools/_prove_gate_fails.py` membuktikan gate itu **bisa gagal** (menyuntikkan test rusak → NOT READY).
+21. **Test yang tidak bisa gagal adalah dekorasi.** Aku menulis dua versi test penjaga yang **lulus meski perbaikannya dimatikan**: yang pertama mem-assert identitas class modul (ternyata bergantung **urutan import**), yang kedua dijalankan **sendirian** sehingga tidak ada yang bisa dideteksi. Selalu buktikan test baru **bisa gagal** sebelum mempercayainya — `tools/_prove_containment.py` dan `tools/_prove_gate_fails.py` melakukannya secara otomatis.
+22. **Fixture teardown pytest berjalan TERBALIK.** Fixture yang dideklarasikan **setelah** `monkeypatch` di signature dibongkar **lebih dulu**, jadi fixture yang me-reload config akan me-reload **sebelum** env dipulihkan → kebocoran tetap ada. Jangan bergantung pada urutan fixture untuk hal yang urutannya penting; lakukan pemulihan di dalam `finally` test itu sendiri.
 
 ---
 
@@ -1062,7 +1083,7 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 ---
 
-**Last working state:** commit `1597379` — **421 test lulus**. Pipeline **SIAP run 50 issue** setelah 2 audit partner (5 blocker diperbaiki). Budget **200/200/200**, revisi **48 (4 putaran × 6+6)**. Preflight **50/50 pristine**.
+**Last working state:** commit `1597379` — **426 test lulus**. Pipeline **SIAP run 50 issue** setelah 2 audit partner (5 blocker diperbaiki). Budget **200/200/200**, revisi **48 (4 putaran × 6+6)**. Preflight **50/50 pristine**.
 
 **Langkah berikutnya (prioritas):**
 
