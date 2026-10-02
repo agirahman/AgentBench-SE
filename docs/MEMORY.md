@@ -1,7 +1,7 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
 **Last Updated:** 2026-10-03 (sesi uji `--resume` + audit biaya token)
-**Status:** **SIAP run 50 issue**, **THINKING ON (medium)**. Budget 200/200/200, revisi **48 (4 putaran × 2 act × 6)**. `--resume` **terbukti bekerja di run berbayar nyata** (interrupt → resume). Gate **READY 9/9**, preflight **50/50 pristine**. **498 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
+**Status:** **SIAP run 50 issue** — bisa **bertahap** dengan `--only N`. **THINKING ON (medium)**. Budget 200/200/200, revisi **48 (4 putaran × 2 act × 6)**. `--resume` **terbukti bekerja di run berbayar nyata**. Gate **READY 9/9**, preflight **50/50 pristine**. **508 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
 **Active Branch:** `19/toolcall-commandcode`
 **Commit terakhir:** `e618b8d` (completeness-on-interrupt + attempts window), `38a1c57` (interrupt exports + preflight scope), `cf19d98` (resume opsi D)
 **Handoff sesi terakhir:** [`HANDOFF_20261002.md`](HANDOFF_20261002.md) · sebelumnya [`HANDOFF_20261001.md`](HANDOFF_20261001.md)
@@ -71,7 +71,19 @@ sesi agent, rasionya akan mengikuti rasio **request** (1,53×), bukan 5,25×.
 | Anti-duplikat | 3 baris, 3 unik |
 | Akuntansi utuh | `direct` 417.772 & `planning` 134.729 token **tidak hilang** |
 | Kelengkapan | `Completeness: 3/3 runs completed` |
-| Biaya | **$0,090187** (akuntansi pipeline) |
+| Biaya | **$0,090187** (saat diukur, sebelum insiden di bawah) |
+
+> ⚠️ **KOREKSI (2026-10-03): biaya pilot itu kini `$0,109296`, bukan `$0,090187`.**
+> Saat menguji `--only` secara nyata, saya menjalankannya pada `EXP-20261002-279`
+> **tanpa `--dry-run`**, sehingga 2 run berbayar tak sengaja terjadi
+> (`django__django-10924/direct`, `django__django-11001/direct`, ≈$0,019). Ini
+> **kesalahan saya**: menguji flag baru pada direktori eksperimen nyata, bukan
+> salinan. Angka `$0,090187` tetap sah sebagai **hasil validasi resume** (diukur
+> sebelum insiden), tapi **bukan** lagi isi CSV-nya. Pelajaran: uji flag destruktif
+> dengan `--dry-run` dulu, atau pada salinan `EXP-...` sekali pakai.
+>
+> Efek samping: `EXP-20261002-279` sekarang berisi 5 baris (3 dari pilot + 2 tak
+> sengaja). Untuk analisis apa pun, **pakai 3 baris pertama** atau salinan bersih.
 
 **2 bug ditemukan uji ini, keduanya di sekeliling happy path — sudah diperbaiki
 (commit `e618b8d`):**
@@ -109,6 +121,7 @@ menangkapnya — itulah gunanya gate.
 | 6 | **`attempts` direkam saat selesai** | sebelumnya tertinggal satu attempt |
 | 7 | **Gate preflight meneruskan `--limit`** | sebelumnya memeriksa 50 repo walau batch 10 |
 | 8 | **`.tr_probe_observed.json` di-ignore** | berawalan titik → lolos dari `_*.json` |
+| 9 | **`--only N`** — jalankan N run berikutnya yang belum selesai | bergantung pada `--resume`; lihat §M3 |
 
 **Koreksi diagnosis (penting agar tidak diulang):**
 
@@ -125,6 +138,56 @@ menangkapnya — itulah gunanya gate.
 **Pelajaran proses:** uji ulang membongkar **3 dari 4** diagnosis awal. Angka
 "terlihat masuk akal" bukan bukti; yang membuktikan hanya pengukuran ulang dari
 sumber yang benar.
+
+---
+
+## 🚩 M3 — `--only N`: MENJALANKAN SWEEP BERTAHAP (2026-10-03) — SELESAI
+
+**Untuk apa:** sweep 150 run ~14 jam, jadi dijalankan **bertahap** — kerjakan
+sebagian, cek hasilnya, lanjut. `--limit` **tidak bisa** dipakai untuk ini karena
+diukur dalam **issue**: setelah sebagian selesai, "20 issue pertama" mungkin sudah
+dikerjakan semua, sehingga hampir tidak ada yang jalan padahal perintahnya terlihat
+meminta 20 run.
+
+**Cara pakai:**
+```bash
+# lanjutkan EXP, kerjakan 15 run berikutnya yang belum selesai
+python tools/run_final_sweep.py --resume --exp-id EXP-XXXX --only 15
+```
+Artinya: *"lanjutkan dari yang tersisa, kerjakan 15 run berikutnya, lewati yang
+sudah selesai"* — persis seperti yang diminta.
+
+**`--only` WAJIB didampingi `--resume`.** "Belum selesai" tidak terdefinisi tanpa
+direktori eksperimen untuk dibaca, jadi `--only` tanpa `--resume` → **exit 2**
+(bukan diartikan lain). Ini **keterkaitan inti**: `--only` bergantung pada
+`--resume` untuk tahu apa yang sudah selesai; `--resume` sendiri tidak butuh
+`--only` (untuk melanjutkan semuanya).
+
+**Guard (semuanya exit 2 dengan pesan jelas):**
+
+| Kondisi | Alasan |
+|---|---|
+| `--only` tanpa `--resume` | "belum selesai" tidak terdefinisi |
+| `--only` + `--limit` | dua cara berbeda membatasi batch; pilih satu |
+| `--only 0` / negatif | bukan jumlah run yang bermakna |
+
+**Scope dibatasi ke issue yang SUDAH ADA di EXP.** Versi pertama memilih dari 50
+kandidat, sehingga pada pilot berisi 1 issue ia **menarik issue baru** (10924,
+11001) dan benar-benar menjalankannya — **menghabiskan uang nyata**. Melanjutkan
+sebuah eksperimen harus **melanjutkannya**, bukan memperluasnya. Terverifikasi
+ulang dengan `--dry-run` pada `EXP-20261002-279`: `--only 2` → 2 run, **1 issue**
+(`django__django-10924`), tanpa issue baru.
+
+**Dua angka dilaporkan terpisah** (satu angka tidak bisa melayani keduanya):
+`runs_planned` = kerja sesi ini; `runs_planned_cumulative` = run yang masih
+tersisa di eksperimen itu.
+
+**Predikat "selesai" dipinjam dari `_load_existing_ids`** — predikat yang **sama**
+dipakai `--resume`. Kalau diimplementasikan ulang, keduanya bisa berbeda pendapat,
+dan ukuran batch jadi tidak bermakna sama dengan yang benar-benar dijalankan.
+
+**Verifikasi:** 10 test (`tests/test_sweep_only_batch.py`), **7 MERAH** saat
+perbaikannya dimatikan. Suite **508 lulus**, gate **READY 9/9**.
 
 > ⛔ **GATE — WAJIB KONFIRMASI USER:** Jangan jalankan run besar (50 issue / multi-jam)
 > tanpa persetujuan eksplisit dari user. Boleh tanpa konfirmasi: unit test, smoke test
@@ -1309,6 +1372,7 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 22. **Fixture teardown pytest berjalan TERBALIK.** Fixture yang dideklarasikan **setelah** `monkeypatch` di signature dibongkar **lebih dulu**, jadi fixture yang me-reload config akan me-reload **sebelum** env dipulihkan → kebocoran tetap ada. Jangan bergantung pada urutan fixture untuk hal yang urutannya penting; lakukan pemulihan di dalam `finally` test itu sendiri.
 23. **Token pipeline ≠ token yang ditagih (beda ~5×).** `input_tokens_total` mencatat token **baru per turn**; provider menagih **konteks penuh yang dikirim ulang tiap request**. Terukur `EXP-20261002-279`: pipeline 1,20 juta vs bill **6,33 juta** = **5,25×**. Ini **bukan** bug dan **bukan** pencemaran sesi agent — terverifikasi karena rasio konteks kumulatif (12,5 juta char `review` vs 1,5 juta `direct`) cocok, sedangkan rasio request hanya 1,53×. **Implikasi:** biaya ~**kuadratik** terhadap jumlah turn; **turn adalah variabel biaya utama, bukan token**. Untuk angka biaya, **bill yang menang**. Lihat §"Koreksi penting: token" di atas.
 24. **Hitung request dari turn assistant, bukan dari entri trajectory.** Tool call dieksekusi **lokal** oleh harness (provider hanya menyediakan model), jadi eksekusi tool **gratis** — tapi hasilnya dikirim balik sebagai `tool_result` dan itu **request baru yang ditagih penuh**. `review` punya **162 entri** trajectory tapi hanya **54 request**; 108 sisanya hasil tool. Menghitung dari total entri → **over-count 3×**. Field yang benar: `type == "assistant"`. Penyebab mudah salah: saya sempat memakai `kind` yang tidak ada (fieldnya `type`), sehingga hitungannya kacau dua kali.
+25. **Jangan menguji flag baru pada direktori eksperimen nyata.** Saat menguji `--only`, saya menjalankannya pada `EXP-20261002-279` **tanpa `--dry-run`** → **2 run berbayar tak sengaja** (~$0,019), dan CSV pilot itu bertambah dari 3 → 5 baris. **Uji dengan `--dry-run` dulu**, atau pada salinan sekali pakai. Flag yang memicu run adalah **destruktif**: ia menulis ke direktori yang ditunjuk, bukan ke tempat aman. Gate tidak menahannya karena preflight hanya memeriksa **repo pristine**, bukan "apakah kamu yakin menjalankan ini".
 
 ---
 
@@ -1363,7 +1427,7 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 ---
 
-**Last working state:** commit `e618b8d` — **498 test lulus**, gate **READY 9/9**, preflight **50/50 pristine**. Pipeline **SIAP run 50 issue**. Budget **200/200/200**, revisi **48 (4 putaran × 6+6)**. `--resume` **terbukti bekerja** di run berbayar nyata (interrupt sungguhan → resume → 3/3 lengkap, 0 duplikat).
+**Last working state:** commit M3 (`--only`) — **508 test lulus**, gate **READY 9/9**, preflight **50/50 pristine**. Pipeline **SIAP run 50 issue**, bisa **bertahap** dengan `--only N`. Budget **200/200/200**, revisi **48 (4 putaran × 6+6)**. `--resume` **terbukti bekerja** di run berbayar nyata (interrupt sungguhan → resume → 3/3 lengkap, 0 duplikat).
 
 **Langkah berikutnya (prioritas):**
 
@@ -1389,10 +1453,13 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 5. **`11019`** sudah dijawab: **batas kapabilitas**, bukan budget (0 truncation, act berhenti di ~20% anggaran, patch VALID tapi salah semantik). Tidak perlu run tambahan.
 
-6. **M3 (`--only N`) — BELUM dikerjakan, dan sifatnya fitur bukan perbaikan.** Kontrol
-   batch sadar-resume: jalankan maks N run **yang belum selesai** (dihitung setelah
-   skip), bukan N issue pertama seperti `--limit`. Berguna untuk melanjutkan sweep
-   secara bertahap (mis. 30 run dulu, cek, baru lanjut); `--limit` tidak bisa
-   dipakai untuk itu karena diukur dalam **issue**, bukan **run tersisa**. Untuk
-   sweep 150 run sekali jalan, tidak dibutuhkan. Rencana lengkap ada di
-   `docs/PLAN_RESUME_FIX_20261002.md` §Langkah 4.
+6. **M3 (`--only N`) — SELESAI** (commit berikutnya). Jalankan sweep **bertahap**:
+   ```
+   python tools/run_final_sweep.py --resume --exp-id <EXP-id> --only 15
+   ```
+   Kerjakan 15 run berikutnya yang belum selesai, lewati yang sudah. Wajib
+   didampingi `--resume`. Scope dibatasi ke issue yang sudah ada di EXP.
+   Lihat §"M3 — `--only N`".
+
+7. **⚠️ Kalau menguji flag baru: pakai `--dry-run` DULU.** Jangan jalankan pada
+   direktori eksperimen nyata — lihat pelajaran #25.

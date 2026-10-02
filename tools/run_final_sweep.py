@@ -184,6 +184,105 @@ def select_issues(limit: int | None) -> list[str]:
     return usable
 
 
+def select_batch_for_only(
+    only: int, exp_id: str, strategies: list[str], candidates: list[str],
+) -> tuple[list[str], int, int]:
+    """Take the next ``only`` still-incomplete RUNS, in order, from this experiment.
+
+    Returns ``(issues, runs_this_session, runs_outstanding_in_experiment)``.
+
+    The intended use is a staged sweep: run some issues, then continue with the
+    next batch -- "resume, do 5 more issues" -- WITHOUT redoing what is finished
+    and WITHOUT pulling in issues that were never part of this experiment.
+
+    ``--limit`` cannot express that, because it counts ISSUES from the start of the
+    dataset: after a partial sweep, "the first 20 issues" may already be done, so
+    almost nothing runs while the command looks like it asked for 20 runs of work.
+
+    Scope is deliberately restricted to instances ALREADY PRESENT in the
+    experiment's savepoints. An earlier version selected from all 50 candidates and
+    therefore ADDED new issues to an existing experiment -- measured on a 1-issue
+    pilot (`EXP-20261002-279`), where `--only 2` quietly ran two unrelated issues
+    (10924, 11001) for real money. Continuing an experiment must continue it, not
+    extend it.
+
+    Within that scope the batch is the next ``only`` outstanding runs in order. An
+    issue is included whole even if its last strategy overshoots the budget,
+    because the runner takes issue ids, not (issue, strategy) pairs.
+
+    The "is it finished?" answer comes from ``experiments.runner._load_existing_ids``,
+    the SAME predicate --resume uses. Reimplementing it would let the two disagree,
+    so a run that --resume skips could still be counted here (or the reverse).
+    """
+    sys.path.insert(0, str(ROOT / "src"))
+    from experiments.runner import _load_existing_ids, _resume_key
+
+    exp_dir = ROOT / "results" / exp_id
+    pred_dir = exp_dir / "predictions"
+
+    def recorded_ids() -> list[str]:
+        """Instances this experiment already knows about, in first-seen order."""
+        seen: list[str] = []
+        if not pred_dir.is_dir():
+            return seen
+        for s in strategies:
+            jsonl = pred_dir / f"{s}.jsonl"
+            if not jsonl.exists():
+                continue
+            with open(jsonl, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    iid = entry.get("instance_id")
+                    if iid and iid not in seen:
+                        seen.append(iid)
+        # Deterministic: savepoint order is the run order, but sort to be safe
+        # against a partially written file.
+        return sorted(seen)
+
+    in_experiment = recorded_ids()
+
+    if not in_experiment:
+        # A brand-new experiment: every candidate is outstanding, so the first
+        # ``only`` runs come from the first issues, rounded UP because one issue
+        # yields len(strategies) runs.
+        per_issue = max(1, len(strategies))
+        n_issues = min(len(candidates), -(-only // per_issue))
+        chosen = candidates[:n_issues]
+        return chosen, len(chosen) * len(strategies), len(candidates) * len(strategies)
+
+    done_per_strategy = {
+        s: _load_existing_ids(str(pred_dir / f"{s}.jsonl")) for s in strategies
+    }
+    key = _resume_key("", MODEL, THINKING == "true")
+
+    def outstanding(iid: str) -> int:
+        # Reuse the same key construction as the loader: strip the leading '|'
+        # that the empty instance id leaves behind.
+        k = _resume_key(iid, MODEL, THINKING == "true")
+        return sum(1 for s in strategies if k not in done_per_strategy[s])
+
+    cumulative = sum(outstanding(i) for i in in_experiment)
+
+    chosen: list[str] = []
+    budget = only
+    for iid in in_experiment:
+        if budget <= 0:
+            break
+        n = outstanding(iid)
+        if n == 0:
+            continue                      # fully done; --resume will skip it
+        chosen.append(iid)
+        budget -= n
+
+    return chosen, sum(outstanding(i) for i in chosen), cumulative
+
+
 def build_cmd(
     issues: list[str],
     strategies: list[str],
@@ -246,6 +345,10 @@ def main() -> int:
                     help="1 issue x 1 strategy -- verify the path end to end first")
     ap.add_argument("--limit", type=int, default=None,
                     help="use only the first N usable issues (for a pilot run)")
+    ap.add_argument("--only", type=int, default=None,
+                    help="run at most N runs that are still INCOMPLETE (requires "
+                         "--resume --exp-id). Counts runs, not issues, so it can "
+                         "drive a staged sweep: 'do 30 runs, then check'.")
     ap.add_argument("--strategies", nargs="*", default=["direct", "planning", "review"])
     ap.add_argument("--issues", nargs="*", default=None,
                     help="explicit instance ids (overrides --limit)")
@@ -261,15 +364,56 @@ def main() -> int:
               file=sys.stderr)
         return 2
 
-    if args.issues:
+    # --only counts runs REMAINING, which is undefined without an experiment to
+    # measure against. Running "the first N issues" instead would silently give the
+    # flag a second meaning, so refuse rather than guess.
+    if args.only is not None and not args.resume:
+        print("ERROR: --only needs --resume --exp-id. It counts runs that are still "
+              "INCOMPLETE, which cannot be known without an experiment to read.",
+              file=sys.stderr)
+        return 2
+    if args.only is not None and args.only <= 0:
+        print("ERROR: --only must be a positive number of runs.", file=sys.stderr)
+        return 2
+    if args.only is not None and args.limit is not None:
+        print("ERROR: --only and --limit both bound the batch differently "
+              "(runs remaining vs first N issues). Pick one.", file=sys.stderr)
+        return 2
+
+    strategies_preview = ["direct"] if args.smoke else args.strategies
+
+    if args.only is not None:
+        # Consider every runnable issue: the still-incomplete ones are not
+        # necessarily the first N, so the candidate pool must be the full set.
+        candidates = args.issues or select_issues(None)
+        issues, runs, runs_cumulative = select_batch_for_only(
+            args.only, args.exp_id, strategies_preview, candidates
+        )
+        if not issues:
+            print("=" * 78)
+            print("  FINAL SWEEP")
+            print("=" * 78)
+            print(f"  Nothing to do: all {runs_cumulative} run(s) in {args.exp_id} "
+                  f"are already complete.")
+            print("  (--only counts runs that are still INCOMPLETE; there are none.)")
+            print("=" * 78)
+            return 0
+    elif args.issues:
         issues = args.issues
+        runs_cumulative = None
     elif args.smoke:
         issues = select_issues(1)
+        runs_cumulative = None
     else:
         issues = select_issues(args.limit)
+        runs_cumulative = None
 
-    strategies = ["direct"] if args.smoke else args.strategies
-    runs = len(issues) * len(strategies)
+    strategies = strategies_preview
+    # ``runs`` means THIS session's runs. For --only it was computed from the
+    # incomplete set; otherwise it is simply the whole batch.
+    if args.only is None:
+        runs = len(issues) * len(strategies)
+        runs_cumulative = runs
 
     print("=" * 78)
     print("  FINAL SWEEP")
@@ -282,7 +426,10 @@ def main() -> int:
     else:
         print(f"               {issues[0]} ... {issues[-1]}")
     print(f"  strategies : {', '.join(strategies)}")
-    print(f"  runs       : {runs}")
+    print(f"  runs       : {runs}  (this session)")
+    if runs_cumulative is not None and runs_cumulative != runs:
+        print(f"  experiment : {runs_cumulative} run(s) total; "
+              f"{runs_cumulative - runs} already done")
     print(f"  budget     : per_task, total {TOTAL_TURNS} turns per strategy")
     print(f"               direct {TOTAL_TURNS} | planning {TOTAL_TURNS} | "
           f"review {TOTAL_TURNS - REVISION_TURNS}+{REVISION_TURNS} = {TOTAL_TURNS}")
@@ -351,6 +498,10 @@ def main() -> int:
         "issues": issues,
         "strategies": strategies,
         "runs_planned": runs,
+        # The experiment's total, which for a staged `--only` sweep is larger than
+        # this session's work. Reporting only `runs_planned` would understate the
+        # experiment; reporting only this would overstate what is about to happen.
+        "runs_planned_cumulative": runs_cumulative,
         "started_utc": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "started_iso": started.isoformat(),
         "total_tool_turns": TOTAL_TURNS,
