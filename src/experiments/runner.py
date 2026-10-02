@@ -612,29 +612,70 @@ def _write_csv_atomically(df, csv_path: str) -> None:
 
 
 def _export_interrupted_run(exp_dir, all_results, pred_dir, strategies, issues,
-                            strategy_names) -> None:
-    """Flush the CSV when the operator interrupts the run.
+                            strategy_names, provider_name, agents) -> None:
+    """Flush every artefact when the operator interrupts the run.
 
-    The CSV is written once at the END of ``run_experiments``, so a Ctrl-C would
+    The exports below live at the END of ``run_experiments``, so a Ctrl-C would
     otherwise discard the accounting for every run that DID finish -- the results
     survive only in the jsonl savepoints, which do not record tokens, cost or
-    timing (see ``_rows_from_savepoints``). This performs the same merge-then-write
-    the normal path does, so an interrupted sweep keeps its numbers.
+    timing (see ``_rows_from_savepoints``).
 
-    Best effort by design: an interrupt must not be turned into a crash by this
-    bookkeeping, so every failure is logged and swallowed. The savepoints remain
-    the authority either way.
+    This is not just about the CSV. Measured with a real Ctrl-C mid-sweep, only
+    the CSV appeared; manifest.json, generation_statistics.json and
+    generation_report.md were all missing. That is the same failure class as the
+    experiment.yaml bug (config written after the run finished, so a crash lost
+    it), and it degrades a downstream tool: verify_patches.py reads manifest.json
+    for instance -> base_commit mapping.
+
+    Best effort by design: an interrupt must not be turned into a crash by
+    bookkeeping, so every step is guarded and failures are logged, not raised. The
+    savepoints remain the authority either way.
     """
     try:
         csv_path = f"{exp_dir}/generation_result.csv"
         new_rows = [flatten_for_csv(r) for r in all_results]
         merged_rows = _merge_csv_rows(csv_path, new_rows, pred_dir, list(strategies))
-        _write_csv_atomically(pd.DataFrame(merged_rows), csv_path)
+        df = pd.DataFrame(merged_rows)
+        _write_csv_atomically(df, csv_path)
         logger.info(
             f"  Exported {len(merged_rows)} row(s) for the interrupted run: {csv_path}"
         )
-    except Exception as exc:  # noqa: BLE001 - never mask the operator's interrupt
+    except Exception as exc:  # noqa: BLE001
         logger.warning(f"Could not export the CSV after the interrupt: {exc}")
+        return
+
+    manifest_results = _results_from_flat_rows(merged_rows)
+    model_name = df["model"].iloc[0] if len(df) else ""
+    pricing = PricingTable.get(model_name) if model_name else None
+
+    try:
+        export_statistics_json(df, f"{exp_dir}/generation_statistics.json",
+                               pricing=pricing, usd_idr_rate=Config.USD_IDR_RATE)
+        generate_summary_md(df, f"{exp_dir}/generation_report.md",
+                            pricing=pricing, usd_idr_rate=Config.USD_IDR_RATE)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Could not export the statistics/report after the interrupt: {exc}")
+
+    try:
+        manifest = build_experiment_manifest(
+            issues=issues,
+            strategies=list(strategy_names),
+            provider_name=provider_name,
+            experiment_id=Path(exp_dir).name,
+            output_dir=str(exp_dir),
+            results=manifest_results,
+            agents=agents,
+        )
+        Path(f"{exp_dir}/manifest.json").write_text(
+            json.dumps(manifest, indent=2), encoding="utf-8"
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Could not export the manifest after the interrupt: {exc}")
+
+    logger.info(
+        "  Interrupted run exported: CSV, statistics, report, manifest. "
+        "--resume will retry the instances that did not finish."
+    )
 
 
 def _results_from_flat_rows(rows: list[dict]) -> list[ExperimentResult]:
@@ -1156,11 +1197,13 @@ def run_experiments(
                 all_predictions.append(interrupted_entry)
 
                 # Export what we have before letting the interrupt propagate: the
-                # CSV and manifest are written at the end of this function, so
-                # without this the interruption would discard the accounting for
-                # every run that DID finish, leaving only the savepoints.
+                # CSV, statistics, report and manifest are written at the end of
+                # this function, so without this the interruption would discard the
+                # accounting for every run that DID finish, leaving only the
+                # savepoints.
                 _export_interrupted_run(
-                    exp_dir, all_results, pred_dir, list(strategies), issues, strategies
+                    exp_dir, all_results, pred_dir, list(strategies), issues,
+                    list(strategies), provider_name, agents,
                 )
                 raise
 

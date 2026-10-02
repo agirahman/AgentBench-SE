@@ -315,10 +315,20 @@ def main() -> int:
     if not args.dry_run:
         preflight = ROOT / "tools" / "preflight_repos.py"
         print("  Running preflight (dirty checkouts would inflate the scores)...")
-        rc = subprocess.call(
-            [sys.executable, str(preflight), "--quiet"],
-            cwd=str(ROOT),
-        )
+        # Pass the SAME batch through, or the gate checks a different set than the
+        # one about to run: preflight defaults to all 50 instances, so a 10-issue
+        # pilot was gated on 40 repos it never touches -- green there says nothing
+        # about the batch. Passing --limit keeps both selections identical, since
+        # select_issues() and load_instances() both take the first N by sorted id.
+        preflight_cmd = [sys.executable, str(preflight), "--quiet"]
+        if args.limit is not None and not args.issues and not args.smoke:
+            preflight_cmd += ["--limit", str(args.limit)]
+        elif args.issues or args.smoke:
+            # An explicit --issues list cannot be expressed as "first N", so say so
+            # rather than silently checking a different set.
+            print("  NOTE: --issues/--smoke given; preflight checks the full set")
+            print("        (it does not accept an explicit id list).")
+        rc = subprocess.call(preflight_cmd, cwd=str(ROOT))
         if rc != 0:
             print()
             print("  PREFLIGHT FAILED -- not starting the sweep.")
