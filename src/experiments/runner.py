@@ -611,6 +611,150 @@ def _write_csv_atomically(df, csv_path: str) -> None:
     os.replace(tmp, target)
 
 
+def _check_completeness(exp_dir, pred_dir, strategies, issues, all_predictions, skipped) -> None:
+    """Compare finished runs against the number planned; alarm if short.
+
+    Nothing used to compare the two, so a sweep that silently lost runs still
+    reported success. At 50 issues x 3 strategies a missing instance is easy to
+    miss by eye and expensive to discover after the analysis is written.
+
+    Counts a row as covered unless it died for an infrastructure reason
+    (_is_completed_entry): a run that finished and produced no diff is an outcome,
+    not a gap. A patch-based predicate here flagged 44 of 150 legitimate no-diff
+    runs as missing on real data, which would have turned this control into noise.
+
+    ---- THE TWO NUMBERS MUST SHARE A BASE ----
+    ``expected`` used to be ``len(issues) * len(strategies)`` for THIS session only,
+    while ``completed`` counts every entry in the savepoints -- i.e. all sessions.
+    Resuming a batch smaller than the folder already holds therefore compared a
+    small expected against a large completed, which measured as
+    "Completeness: 3/1 runs completed -- 0 run(s) not covered" and still wrote
+    INCOMPLETE.json. A control that fires on every resume is one nobody reads,
+    which is worse than having none (MEMORY, trap #17).
+
+    So the denominator is the UNION: this session's batch plus every instance
+    already recorded in the savepoints.
+
+    ---- WHY THIS IS A FUNCTION AND NOT INLINE ----
+    It used to sit at the end of run_experiments, AFTER the try/except. An
+    operator interrupt raised straight past it, so an interrupted sweep wrote its
+    CSV/manifest/statistics/report but NO INCOMPLETE.json and no "Completeness:"
+    line at all -- a stopped run looked complete, which is exactly the class of
+    silent-loss this check exists to catch. Extracted so the interrupt path calls
+    the same code instead of a second copy that could drift.
+    """
+    expected_keys: set[str] = set()
+    for strat_name in strategies:
+        for issue in issues:
+            expected_keys.add(f"{strat_name}:{issue.instance_id}")
+    for strat_name in strategies:
+        for entry in _read_jsonl_entries(str(pred_dir / f"{strat_name}.jsonl")):
+            if entry.get("instance_id"):
+                expected_keys.add(f"{strat_name}:{entry.get('instance_id')}")
+    expected_total = len(expected_keys)
+
+    covered_total = 0
+    missing: list[str] = []
+    failed: list[str] = []
+    for strat_name in strategies:
+        strat_jsonl = str(pred_dir / f"{strat_name}.jsonl")
+        entries = _read_jsonl_entries(strat_jsonl)
+        covered_here = {
+            entry.get("instance_id") for entry in entries
+            if _is_completed_entry(entry)
+        }
+        failed_here = {
+            entry.get("instance_id") for entry in entries
+            if not _is_completed_entry(entry)
+        }
+        covered_total += len(covered_here)
+        for key in sorted(expected_keys):
+            k_strat, _, k_iid = key.partition(":")
+            if k_strat != strat_name:
+                continue
+            if k_iid not in covered_here:
+                # Distinguish "ran and died" from "never ran": they need different
+                # actions (retry vs investigate), and merging them hides which.
+                if k_iid in failed_here:
+                    failed.append(key)
+                else:
+                    missing.append(key)
+
+    if covered_total > expected_total:
+        # Cannot happen once both sides share a base. If it ever does, the bases
+        # have drifted apart again -- say so rather than silently comparing them.
+        logger.error(
+            f"Completeness arithmetic is incoherent: completed={covered_total} "
+            f"exceeds expected={expected_total}. The two figures are being counted "
+            "on different bases; treat the coverage result as unknown."
+        )
+
+    incomplete_marker = Path(f"{exp_dir}/INCOMPLETE.json")
+    if covered_total == expected_total:
+        logger.success(
+            f"Completeness: {covered_total}/{expected_total} runs completed."
+        )
+        # Clear a stale marker. It was written only on the failure branch and never
+        # removed, so a successful resume left a permanent alarm claiming the
+        # experiment was short -- and a stale alarm is indistinguishable from a
+        # live one.
+        if incomplete_marker.exists():
+            try:
+                incomplete_marker.unlink()
+                logger.info("Cleared the INCOMPLETE.json left by an earlier session.")
+            except OSError as exc:
+                logger.warning(f"Could not remove the stale INCOMPLETE.json: {exc}")
+    else:
+        logger.error(
+            f"Completeness: {covered_total}/{expected_total} runs completed "
+            f"-- {len(missing) + len(failed)} run(s) not covered."
+        )
+        for entry in failed[:20]:
+            logger.error(f"    ran but FAILED: {entry}")
+        for entry in missing[:20]:
+            logger.error(f"    never ran: {entry}")
+        if len(missing) + len(failed) > 20:
+            logger.error(f"    ... and {len(missing) + len(failed) - 20} more")
+        logger.error(
+            "  Re-run with --resume to finish the incomplete runs before analysing."
+        )
+        # Persist the shortfall so a downstream reader cannot mistake this for a
+        # complete sweep just because the process exited 0.
+        #
+        # ``skipped_already_done`` is named explicitly because a reader must be
+        # able to tell "deliberately skipped as already done" from "never ran" --
+        # they need opposite actions, and the old payload only reported absences.
+        completeness = {
+            "expected": expected_total,
+            "completed": covered_total,
+            "completed_this_session": len(all_predictions),
+            "skipped_already_done": skipped,
+            "failed": failed,
+            "never_ran": missing,
+            "missing": failed + missing,  # kept for readers of the old key
+            "complete": False,
+        }
+        try:
+            incomplete_marker.write_text(
+                json.dumps(completeness, indent=2), encoding="utf-8"
+            )
+        except OSError as exc:
+            logger.warning(f"Could not write INCOMPLETE.json: {exc}")
+
+
+def _check_completeness_quietly(*args, **kwargs) -> None:
+    """``_check_completeness`` for the interrupt path: never let it raise.
+
+    The interrupt branch is re-raising to stop the run; a failure in this
+    bookkeeping must not replace that with a confusing traceback from inside the
+    error handler.
+    """
+    try:
+        _check_completeness(*args, **kwargs)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Could not run the completeness check after the interrupt: {exc}")
+
+
 def _export_interrupted_run(exp_dir, all_results, pred_dir, strategies, issues,
                             strategy_names, provider_name, agents) -> None:
     """Flush every artefact when the operator interrupts the run.
@@ -1205,6 +1349,14 @@ def run_experiments(
                     exp_dir, all_results, pred_dir, list(strategies), issues,
                     list(strategies), provider_name, agents,
                 )
+                # The completeness check lives after the try/except, so raising
+                # straight past it left a stopped sweep with NO INCOMPLETE.json and
+                # no "Completeness:" line -- it looked finished. Run it here for the
+                # same reason the exports above are flushed: an interrupted run must
+                # report its own shortfall.
+                _check_completeness_quietly(
+                    exp_dir, pred_dir, list(strategies), issues, all_predictions, skipped
+                )
                 raise
 
             if rate_limit_stopped:
@@ -1271,126 +1423,7 @@ def run_experiments(
         count = sum(1 for _ in open(strat_jsonl, "r", encoding="utf-8") if _.strip())
         logger.success(f"Per-strategy predictions: {strat_jsonl} ({count} entries)")
 
-    # --- Completeness check ---
-    # Nothing used to compare the number of finished runs against the number
-    # planned, so a sweep that silently lost runs still reported success. At 50
-    # issues x 3 strategies a missing instance is easy to miss by eye and
-    # expensive to discover after the analysis is written.
-    #
-    # Counts a row as covered unless it died for an infrastructure reason
-    # (_is_completed_entry): a run that finished and produced no diff is an
-    # outcome, not a gap. Using the resume predicate here flagged 44 of 150
-    # legitimate no-diff runs as missing on real data, which would have turned
-    # this control into noise.
-    #
-    # ---- THE TWO NUMBERS MUST SHARE A BASE ----
-    # ``expected`` used to be ``len(issues) * len(strategies)`` for THIS session
-    # only, while ``completed`` counts every entry in the savepoints -- i.e. all
-    # sessions. Resuming a batch smaller than the folder already holds therefore
-    # compared a small expected against a large completed, which measured as
-    # "Completeness: 3/1 runs completed -- 0 run(s) not covered" and still wrote
-    # INCOMPLETE.json. A control that fires on every resume is one nobody reads,
-    # which is worse than having none (MEMORY, trap #17).
-    #
-    # So the denominator is the UNION: this session's batch plus every instance
-    # already recorded in the savepoints.
-    expected_keys: set[str] = set()
-    for strat_name in strategies:
-        for issue in issues:
-            expected_keys.add(f"{strat_name}:{issue.instance_id}")
-    for strat_name in strategies:
-        for entry in _read_jsonl_entries(str(pred_dir / f"{strat_name}.jsonl")):
-            if entry.get("instance_id"):
-                expected_keys.add(f"{strat_name}:{entry.get('instance_id')}")
-    expected_total = len(expected_keys)
-
-    covered_total = 0
-    missing: list[str] = []
-    failed: list[str] = []
-    for strat_name in strategies:
-        strat_jsonl = str(pred_dir / f"{strat_name}.jsonl")
-        entries = _read_jsonl_entries(strat_jsonl)
-        covered_here = {
-            entry.get("instance_id") for entry in entries
-            if _is_completed_entry(entry)
-        }
-        failed_here = {
-            entry.get("instance_id") for entry in entries
-            if not _is_completed_entry(entry)
-        }
-        covered_total += len(covered_here)
-        for key in sorted(expected_keys):
-            k_strat, _, k_iid = key.partition(":")
-            if k_strat != strat_name:
-                continue
-            if k_iid not in covered_here:
-                # Distinguish "ran and died" from "never ran": they need different
-                # actions (retry vs investigate), and merging them hides which.
-                if k_iid in failed_here:
-                    failed.append(key)
-                else:
-                    missing.append(key)
-
-    if covered_total > expected_total:
-        # Cannot happen once both sides share a base. If it ever does, the bases
-        # have drifted apart again -- say so rather than silently comparing them.
-        logger.error(
-            f"Completeness arithmetic is incoherent: completed={covered_total} "
-            f"exceeds expected={expected_total}. The two figures are being counted "
-            "on different bases; treat the coverage result as unknown."
-        )
-
-    incomplete_marker = Path(f"{exp_dir}/INCOMPLETE.json")
-    if covered_total == expected_total:
-        logger.success(
-            f"Completeness: {covered_total}/{expected_total} runs completed."
-        )
-        # Clear a stale marker. It was written only on the failure branch and never
-        # removed, so a successful resume left a permanent alarm claiming the
-        # experiment was short -- and a stale alarm is indistinguishable from a
-        # live one.
-        if incomplete_marker.exists():
-            try:
-                incomplete_marker.unlink()
-                logger.info("Cleared the INCOMPLETE.json left by an earlier session.")
-            except OSError as exc:
-                logger.warning(f"Could not remove the stale INCOMPLETE.json: {exc}")
-    else:
-        logger.error(
-            f"Completeness: {covered_total}/{expected_total} runs completed "
-            f"-- {len(missing) + len(failed)} run(s) not covered."
-        )
-        for entry in failed[:20]:
-            logger.error(f"    ran but FAILED: {entry}")
-        for entry in missing[:20]:
-            logger.error(f"    never ran: {entry}")
-        if len(missing) + len(failed) > 20:
-            logger.error(f"    ... and {len(missing) + len(failed) - 20} more")
-        logger.error(
-            "  Re-run with --resume to finish the incomplete runs before analysing."
-        )
-        # Persist the shortfall so a downstream reader cannot mistake this for a
-        # complete sweep just because the process exited 0.
-        #
-        # ``skipped_already_done`` is named explicitly because a reader must be
-        # able to tell "deliberately skipped as already done" from "never ran" --
-        # they need opposite actions, and the old payload only reported absences.
-        completeness = {
-            "expected": expected_total,
-            "completed": covered_total,
-            "completed_this_session": len(all_predictions),
-            "skipped_already_done": skipped,
-            "failed": failed,
-            "never_ran": missing,
-            "missing": failed + missing,  # kept for readers of the old key
-            "complete": False,
-        }
-        try:
-            incomplete_marker.write_text(
-                json.dumps(completeness, indent=2), encoding="utf-8"
-            )
-        except OSError as exc:
-            logger.warning(f"Could not write INCOMPLETE.json: {exc}")
+    _check_completeness(exp_dir, pred_dir, strategies, issues, all_predictions, skipped)
 
     if skipped:
         logger.info(f"Resume: skipped {skipped} already-completed entries")

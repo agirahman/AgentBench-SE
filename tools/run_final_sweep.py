@@ -412,6 +412,27 @@ def main() -> int:
     state["finished_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     state["elapsed_minutes"] = round(dt / 60, 1)
     state["rc"] = rc
+
+    # Fold THIS attempt into the history as well, not only the previous one.
+    #
+    # The append-on-resume logic above records the attempt that was already in the
+    # file, so the list always lagged one behind: the run in progress entered
+    # `attempts` only when a LATER resume folded it in. A sweep that then completed
+    # with no further resume never recorded its own window at all -- measured on a
+    # 1-issue run + resume: the file held 1 attempt (the interrupted first one) and
+    # the resume's window was missing, so `read_actual_bill.py` could not reconcile
+    # the money that resume spent.
+    #
+    # Written here rather than at the top so the entry carries its real outcome
+    # (elapsed/rc), which is what makes the window auditable after the fact.
+    attempts = state.get("attempts") or []
+    this_attempt = {
+        k: state.get(k) for k in
+        ("started_utc", "finished_utc", "elapsed_minutes", "rc", "resumed_from")
+    }
+    if not any(a.get("started_utc") == this_attempt["started_utc"] for a in attempts):
+        attempts.append(this_attempt)
+    state["attempts"] = attempts
     state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
     print()
