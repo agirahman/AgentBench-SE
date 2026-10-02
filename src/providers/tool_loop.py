@@ -72,6 +72,25 @@ def _cost_so_far(usage_totals: dict, rates: dict) -> float:
     ($0.007/M vs $0.22/M on the DeepSeek card). Charging the whole prompt at the
     regular rate would overstate cost by an order of magnitude -- measured on
     EXP-20260928-003, 90.7% of input was cached.
+
+    This function is the RUNAWAY GUARD's estimate, and it deliberately uses a
+    different card from the one that produces the reported RQ3 cost. The two must
+    not be conflated:
+
+    * The guard answers "is this act about to spend too much REAL money?", so it
+      is priced with the rate the upstream actually bills. On the cbai route that
+      is $0.15/$0.003/$0.28-ish, roughly 4.9x cheaper than DeepSeek's official
+      reference price. Armed with the official card instead, a $3.00 cap would
+      stop the run after ~$0.62 of real spend -- the bound, not the agent, would
+      decide where the act ended, and the turn-budget fairness invariant would
+      silently become a dollar-budget one.
+
+    * The reported cost answers "what does this cost at published reference
+      prices?", which is what a thesis must be able to defend. That lives in
+      evaluation/cost.py and is not this function.
+
+    Keeping them separate is the point: neither number is allowed to drift into
+    the other's job.
     """
     cached = usage_totals.get("cached_tokens", 0) or 0
     prompt = usage_totals.get("prompt_tokens", 0) or 0
@@ -232,8 +251,14 @@ def run_tool_loop(
     # is priced with the paid card when the curve runs ask for it. Without that
     # the rates are all 0.0, the guard can never bind, and the cost columns stay
     # empty -- the exact hole EXP-20260928-003 fell into.
+    #
+    # The guard uses the BILLED card when one is configured, not the reporting
+    # card: it is bounding real money. Config.COST_GUARD_MODEL names the model
+    # whose rate card should price the cap; when it is unset we fall back to the
+    # reporting card, which is correct for routes where the two coincide.
     capped = max_cost_usd is not None
-    cost_rates = PricingTable.rates_for(model, "off_peak") if capped else None
+    guard_model = getattr(Config, "COST_GUARD_MODEL", "") or model
+    cost_rates = PricingTable.rates_for(guard_model, "off_peak") if capped else None
     cost_exceeded = False
     wall_exceeded = False
     context_exceeded = False

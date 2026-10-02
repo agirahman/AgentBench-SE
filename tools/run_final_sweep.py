@@ -127,6 +127,23 @@ COST_LIMIT_USD = 3.00
 #: not a slow success), so 3600 still bounds the pathological case while leaving
 #: room for an honest long act.
 ACT_TIMEOUT_SECONDS = 3600
+#: Thinking mode for the sweep. MUST be passed explicitly, for the same class of
+#: reason MAX_REVISION_ROUNDS is: `.env` is not the only input, and a sweep that
+#: silently ran a different regime than the one measured would be undetectable
+#: from its results.
+#:
+#: Enabled on 2026-10-02 from a paired pilot (same 5 issues, same model):
+#:   thinking OFF : 12/15 resolved (80%)   $0.3092   ~9 h projected for 150
+#:   thinking ON  : 15/15 resolved (100%)  $1.0831   ~21 h projected for 150
+#: The whole gain is django__django-11019, which had failed in all 20 prior
+#: attempts across every experiment and only the gold patch had ever resolved.
+THINKING = "true"
+#: Reasoning effort. `medium` is the only level measured end to end.
+REASONING_EFFORT = "medium"
+#: Output ceiling PER REQUEST. Raised to 65536 for thinking mode: reasoning and
+#: the answer share this budget, and one measured review turn reached ~32,465
+#: tokens (99.1% of the old 32768) before completing. See .env for the full note.
+MAX_TOKENS = 65536
 
 
 def select_issues(limit: int | None) -> list[str]:
@@ -190,6 +207,14 @@ def build_cmd(
         "--set", f"MAX_REVISION_TURNS={MAX_REVISION_ROUNDS}",
         "--set", f"COST_LIMIT_USD={COST_LIMIT_USD}",
         "--set", f"ACT_TIMEOUT_SECONDS={ACT_TIMEOUT_SECONDS}",
+        # Thinking mode. Explicit for the same reason as the knobs above: a sweep
+        # must run the regime that was measured, and nothing in its results would
+        # reveal a silent fallback to .env.
+        "--set", f"DEEPSEEK_THINKING={THINKING}",
+        "--set", f"DEEPSEEK_REASONING_EFFORT={REASONING_EFFORT}",
+        # Reasoning and the answer SHARE this budget, and a measured thinking turn
+        # reached 99.1% of 32768. See the constant's note.
+        "--set", f"MAX_TOKENS={MAX_TOKENS}",
         "--provider", "opencode",
         "--strategies", *strategies,
         "--instance-ids", *issues,
@@ -268,6 +293,9 @@ def main() -> int:
     print(f"               (per task; ours was 40 = 5-12x tighter than all of them)")
     print(f"  cost cap   : ${COST_LIMIT_USD:.2f} per task (backstop, reference value)")
     print(f"  act timeout: {ACT_TIMEOUT_SECONDS}s per act (bounds retry backoff)")
+    print(f"  thinking   : {'ON' if THINKING == 'true' else 'OFF'}, "
+          f"reasoning_effort={REASONING_EFFORT} (measured: +3 resolved, 3.5x cost)")
+    print(f"  max tokens : {MAX_TOKENS:,} per request (reasoning + answer share it)")
     print()
     print(f"  Fairness   : every strategy's task budget is {TOTAL_TURNS} turns, so a")
     print(f"               review win cannot be explained by a larger budget.")
@@ -320,6 +348,9 @@ def main() -> int:
         "budget_floor_per_act": FLOOR,
         "cost_limit_usd": COST_LIMIT_USD,
         "act_timeout_seconds": ACT_TIMEOUT_SECONDS,
+        "thinking": THINKING == "true",
+        "reasoning_effort": REASONING_EFFORT,
+        "max_tokens": MAX_TOKENS,
         "resumed_from": args.exp_id if args.resume else None,
     }
     state_path = ROOT / "logs" / "sweep_started.json"

@@ -10,15 +10,22 @@ from config import Config
 if TYPE_CHECKING:
     from models.result import CostSummary
 
-# DeepSeek peak window (WIB / UTC+7), per official pricing docs:
-#   peak  = 08:00–11:00 WIB  and  13:00–17:00 WIB
-#   off_peak = everything else
-_WIB_OFFSET = 7  # hours
-_PEAK_RANGES_WIB_HOUR = [(8, 11), (13, 17)]  # inclusive start, exclusive end
+# DeepSeek peak window, per official pricing docs:
+#   https://api-docs.deepseek.com/quick_start/pricing
+#   peak = 01:00-04:00 UTC and 06:00-10:00 UTC, Monday-Friday
+#   off_peak = everything else, INCLUDING weekends in full and Chinese public
+#              holidays in full
+# The docs state these hours in UTC. Any pre-2026-10 card that expressed them in
+# WIB (UTC+7) was wrong twice over: it shifted the window by 7 hours AND dropped
+# the weekend/holiday exclusion, so it billed Sat/Sun requests at peak.
+_PEAK_RANGES_UTC_HOUR = [(1, 4), (6, 10)]  # inclusive start, exclusive end
 
 
 def window_for(timestamp_utc: str, model: str = "") -> str:
-    """Return ``"peak"`` or ``"off_peak"`` for a UTC timestamp, in WIB (UTC+7).
+    """Return ``"peak"`` or ``"off_peak"`` for a UTC timestamp.
+
+    Official DeepSeek peak hours are 01:00-04:00 and 06:00-10:00 UTC on
+    weekdays only; weekends and Chinese public holidays are off-peak in full.
 
     Only models with a ``peak`` rate card (e.g. deepseek-v4-flash) are
     window-sensitive; everything else is always ``"off_peak"``.
@@ -33,9 +40,13 @@ def window_for(timestamp_utc: str, model: str = "") -> str:
         return "off_peak"
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    wib_hour = (dt.hour + _WIB_OFFSET) % 24
-    for start, end in _PEAK_RANGES_WIB_HOUR:
-        if start <= wib_hour < end:
+    else:
+        dt = dt.astimezone(timezone.utc)
+    # Weekends are off-peak in full. Python weekday(): Mon=0 .. Sun=6.
+    if dt.weekday() >= 5:
+        return "off_peak"
+    for start, end in _PEAK_RANGES_UTC_HOUR:
+        if start <= dt.hour < end:
             return "peak"
     return "off_peak"
 
@@ -161,30 +172,61 @@ class PricingTable:
             "currency": "USD",
             "pricing_version": "2026-07",
         },
-        # cbai route on 9router. The two input/output rates are MEASURED: solved
-        # from 9router's own usageHistory, they reproduce recorded charges to
-        # 0.000% on requests with no cache (verified line by line on 6 real
-        # requests: $0.000424 charged, $0.000424 predicted).
+        # cbai route on 9router, served by DeepSeek-V4.1-Flash (the 9router
+        # upstream is codebuddy-intl, which fronts DeepSeek's own API).
         #
-        # The CACHED rate is deliberately set to the FULL input rate, because on
-        # this route a reported cache hit was not charged as one. Measured on two
-        # requests that reported real hits (256 and 896 cached tokens via
-        # prompt_tokens_details.cached_tokens), 9router charged charged/full-price
-        # = 1.0000 for both -- no discount. Pricing those tokens at the historical
-        # median cached rate ($0.002833/M, 49x cheaper) made our accounting read
-        # $0.001438 for a run the bill charged $0.002948: a 2.05x under-report,
-        # which is the direction that flatters a cost claim.
+        # These rates are MEASURED from 9router's own usageHistory, for the API key
+        # this pipeline ACTUALLY uses. That last part is the whole story: 9router
+        # bills PER KEY, and this project holds two keys for the same model.
         #
-        # The historical table does contain discounted rows (94% of 5,698), so the
-        # route CAN discount. It did not for ours, and a rate card must describe
-        # what was actually charged. tools/read_actual_bill.py remains the
-        # authority: if it disagrees with this card, the bill wins.
+        #   ...da2fe1  = Config.OPENCODE_API_KEY  <-- THE PIPELINE'S KEY
+        #                n=8225 rows -> regular=0.139410 cached=0.002467
+        #                output=0.513450, median error -0.0407%
+        #   ...b04880  = a DIFFERENT key, held in the shell but NOT used by the
+        #                pipeline: n=2041 rows -> output=0.280000
+        #
+        # An earlier version of this card was solved on ...b04880 and therefore
+        # under-stated output by 1.83x ($0.28 vs the $0.5135 we are actually
+        # charged). The reconciliation that exposed it: in the EXP-20261001-765
+        # run window, 9router recorded 567 requests on ...da2fe1 and ZERO on
+        # ...b04880. Always confirm the suffix of Config.OPENCODE_API_KEY before
+        # re-solving this card.
+        #
+        # Rates are flat (no peak/off_peak split): the bill for our key shows no
+        # time-of-day structure, and 9router is a reseller whose per-key pricing
+        # is its own. This is also why the official DeepSeek card is NOT used for
+        # reported cost -- our key pays $0.5135/M output, not DeepSeek's $0.60,
+        # and paying a reseller's rate is what the thesis must report.
+        #
+        # Proof the cached rate is a real discount (~57x): 7341 of 8225 rows carry
+        # a cache hit, and the solve reproduces them at median error -0.04%. An
+        # earlier card set cached == full rate on the claim that no discount was
+        # granted; that claim came from two requests on the OTHER key and is
+        # refuted by the 8225 rows here.
+        #
+        # tools/read_actual_bill.py remains the authority: if it disagrees with
+        # this card, the bill wins.
         "cbai/deepseek-v4.1-flash": {
-            "input_per_million": 0.14,
-            "cached_input_per_million": 0.14,
-            "output_per_million": 0.28,
+            "input_per_million": 0.13941,
+            "cached_input_per_million": 0.002467,
+            "output_per_million": 0.51345,
             "currency": "USD",
-            "pricing_version": "2026-09-30-measured-from-9router-usageHistory-no-cache-discount",
+            "pricing_version": "2026-10-01-measured-9router-usageHistory-key-da2fe1",
+        },
+        # Guard card for the runaway cost cap. It is the SAME numbers as the
+        # reported card above, and kept as a separate entry on purpose: the two
+        # answer different questions ("what do we report?" vs "what is this act
+        # about to spend?"), and on some routes they genuinely diverge. Keeping
+        # the seam means calibrating one can never silently move the other.
+        #
+        # Here they coincide because the reported card is already the measured
+        # billed rate. See _cost_so_far() for why the split exists at all.
+        "cbai/deepseek-v4.1-flash-billed": {
+            "input_per_million": 0.13941,
+            "cached_input_per_million": 0.002467,
+            "output_per_million": 0.51345,
+            "currency": "USD",
+            "pricing_version": "2026-10-01-measured-9router-usageHistory-key-da2fe1",
         },
         "tencent/hy3": {
             "input_per_million": 0.14,
@@ -277,7 +319,8 @@ class CostCalculator:
         peak_total_idr = peak_total_usd * Config.USD_IDR_RATE
 
         # Window-aware actual cost: use the rate card for the window the
-        # inference actually ran in (WIB peak 08-11 & 13-17, per docs).
+        # inference actually ran in (official DeepSeek peak = 01-04 & 06-10 UTC,
+        # weekdays only).
         window = window_for(inference.timestamp, inference.model)
         actual_card = PricingTable.rates_for(inference.model, window)
         actual_input_usd = (regular / 1_000_000) * actual_card["input_per_million"] + (cached / 1_000_000) * actual_card["cached_input_per_million"]

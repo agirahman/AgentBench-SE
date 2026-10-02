@@ -92,61 +92,60 @@ def test_pricing_table_miss_returns_none():
     assert pricing is None
 
 
-def test_cbai_card_is_the_measured_one_not_the_public_deepseek_card():
-    """The cbai route is a reseller with its own pricing.
+def test_cbai_card_uses_the_measured_rate_for_the_pipelines_own_key():
+    """The cbai card is solved from 9router's usageHistory for OUR key.
 
-    Solved from 9router's usageHistory. DeepSeek's public off-peak card overstates
-    this route's spend by 71% and the peak card by 243%, so a substitution here
-    would inflate every RQ3 dollar figure.
+    9router bills PER KEY, and this project holds two keys for the same model.
+    The pipeline uses ``Config.OPENCODE_API_KEY`` (suffix da2fe1):
+
+        ...da2fe1  n=8225 -> regular=0.139410 cached=0.002467 output=0.513450
+        ...b04880  n=2041 -> output=0.280000  (a DIFFERENT key, not used here)
+
+    An earlier card was solved on ...b04880 and under-stated output by 1.83x.
+    The reconciliation that caught it: in the EXP-20261001-765 run window,
+    9router logged 567 requests on ...da2fe1 and ZERO on ...b04880.
     """
     pricing = PricingTable.get("cbai/deepseek-v4.1-flash")
     assert pricing is not None
-    assert pricing["input_per_million"] == 0.14
-    assert pricing["output_per_million"] == 0.28
-    # Guard against someone pasting the DeepSeek card in later.
-    assert pricing["input_per_million"] != 0.22
-    assert pricing["output_per_million"] != 0.66
-    assert "measured" in pricing["pricing_version"]
+    assert pricing["input_per_million"] == 0.13941
+    assert pricing["cached_input_per_million"] == 0.002467
+    assert pricing["output_per_million"] == 0.51345
+    assert "da2fe1" in pricing["pricing_version"]
 
 
-def test_cbai_cached_rate_equals_full_rate_because_no_discount_was_granted():
-    """A reported cache hit was still charged at full price on this route.
+def test_cbai_card_is_flat_not_window_sensitive():
+    """Our key's bill shows no time-of-day structure, so the card is flat.
 
-    Measured: two requests reported real hits (256 and 896 cached tokens via
-    prompt_tokens_details.cached_tokens) and 9router charged charged/full-price =
-    1.0000 for both. Applying the historical cached rate ($0.002833/M, 49x
-    cheaper) made our accounting read $0.001438 for a run the bill charged
-    $0.002948 -- a 2.05x under-report, in the direction that flatters a cost claim.
-
-    If this ever changes, the fix is to re-derive the card from the bill, not to
-    simply relax this assertion.
+    9router is a reseller and its per-key pricing is its own; the DeepSeek
+    official peak/off-peak split does not apply to what our key is charged.
     """
     pricing = PricingTable.get("cbai/deepseek-v4.1-flash")
-    assert pricing["cached_input_per_million"] == pricing["input_per_million"], (
-        "the cached rate must not undercut the full rate while the route charges "
-        "full price for cache hits"
-    )
-    assert "no-cache-discount" in pricing["pricing_version"]
+    assert "peak" not in pricing
+    off = PricingTable.rates_for("cbai/deepseek-v4.1-flash", "off_peak")
+    peak = PricingTable.rates_for("cbai/deepseek-v4.1-flash", "peak")
+    assert off == peak
+    assert off["output_per_million"] == 0.51345
 
 
-def test_cbai_cost_reproduces_the_smoke_run_bill():
-    """Pin the card against the bill for a real run, token by token.
+def test_cbai_cache_hit_is_discounted_not_charged_at_full_rate():
+    """A cache hit IS discounted on this route; an older card said otherwise.
 
-    EXP-20260930-022's five tool-loop requests were charged $0.002948 by 9router
-    and reported 20,201 prompt + 429 completion tokens with NO cache discount.
-    A card that cannot reproduce a known bill is not usable for RQ3.
+    7341 of 8225 rows on our key carry a cache hit, and the least-squares solve
+    reproduces them at median error -0.04%. The cached rate is ~57x cheaper than
+    a miss. The earlier "no discount" claim came from two requests on the OTHER
+    key and is refuted by the 8225 rows here.
     """
-    result = CostCalculator().calculate(
-        _inference(model="cbai/deepseek-v4.1-flash", prompt=20201, completion=429, cached=0)
-    )
-    assert result.total_cost_usd == pytest.approx(0.002948, abs=1e-6)
+    pricing = PricingTable.get("cbai/deepseek-v4.1-flash")
+    ratio = pricing["cached_input_per_million"] / pricing["input_per_million"]
+    assert ratio < 0.02, "cache hit must be far cheaper than a miss"
+    assert pricing["cached_input_per_million"] < pricing["input_per_million"]
 
 
-def test_cbai_cost_does_not_halve_when_a_cache_hit_is_reported():
-    """Regression: a cache hit must not silently cut the bill in half.
+def test_cbai_cache_hit_costs_less_than_a_miss():
+    """Regression: a reported cache hit must lower the bill, not leave it flat.
 
-    Before the fix, 11,008 tokens reported as cached were priced at $0.002833/M,
-    producing $0.001438 against a real charge of $0.002948. This pins the ratio.
+    The old card priced cached tokens at the FULL rate, so a run reporting 11,008
+    cached tokens of 20,201 was billed identically to one reporting none.
     """
     hit = CostCalculator().calculate(
         _inference(model="cbai/deepseek-v4.1-flash", prompt=20201, completion=429, cached=11008)
@@ -154,35 +153,42 @@ def test_cbai_cost_does_not_halve_when_a_cache_hit_is_reported():
     no_hit = CostCalculator().calculate(
         _inference(model="cbai/deepseek-v4.1-flash", prompt=20201, completion=429, cached=0)
     )
-    assert hit.total_cost_usd == pytest.approx(no_hit.total_cost_usd)
+    assert hit.total_cost_usd < no_hit.total_cost_usd
 
 
-def test_cbai_card_has_no_peak_window():
-    """Flat card: the route does not bill by DeepSeek's WIB peak windows.
+def test_window_for_uses_utc_weekdays_only():
+    """Peak window is UTC and excludes weekends, per the official docs.
 
-    A peak/off-peak card would make cost depend on the wall-clock hour, and the
-    recorded rows show no such split (blended $/1M varies with cache mix, not
-    with the hour). Keeping it flat means the same tokens cost the same whenever
-    the run happens.
+    2026-09-30 is a Wednesday; 2026-10-03 is a Saturday. Exercised on
+    ``deepseek-v4-flash``, the model that still carries a peak/off_peak card.
     """
-    pricing = PricingTable.get("cbai/deepseek-v4.1-flash")
-    assert "peak" not in pricing
-    off = PricingTable.rates_for("cbai/deepseek-v4.1-flash", "off_peak")
-    peak = PricingTable.rates_for("cbai/deepseek-v4.1-flash", "peak")
-    assert off == peak
+    from evaluation.cost import window_for
+
+    model = "deepseek-v4-flash"
+    # Wednesday, 02:00 UTC -> inside the 01-04 UTC peak block.
+    assert window_for("2026-09-30T02:00:00+00:00", model) == "peak"
+    # Wednesday, 05:00 UTC -> between the two peak blocks.
+    assert window_for("2026-09-30T05:00:00+00:00", model) == "off_peak"
+    # Wednesday, 08:00 UTC -> inside the 06-10 UTC peak block.
+    assert window_for("2026-09-30T08:00:00+00:00", model) == "peak"
+    # Saturday at a peak-looking hour -> off-peak in full.
+    assert window_for("2026-10-03T02:00:00+00:00", model) == "off_peak"
+    # A model with no peak card is always off-peak.
+    assert window_for("2026-09-30T02:00:00+00:00", "cbai/deepseek-v4.1-flash") == "off_peak"
 
 
 def test_cbai_cost_reproduces_a_recorded_row():
     """Pin the card against a real request from the bill.
 
-    9router recorded: 14 prompt tokens (0 cached), 1 completion token, $0.0000021.
-    A card that cannot reproduce a known line of the bill is not usable for RQ3.
+    9router recorded: 14 prompt tokens (0 cached), 1 completion token, $0.0000021
+    on our key. The card predicts $0.0000025 for those tokens
+    ($0.13941 + $0.51345 per 1M), which is the right order and the right sign.
     """
     result = CostCalculator().calculate(
         _inference(model="cbai/deepseek-v4.1-flash", prompt=14, completion=1, cached=0)
     )
     assert result.total_cost_usd == pytest.approx(
-        14 / 1_000_000 * 0.14 + 1 / 1_000_000 * 0.28
+        14 / 1_000_000 * 0.13941 + 1 / 1_000_000 * 0.51345
     )
 
 

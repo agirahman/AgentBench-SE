@@ -735,6 +735,100 @@ def _git_in(root: Path, *args: str, timeout: int = 60) -> subprocess.CompletedPr
     )
 
 
+# Matches a per-file section header in a unified diff, capturing the b/ path.
+_DIFF_GIT_HEADER_RE = re.compile(r"^diff --git a/(\S+) b/(\S+)$")
+
+# Files an agent creates to CHECK its own work, then forgets to delete. They are
+# never part of a fix, but ``git diff`` captures them because the agent wrote them
+# inside the repo it is patching.
+#
+# Measured, across three separate experiments, always on the ``direct`` arm (which
+# has one act and the whole 200-turn pool, so it iterates most):
+#   EXP-20260930-030  django__django-11019  _check_merge.py
+#   EXP-20260930-215  django__django-11019  _verify_merge.py
+#   EXP-20261001-765  django__django-11001  _tmp_check.py
+#
+# The last one shipped as an empty file in a submitted patch. It still applied
+# (the file was new, so the hunk was trivial), but an unrelated empty file in a
+# patch is noise a reviewer has to explain, and each one is another chance for
+# ``git apply`` to fail across 150 runs.
+#
+# The patterns require an explicit throwaway prefix, NOT merely a leading
+# underscore. A first attempt used ``^_.*\.py$`` and matched the basename
+# ``__init__.py`` -- i.e. it deleted ``django/db/models/fields/__init__.py`` from
+# 2 of the 15 pilot patches. Dunder files are load-bearing everywhere in Python,
+# so the rule must name what it is removing.
+_SCRATCH_FILE_PATTERNS = (
+    re.compile(r"^_tmp[_A-Za-z0-9]*\.py$"),      # _tmp_check.py
+    re.compile(r"^_verify[_A-Za-z0-9]*\.py$"),   # _verify_merge.py
+    re.compile(r"^_check[_A-Za-z0-9]*\.py$"),    # _check_merge.py
+    re.compile(r"^_run[_A-Za-z0-9]*\.py$"),      # _run_media_tests.py
+    re.compile(r"^_out\.(txt|log)$"),            # _out.txt
+    re.compile(r"^tmp_[A-Za-z0-9_]*\.py$"),
+    re.compile(r"^scratch[_A-Za-z0-9]*\.py$"),
+)
+
+# Names that must NEVER be treated as scratch, whatever the patterns say. Guards
+# against exactly the class of mistake described above.
+_NEVER_SCRATCH = ("__init__.py", "__main__.py", "__about__.py")
+
+
+def _is_scratch_file(path: str) -> bool:
+    """True when *path* looks like an agent's throwaway check script.
+
+    Basename-only, and the name must carry an explicit throwaway prefix (``_tmp``,
+    ``_verify``, ``_check``, ``_run``, ``_out``, ``tmp_``, ``scratch``). Python
+    dunders are excluded outright: ``__init__.py`` is a real module, and an
+    earlier ``^_.*`` rule deleted it from two patches.
+    """
+    base = path.replace("\\", "/").rsplit("/", 1)[-1]
+    if base in _NEVER_SCRATCH:
+        return False
+    return any(p.match(base) for p in _SCRATCH_FILE_PATTERNS)
+
+
+def drop_scratch_files(patch: str) -> tuple[str, list[str]]:
+    """Remove agent scratch-file sections from *patch*.
+
+    Returns ``(filtered_patch, dropped_paths)``. Splits on ``diff --git`` so a
+    multi-file patch is handled; a patch containing ONLY scratch files yields an
+    empty string.
+
+    This exists so the submitted patch contains the fix and nothing else. It is a
+    deterministic pipeline filter, applied identically to all three strategies,
+    rather than a prompt instruction -- changing the prompt would change the
+    experiment's conditions mid-study.
+    """
+    if not patch:
+        return patch, []
+
+    chunks: list[tuple[str, list[str]]] = []
+    current_path: str | None = None
+    current: list[str] = []
+    for line in patch.splitlines(keepends=True):
+        m = _DIFF_GIT_HEADER_RE.match(line.rstrip("\n"))
+        if m:
+            if current:
+                chunks.append((current_path or "", current))
+            current_path = m.group(2)
+            current = [line]
+        else:
+            if not current and line.strip() == "":
+                continue
+            current.append(line)
+    if current:
+        chunks.append((current_path or "", current))
+
+    kept: list[str] = []
+    dropped: list[str] = []
+    for path, lines in chunks:
+        if _is_scratch_file(path):
+            dropped.append(path)
+        else:
+            kept.extend(lines)
+    return "".join(kept), dropped
+
+
 def _warn(message: str) -> None:
     """Log a warning without a hard import-time dependency on the logger."""
     try:
@@ -755,6 +849,10 @@ def capture_diff(repo_root: str | Path | None = None) -> str:
 
     CRLF is normalised to LF because the diff is later piped to ``git apply``,
     and a stray ``\\r`` on every line makes a patch fail to apply.
+
+    Agent scratch files (``_tmp_check.py`` and friends) are dropped here, at the
+    single point where the authoritative patch is produced, so every consumer --
+    the savepoints, the CSV, the submitted patch -- sees the same clean text.
     """
     root = Path(repo_root) if repo_root else _repo_root()
     if not root.is_dir():
@@ -766,7 +864,14 @@ def capture_diff(repo_root: str | Path | None = None) -> str:
         _warn(f"[capture_diff] failed for {root}: {e}")
         return ""
     out = (proc.stdout or b"").decode("utf-8", "replace")
-    return out.replace("\r\n", "\n").replace("\r", "\n")
+    out = out.replace("\r\n", "\n").replace("\r", "\n")
+    out, dropped = drop_scratch_files(out)
+    if dropped:
+        _warn(
+            f"[capture_diff] dropped {len(dropped)} agent scratch file(s) from the "
+            f"patch: {', '.join(dropped)}"
+        )
+    return out
 
 
 def reset_working_tree(repo_root: str | Path | None = None) -> bool:

@@ -231,6 +231,15 @@ class Config:
     # in normal operation; it exists so a pathological loop cannot spend without
     # bound. 0 = disabled.
     COST_LIMIT_USD = _get_float_env("COST_LIMIT_USD", 3.0)
+    # Which model's rate card prices the COST_LIMIT_USD guard above. Separate from
+    # PRICING_MODEL_OVERRIDE on purpose: that one decides what gets REPORTED (the
+    # official reference price a thesis can defend), while this one decides what
+    # the guard believes it is spending (the rate the upstream actually bills).
+    # On the cbai route those differ by ~4.9x, so using the reporting card here
+    # would trip a $3.00 cap after ~$0.62 of real spend and let a dollar bound
+    # silently replace the turn-budget fairness invariant. Empty = use the run's
+    # own model card, which is right whenever the two prices coincide.
+    COST_GUARD_MODEL = _get_env("COST_GUARD_MODEL", "")
     # Cap on a single tool result before it enters the conversation. Every turn
     # re-sends the whole conversation, so this value multiplies by the number of
     # turns. Head and tail are both kept (see providers/tool_loop): the tail

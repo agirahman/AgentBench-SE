@@ -1,14 +1,20 @@
-﻿# 🧠 AI Agent Memory — AgentBench-SE
+# 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-10-01 03:40 WIB
-**Status:** **SIAP run 50 issue** (setelah 2 audit partner, **5 blocker diperbaiki**). Budget 200 turn, total sama 200/200/200, **revisi 48 turn (4 putaran × 2 act × 6)**. Trajectory penuh + guard context window. **426 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
+**Last Updated:** 2026-10-02 01:45 WIB
+**Status:** **SIAP run 50 issue**, kini dengan **THINKING ON (medium)**. Budget 200 turn, sama 200/200/200, **revisi 48 turn (4 putaran × 2 act × 6)**. Trajectory penuh + `*_reasoning.md`. **453 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
 **Active Branch:** `19/toolcall-commandcode`
-**Handoff sesi terakhir:** [`HANDOFF_20261001.md`](HANDOFF_20261001.md)
-**Detail audit sesi terakhir:** [`AUDIT_OPS_PARTNER.md`](AUDIT_OPS_PARTNER.md) · [`AUDIT_SCALE_PARTNER.md`](AUDIT_SCALE_PARTNER.md) · [`AUDIT_PROMPTS_PARTNER.md`](AUDIT_PROMPTS_PARTNER.md) · [`AUDIT_RUN_TESTS_PARTNER.md`](AUDIT_RUN_TESTS_PARTNER.md) · [`RESEARCH_BUDGET_20260929.md`](RESEARCH_BUDGET_20260929.md)
+**Handoff sesi terakhir:** [`HANDOFF_20261002.md`](HANDOFF_20261002.md) · sebelumnya [`HANDOFF_20261001.md`](HANDOFF_20261001.md)
+**Detail audit:** [`AUDIT_OPS_PARTNER.md`](AUDIT_OPS_PARTNER.md) · [`AUDIT_SCALE_PARTNER.md`](AUDIT_SCALE_PARTNER.md) · [`AUDIT_PROMPTS_PARTNER.md`](AUDIT_PROMPTS_PARTNER.md) · [`AUDIT_RUN_TESTS_PARTNER.md`](AUDIT_RUN_TESTS_PARTNER.md) · [`RESEARCH_BUDGET_20260929.md`](RESEARCH_BUDGET_20260929.md)
 
 > ⛔ **GATE — WAJIB KONFIRMASI USER:** Jangan jalankan run besar (50 issue / multi-jam)
 > tanpa persetujuan eksplisit dari user. Boleh tanpa konfirmasi: unit test, smoke test
 > kecil (≤3 issue, 1 strategi), dan pekerjaan kode/dokumentasi.
+
+> 🧠 **THINKING ON sejak 2026-10-02.** Pilot berpasangan (5 issue × 3 strategi, model
+> sama) memberi **12/15 (80%) → 15/15 (100%)**. Seluruh kenaikan berasal dari **satu**
+> issue: `django__django-11019`, yang sebelumnya **gagal di 20 percobaan** sepanjang
+> riwayat proyek (hanya gold patch yang pernah menyelesaikannya). Harga: **3,50× biaya**,
+> **2,32× waktu**. Lihat §"Keputusan: thinking ON" untuk peringatan pentingnya.
 
 > ⚠️ **KOREKSI PENTING (2026-09-29 malam):** klaim lama di dokumen ini — *"perbaikan act
 > revisi BEKERJA, 3× edit_file"* — **SALAH**. Analisis ulang (`tools/analyze_run_anatomy.py`)
@@ -17,7 +23,152 @@
 
 ---
 
-## ✅ KESIAPAN RUN 50 (verifikasi terakhir 2026-10-01 05:00)
+## 🧠 KEPUTUSAN: THINKING ON (2026-10-02)
+
+**Setting aktif:** `DEEPSEEK_THINKING=true`, `DEEPSEEK_REASONING_EFFORT=medium`,
+`MAX_TOKENS=65536`.
+
+### Bukti: pilot berpasangan, 5 issue × 3 strategi, model & issue identik
+
+| Strategi | Thinking OFF | Thinking ON medium | Delta |
+|---|---|---|---|
+| direct | 4/5 | **5/5** | +1 |
+| planning | 4/5 | **5/5** | +1 |
+| review | 4/5 | **5/5** | +1 |
+| **TOTAL** | **12/15 (80%)** | **15/15 (100%)** | **+3** |
+
+Eksperimen: OFF = `EXP-20261001-765`, ON = `EXP-20261001-799`.
+
+### Per-issue: HANYA 11019 yang berubah
+
+| Issue | OFF | ON |
+|---|---|---|
+| 10914, 10924, 11001, 11039 | ✅✅✅ | ✅✅✅ (tidak berubah) |
+| **11019** | ❌❌❌ | **✅✅✅** |
+
+`django__django-11019` gagal di **20 percobaan** sebelumnya (semua eksperimen, semua model).
+Sebabnya: gold patch meng-**impor** `OrderedSet` + `stable_topological_sort` dari
+`django.utils.datastructures` / `django.utils.topological_sort` (keduanya SUDAH ADA di base
+commit), sedangkan agent `direct` **mendefinisikan ulang sendiri** kelas itu dan planning/review
+**tidak mengimplementasikannya sama sekali** → 12 test yang tadinya PASS jadi gagal.
+
+### Harga (terukur, 15 run)
+
+| Metrik | OFF | ON medium | Rasio |
+|---|---|---|---|
+| Output token | 132.473 | 1.543.226 | **11,65×** |
+| Input token | 7,47 M | 8,47 M | 1,13× |
+| **Biaya** | **$0,3092** | **$1,0831** | **3,50×** |
+| Waktu | 54 menit | 125 menit | 2,32× |
+| Turn terpotong | 0 | **0** | — |
+| Patch kosong / gagal | 0 | **0** | — |
+
+**Proyeksi 150 run:** ~**$10,83** dan ~**21 jam** (vs ~$3,09 dan ~9 jam dengan OFF).
+
+### ⚠️ PERINGATAN: +3 itu dari SATU issue
+
+15 sampel **tidak bisa** membuktikan thinking lebih baik secara umum. Yang terbukti:
+thinking **tidak merusak apa pun** (0 truncation, 0 patch kosong) dan **memecah kebuntuan
+20 percobaan**. Untuk tesis, tulis apa adanya — jangan klaim keunggulan dari n=15.
+
+### Kenapa `MAX_TOKENS` dinaikkan ke 65536
+
+`max_tokens` **mencakup reasoning DAN jawaban bersama**, dan berlaku **per request**
+(setiap turn dapat jatah penuh; tidak menumpuk). Terukur pada
+`EXP-20261001-799`:
+
+| | Thinking OFF | Thinking ON |
+|---|---|---|
+| Turn terbesar | 2.168 tok (6,7% cap) | **32.465 tok (99,1% cap)** |
+| Sisa ruang | 93,3% | **0,9% (303 token)** |
+
+Satu turn review menghabiskan **128.681 karakter reasoning** = ~32.465 token dari cap
+32.768, selesai normal **hanya karena beruntung**. Rantai 1% lebih panjang → `finish_reason='length'`
+dan **patch hilang**. Laju risiko 1/663 turn → untuk 150 issue (~6.630 turn) sekitar
+**10 turn** diperkirakan menyentuh batas.
+
+65536 **diverifikasi diterima** route `cbai/` (probe 32768/65536/131072, semua HTTP 200).
+Menaikkan cap **tidak menambah biaya** — cap itu plafon, bukan target.
+
+---
+
+## 🔧 PERBAIKAN SESI 2026-10-02 (4 bug + 1 keputusan)
+
+### 1. `.env` baris 19: `${NINEROUTER_API_KEY}` — run GAGAL START
+
+**Gejala:** pilot pertama gagal dalam 0,1 menit, `rc=1`:
+`ValueError: OPENCODE_API_KEY tidak ditemukan pada file .env`
+
+**Sebab:** `python-dotenv` **TIDAK** melakukan substitusi `${...}`. Baris
+`OPENCODE_API_KEY=${NINEROUTER_API_KEY}` dibaca sebagai **string kosong** (`''`).
+Terbukti juga **tanpa** `run_with_env.py` — jadi `.env` memang cacat, bukan wrapper.
+
+**Kenapa tersamar:** `NINEROUTER_API_KEY` ADA di registry Windows, tapi nama di `.env`
+adalah `OPENCODE_API_KEY`, jadi `load_dotenv()` menulis `''` ke nama itu. Sesi sebelumnya
+sempat menyimpulkan "kredensial OK" — itu **pengujian jalur yang salah** (memanggil API
+langsung, bukan lewat `Config.OPENCODE_API_KEY`).
+
+**Fix:** user mengisi key literal. Verifikasi: `dotenv_values` resolve 35 karakter.
+
+### 2. Rate card `cbai/deepseek-v4.1-flash` — SALAH KEY
+
+Rate card lama memakai key `…b04880`, padahal **pipeline memakai `…da2fe1`**
+(`Config.OPENCODE_API_KEY`). 9router menagih **per key**, dan tarifnya berbeda:
+
+| | `…b04880` (bukan milik pipeline) | **`…da2fe1` (dipakai pipeline)** |
+|---|---|---|
+| input | $0,14 | **$0,139410** |
+| cached | $0,0028 | **$0,002467** |
+| **output** | $0,28 | **$0,513450** |
+
+Output lama **under-report 1,83×**. Bukti yang membongkar: pada jendela run
+`EXP-20261001-765`, 9router mencatat **567 request di `…da2fe1` dan NOL di `…b04880`**.
+
+**Fix:** kartu laporan → tarif `…da2fe1`; kartu guard (`COST_GUARD_MODEL`) disejajarkan.
+Pelajaran: **selalu cek suffix `Config.OPENCODE_API_KEY` sebelum menyelesaikan ulang
+rate card.**
+
+### 3. File scratch agent bocor ke patch
+
+Agent menulis skrip verifikasi (`_tmp_check.py`) di dalam repo, lupa menghapus, dan
+`git diff` menangkapnya. Terjadi **3×** di 3 eksperimen, **selalu `direct`**. Satu di
+antaranya terkirim sebagai file **kosong** di patch.
+
+**Fix:** `drop_scratch_files()` di `capture_diff()` — satu titik, jadi semua konsumen
+(savepoint, CSV, patch) melihat teks bersih yang sama.
+
+**⚠️ Bug di dalam perbaikan ini:** versi pertama memakai pola `^_.*\.py$` dan **menghapus
+`django/db/models/fields/__init__.py`** dari 2 dari 15 patch pilot. Ketahuan karena diuji
+ke **data nyata**, bukan hanya unit test. Pola sekarang menuntut prefiks eksplisit
+(`_tmp`, `_verify`, `_check`, `_run`, `_out`, `tmp_`, `scratch`) + daftar `_NEVER_SCRATCH`
+untuk dunder. Verifikasi ulang: hanya 1 kebocoran asli dibuang, 14 patch lain utuh.
+
+### 4. Peak window: WIB → UTC
+
+`_PEAK_RANGES_WIB_HOUR = [(8,11),(13,17)]` diganti `_PEAK_RANGES_UTC_HOUR = [(1,4),(6,10)]`
++ pengecualian akhir pekan. Dokumen resmi DeepSeek menyatakan **peak 01:00–04:00 dan
+06:00–10:00 UTC, Senin–Jumat**. Kartu lama salah dua kali: bergeser 7 jam **dan**
+kehilangan pengecualian Sabtu/Minggu.
+
+### 5. Guard biaya dipisah dari kartu laporan
+
+`COST_GUARD_MODEL` (baru, di `src/config.py`): kartu yang dipakai `_cost_so_far()` untuk
+membatasi `COST_LIMIT_USD`. **$3,00 itu per ISSUE** (dibuat di dalam `run(issue)`), dibagi
+ke semua act: direct 1 act dapat $3,00; review 11 act dapat ~$0,27/act.
+
+Tanpa pemisahan, review bisa kehabisan dolar **sebelum** turn habis → invarian fairness
+200/200/200 diam-diam berubah jadi invarian biaya.
+
+### ⚠️ Pelajaran berulang: komentar lebih berbahaya daripada tidak ada komentar
+
+Empat kali di sesi ini, **komentar** yang salah menyesatkan (dampak ke pipeline = nol,
+tapi bisa dikutip ke tesis):
+- `cost.py` mengklaim "no cache discount" → **salah**, cache hit didiskon ~50×
+- `cost.py` docstring bilang WIB → **salah**, dokumen resmi bilang UTC
+- `.env` bilang `152 + 10 + 10 = 172` → **salah**, seharusnya `132 + 10 + 10 = 152`
+- rate card diklaim "verified line by line on 6 requests" → hanya berlaku untuk key lain
+
+---
 
 **Satu perintah memverifikasi semuanya:** `python tools/readiness_report.py` → **READY, 9/9**.
 Ia **menjalankan unit test suite juga** (versi pertamanya tidak, dan itu blocker: gate bisa
@@ -26,23 +177,23 @@ menyuntikkan test rusak → gate melaporkan **NOT READY**, exit 1.
 
 | Verifikasi | Hasil |
 |---|---|
-| Unit test | **426 lulus** |
+| Unit test | **453 lulus** |
 | Preflight repo | **50/50 pristine** |
 | Fairness budget | **FAIR** — 200/200/200 |
 | Putaran revisi | Setiap act revisi **6+6** (kebutuhan terukur: 6) |
 | Model efektif | Sweep memanggil **`cbai/deepseek-v4.1-flash`** (berbayar) |
+| Thinking | **ON, medium** (terukur: +3 resolved, 3,50× biaya) |
+| MAX_TOKENS | **65.536** per request (reasoning + jawaban berbagi) |
 | Disk | 211 MB worst-case vs **98 GB free** |
 | Resume | `--resume` tanpa `--exp-id` → **exit 2**; dengan `--exp-id` diteruskan |
 | Sweep command | 150 run, semua flag eksplisit |
-| Cross-check biaya | $0,551 vs $0,582 = **-5,28%** |
 
 **Perintah run:**
 ```
 python tools/run_final_sweep.py
 ```
 
-**Estimasi:** ~$7–11, ~14–17 jam (terukur dari pilot, bukan tebakan — token tumbuh
-sublinear terhadap cap karena 200 itu *batas*, bukan target).
+**Estimasi:** ~**$10,8**, ~**21 jam** (thinking ON; diukur dari pilot 15 run, bukan tebakan).
 
 **Kalau terputus:**
 ```
@@ -64,7 +215,12 @@ Sweep **tidak** mengulang dari nol; savepoint per run dibaca dan yang sudah sele
 | **Budget tool-turn** | ✅ Done | `agents/budget.py` — total sama per strategi, sekarang **200** (skala referensi) |
 | **Pre-flight validator** | ✅ Done | `tools/preflight_modal.py` — replikasi kontrak Modal secara lokal |
 | **Rate-limit handling** | ✅ Done | Backoff 429 + circuit breaker |
-| **Test suite** | ✅ Done | **426 lulus** (dari 408). **Lulus di env bersih MAUPUN env kotor** — dulu tidak, dan itu bug |
+| **Test suite** | ✅ Done | **453 lulus** (dari 426). **Lulus di env bersih MAUPUN env kotor** |
+| **Thinking mode** | ✅ **ON** | `deepseek` thinking + effort `medium`; `*_reasoning.md` ditulis per role |
+| **MAX_TOKENS** | ✅ **65536** | Naik dari 32768; reasoning + jawaban berbagi anggaran ini |
+| **Rate card cbai** | ✅ **FIXED** | Diukur dari key yang BENAR (`…da2fe1`), bukan `…b04880` |
+| **File scratch** | ✅ **FIXED** | `drop_scratch_files()` di `capture_diff()` |
+| **Kredensial `.env`** | ✅ **FIXED** | `${VAR}` tidak didukung python-dotenv → key literal |
 | **Retry vs budget** | ✅ **FIXED** | Retry per-request di dalam tool loop (commit `dfc9fa8`) |
 | **Konteks per turn** | ✅ Done | `TOOL_OUTPUT_MAX_CHARS=2000`, head+tail (dari 8000 head-only) |
 | **Korupsi patch** | ✅ **FIXED** | `_normalize_newlines` merusak diff yang mengandung literal `\n` (commit `3cbd9d1`) |
@@ -785,9 +941,11 @@ mengubah budget adalah persis penyebab hasil lama tidak komparabel.
 
 **Verifikasi sebelum run:** `python tools/preflight_repos.py` → **50/50 repo pristine**.
 
-**Estimasi:** ~$7–11 dan **~14–17 jam** untuk 150 run (dihitung `tools/estimate_sweep_cost.py`
-dari run berbayar di disk, bukan tebakan). Arm review akan **lebih mahal** dari sebelumnya
-karena revisi benar-benar terjadi — itu tujuannya, dan itu temuan nyata, bukan cacat.
+**Estimasi:** ~**$10,8** dan **~21 jam** untuk 150 run (thinking ON medium; diukur dari pilot
+15 run `EXP-20261001-799`, bukan tebakan). Dengan thinking OFF angkanya ~$3,1 dan ~9 jam —
+lihat §"Keputusan: thinking ON" untuk alasan memilih yang lebih mahal. Arm review akan
+**lebih mahal** dari sebelumnya karena revisi benar-benar terjadi — itu tujuannya, dan itu
+temuan nyata, bukan cacat.
 
 **Setelah run:** `check_sweep_state.py` (kelengkapan) → evaluasi Modal →
 `verify_eval_consistency.py` → `read_actual_bill.py --compare`.
@@ -1087,7 +1245,7 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 **Langkah berikutnya (prioritas):**
 
-1. **KEPUTUSAN USER — jalankan sweep 50 issue?** ~$7–11, ~14–17 jam. Semua verifikasi sudah lulus (lihat tabel "KESIAPAN RUN 50" di atas). **Gate: butuh izin eksplisit user.**
+1. **KEPUTUSAN USER — jalankan sweep 50 issue?** ~**$10,8**, ~**21 jam** (thinking ON). Semua verifikasi sudah lulus (lihat tabel "KESIAPAN RUN 50" di atas). **Gate: butuh izin eksplisit user.**
    ```
    python tools/run_final_sweep.py
    ```
