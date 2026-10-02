@@ -189,6 +189,64 @@ dan ukuran batch jadi tidak bermakna sama dengan yang benar-benar dijalankan.
 **Verifikasi:** 10 test (`tests/test_sweep_only_batch.py`), **7 MERAH** saat
 perbaikannya dimatikan. Suite **508 lulus**, gate **READY 9/9**.
 
+---
+
+## ✅ VERIFIKASI END-TO-END DI RUN BERBAYAR NYATA (2026-10-03) — `EXP-20261002-542`
+
+Diuji dengan **uang sungguhan**: 1 issue → resume +1 issue → **Ctrl+C sungguhan** →
+resume setelah interrupt. Model `cbai/deepseek-v4.1-flash`. Total **$0,4859** (321
+request, 9 run selesai + 1 terinterupsi).
+
+| Tahap | Hasil |
+|---|---|
+| Run 1 issue (`--limit 1`) | 3 baris, 1 per strategi, semua punya patch. 9,4 menit |
+| Resume +1 issue | **`Resume: 1 already done`** × 3; `[1/3] SKIP`, `[2/3] SKIP`, `[3/3] SKIP` → hanya 10924 jalan. **6 baris, 0 duplikat** |
+| Ctrl+C di tengah act | Baris `KeyboardInterrupt` + **4 artefak** + `INCOMPLETE.json` |
+| Resume setelah interrupt | `2 already done in review` (bukan 3) → **hanya run gagal** jalan. Eksperimen **lengkap**, `INCOMPLETE.json` **hilang** |
+
+**Bukti skip paling kuat** — log baris-per-baris, bukan kesimpulan dari hitungan:
+```
+Resume: 3 already done in direct
+Resume: 3 already done in planning
+Resume: 2 already done in review      <-- 2, karena baris INTERRUPTED TIDAK dihitung selesai
+[1/3] SKIP (resume) direct on
+[2/3] SKIP (resume) planning on
+[3/3] Running review on               <-- hanya yang gagal diulang
+```
+
+**`INCOMPLETE.json` saat terinterupsi** (tepat, bukan tebakan):
+`expected 9, completed 8, completed_this_session 3, skipped_already_done 6, failed ["review:django__django-11001"]`.
+
+**Duplikat baris itu DISENGAJA, dan CSV tetap bersih.** Savepoint `review.jsonl`
+menyimpan **2 baris** untuk `11001` (`KeyboardInterrupt` + sukses) karena savepoint
+adalah **jejak audit append-only**. Tapi merge di `runner.py:527-586` memakai kunci
+`(instance_id, strategy)` dengan **last-wins** (`merged[key] = record`, baris baru
+diterapkan terakhir) → CSV akhir **9 baris** (3×3), bukan 10. Jadi
+`resolved/total` **tidak** bisa melewati 100%. Ini menjelaskan kenapa CSV dan
+savepoint boleh berbeda jumlah — **CSV = pandangan gabungan, savepoint = riwayat.**
+
+**Dua pelajaran metodologis dari sesi ini:**
+
+26. **Kill pada wrapper ≠ Ctrl+C. `KeyboardInterrupt` tidak sampai ke runner.**
+    `job_kill` pada `run_final_sweep.py` mematikan pohon proses sehingga runner
+    `main.py` mati **tanpa** sempat menulis baris `INTERRUPTED` — state-nya hilang
+    tanpa jejak. Untuk menguji interrupt dengan benar: jalankan **detached**
+    (`Start-Process -PassThru`), catat PID, lalu kirim
+    `GenerateConsoleCtrlEvent(CTRL_C_EVENT)` ke PID itu. **Pelajaran:** kalau
+    menguji penanganan sinyal, pastikan sinyalnya **benar-benar sampai**; proses
+    yang di-kill terlihat identik dengan interrupt yang ditangani salah — dua
+    penyebab berbeda, gejala sama.
+27. **Gate lebih berguna daripada yang saya kira.** Resume pertama **diblokir
+    preflight** karena run sebelumnya meninggalkan repo **kotor**. Itu guard bekerja:
+    diff akan terhitung dari tree yang salah. **Jalankan `tools/clean_repos.py`
+    SETELAH run sukses, bukan hanya setelah interrupt** — runner membersihkan
+    *sebelum* tiap strategi, tidak setelahnya.
+28. **`.venv`, bukan python sistem.** Gate sempat melaporkan **NOT READY (unit
+    tests)** hanya karena saya memakai `python` sistem yang tak punya pytest. Selalu
+    `.\.venv\Scripts\python.exe`. **Pelajaran:** sebelum melaporkan kegagalan gate,
+    pastikan **interpreter-nya benar** — kegagalan yang salah dilaporkan lebih mahal
+    daripada tidak melaporkan.
+
 > ⛔ **GATE — WAJIB KONFIRMASI USER:** Jangan jalankan run besar (50 issue / multi-jam)
 > tanpa persetujuan eksplisit dari user. Boleh tanpa konfirmasi: unit test, smoke test
 > kecil (≤3 issue, 1 strategi), dan pekerjaan kode/dokumentasi.
@@ -1427,7 +1485,7 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 ---
 
-**Last working state:** commit M3 (`--only`) — **508 test lulus**, gate **READY 9/9**, preflight **50/50 pristine**. Pipeline **SIAP run 50 issue**, bisa **bertahap** dengan `--only N`. Budget **200/200/200**, revisi **48 (4 putaran × 6+6)**. `--resume` **terbukti bekerja** di run berbayar nyata (interrupt sungguhan → resume → 3/3 lengkap, 0 duplikat).
+**Last working state:** commit M3 (`--only`) — **508 test lulus**, gate **READY 9/9**, preflight **50/50 pristine**. Pipeline **SIAP run 50 issue**, bisa **bertahap** dengan `--only N`. Budget **200/200/200**, revisi **48 (4 putaran × 6+6)**. `--resume` + interrupt + `--only` **terbukti bekerja** di run berbayar nyata (`EXP-20261002-542`) — lihat §"Verifikasi end-to-end".
 
 **Langkah berikutnya (prioritas):**
 
