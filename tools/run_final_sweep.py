@@ -346,9 +346,11 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=None,
                     help="use only the first N usable issues (for a pilot run)")
     ap.add_argument("--only", type=int, default=None,
-                    help="run at most N runs that are still INCOMPLETE (requires "
-                         "--resume --exp-id). Counts runs, not issues, so it can "
-                         "drive a staged sweep: 'do 30 runs, then check'.")
+                    help="run about N still-INCOMPLETE runs (requires --resume "
+                         "--exp-id). Counts runs, not issues, so it can drive a "
+                         "staged sweep: 'do 30 runs, then check'. Rounded UP to "
+                         "whole issues, so N can yield up to N+len(strategies)-1 "
+                         "runs; --dry-run prints the exact count.")
     ap.add_argument("--strategies", nargs="*", default=["direct", "planning", "review"])
     ap.add_argument("--issues", nargs="*", default=None,
                     help="explicit instance ids (overrides --limit)")

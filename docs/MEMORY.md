@@ -1,7 +1,7 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-10-03 (sesi uji `--resume` + audit biaya token)
-**Status:** **SIAP run 50 issue** — bisa **bertahap** dengan `--only N`. **THINKING ON (medium)**. Budget 200/200/200, revisi **48 (4 putaran × 2 act × 6)**. `--resume` **terbukti bekerja di run berbayar nyata**. Gate **READY 9/9**, preflight **50/50 pristine**. **508 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
+**Last Updated:** 2026-10-03 (audit dokumen + verifikasi kesiapan run bertahap)
+**Status:** **SIAP run 50 issue** — bisa **bertahap** dengan `--only N`. **THINKING ON (medium)**. Budget 200/200/200, revisi **48 (4 putaran × 2 act × 6)**. `--resume` **terbukti bekerja di run berbayar nyata**. Gate **READY 9/9**, preflight **50/50 pristine**. **510 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
 **Active Branch:** `19/toolcall-commandcode`
 **Commit terakhir:** `e618b8d` (completeness-on-interrupt + attempts window), `38a1c57` (interrupt exports + preflight scope), `cf19d98` (resume opsi D)
 **Handoff sesi terakhir:** [`HANDOFF_20261002.md`](HANDOFF_20261002.md) · sebelumnya [`HANDOFF_20261001.md`](HANDOFF_20261001.md)
@@ -37,9 +37,23 @@ sesi agent, rasionya akan mengikuti rasio **request** (1,53×), bukan 5,25×.
 
 1. **Jangan** mengutip `input_tokens_total` sebagai "token yang dibayar". Untuk
    biaya, **bill yang menang** (`tools/read_actual_bill.py`).
-2. **Biaya tumbuh ~kuadratik** terhadap jumlah turn (N turn → ~N²/2 token konteks).
-   Ini menjelaskan kenapa `review` (54 turn) jauh lebih mahal dari `direct` (30
-   turn) — bukan 1,8×, tapi lebih. **Turn adalah variabel biaya utama, bukan token.**
+2. **Biaya tumbuh LEBIH CEPAT daripada jumlah turn**, karena konteks kumulatif
+   dikirim ulang tiap request. Terukur per-task (`EXP-20261002-279`, `django-10914`):
+   `direct` 30 turn → `review` 54 turn (**1,80×**), dan biayanya **2,66×**
+   ($0,02197 → $0,05854). Jadi *"bukan 1,8×, tapi lebih"* — **terbukti**.
+   **Turn adalah variabel biaya utama, bukan token.**
+
+   ⚠️ **Konteks menumpuk PER ACT, jadi `total_turns` bukan prediktor yang baik.**
+   46 turn dalam **1** act (`direct`) ≠ 46 turn tersebar di **3** act (`review`):
+   yang pertama membawa riwayat jauh lebih panjang di request terakhir. Ini sebabnya
+   arahnya **tidak konsisten** antar-run — di `EXP-20261002-542`, `10914` memberi
+   turn 0,89× → biaya 0,64× (review lebih murah), sementara `10924` 2,73× → 4,46×
+   dan `11001` 3,00× → 5,26×. **n=1 per sel; itu derau, bukan fisika.**
+
+   **Eksponen persisnya belum terkalibrasi** — estimasi dari data yang ada berkisar
+   **n = 1,49–3,88**, dan tidak stabil saat rasio turn mendekati 1. Jangan kutip
+   "kuadratik" sebagai eksponen terukur; kutip **hubungannya** (biaya naik lebih
+   cepat daripada turn) plus fakta aman di bawah.
 3. `input_tokens_cached` **tidak** berarti hemat: route `cbai/` menagih cache hit
    **sepenuhnya** (terverifikasi 2026-09-30, `charged/full-price = 1.0000`).
    `review` punya 454.272 cached dari 672.546 — semuanya tetap dibayar penuh.
@@ -56,7 +70,7 @@ sesi agent, rasionya akan mengikuti rasio **request** (1,53×), bukan 5,25×.
   Anthropic: *"every tool call is a round trip: the model asks, you execute, you
   report back, the model continues"*; OpenAI: *"Make a second request to the model
   with the tool output"*.
-- Batasi **jumlah turn** (sudah: cap 200) karena efek kuadratiknya.
+- Batasi **jumlah turn** (sudah: cap 200) karena biaya naik lebih cepat daripada turn.
 - **Selalu** rekonsiliasi ke bill; jeda jendela harus mencakup **setiap** attempt.
 
 ### Uji `--resume` end-to-end (2026-10-03, run berbayar, interrupt sungguhan)
@@ -84,6 +98,20 @@ sesi agent, rasionya akan mengikuti rasio **request** (1,53×), bukan 5,25×.
 >
 > Efek samping: `EXP-20261002-279` sekarang berisi 5 baris (3 dari pilot + 2 tak
 > sengaja). Untuk analisis apa pun, **pakai 3 baris pertama** atau salinan bersih.
+>
+> 🔴 **PERINGATAN UNTUK ANALISIS (jangan langsung `read_csv`).** Baris 4 dan 5 file itu
+> **bukan bagian pilot** — keduanya run `direct` yang tak sengaja, pada issue yang
+> **tidak ada di pilot** (`django__django-10924`, `django__django-11001`). Filter yang
+> benar sebelum analisis apa pun:
+> ```python
+> rows = [r for r in rows if r["instance_id"] == "django__django-10914"]
+> # atau: rows = rows[:3]
+> ```
+> Ini bukan sekadar kerapian: baris 4–5 adalah `direct` **tanpa pasangan** `planning`/
+> `review`, jadi memasukkannya membuat perbandingan antar-strategi **timpang** dan
+> rata-rata biaya per strategi **salah**. (Terukur: `direct` di file ini punya 3 baris,
+> `planning`/`review` punya 1 — menghitung rata-rata dari file mentah membandingkan
+> 3 run dengan 1 run.)
 
 **2 bug ditemukan uji ini, keduanya di sekeliling happy path — sudah diperbaiki
 (commit `e618b8d`):**
@@ -182,12 +210,33 @@ ulang dengan `--dry-run` pada `EXP-20261002-279`: `--only 2` → 2 run, **1 issu
 `runs_planned` = kerja sesi ini; `runs_planned_cumulative` = run yang masih
 tersisa di eksperimen itu.
 
+**⚠️ `--only` MEMBULATKAN KE ATAS — ia bukan hard cap.** `--only` menghitung **run**
+tapi memilih **issue**, dan satu issue = 3 run. Jadi `--only 4` mengambil **2 issue =
+6 run** (terverifikasi `--dry-run`). Overshoot maksimum `len(strategies) - 1` = 2 run
+(~15 menit, ~$0,1). Ini **disengaja**: runner menerima *issue id*, bukan pasangan
+(issue, strategy), jadi issue parsial tidak bisa dievaluasi. Sebelumnya `--help`
+menulis *"at most N runs"* — **salah**; sudah dikoreksi, dan dikunci test
+(`test_only_help_does_not_claim_a_hard_cap`). **Pakai kelipatan 3** supaya tidak ada
+pemborosan.
+
+**⚠️ Batch PERTAMA tidak bisa pakai `--only`** (butuh `--exp-id`, yang belum ada).
+Gunakan `--limit N` untuk batch pertama, lalu `--only` untuk selanjutnya:
+
+| Tahap | Perintah | Satuan |
+|---|---|---|
+| Batch 1 | `run_final_sweep.py --limit 10` | **issue** (10 issue = 30 run) |
+| Batch 2+ | `run_final_sweep.py --resume --exp-id <ID> --only 30` | **run** |
+
+**Di antara batch: `python tools/clean_repos.py`** — runner membersihkan *sebelum*
+tiap strategi, **tidak sesudah**; checkout kotor membuat `git diff` menangkap
+perubahan bukan-buatan-agen (skor naik tanpa jejak).
+
 **Predikat "selesai" dipinjam dari `_load_existing_ids`** — predikat yang **sama**
 dipakai `--resume`. Kalau diimplementasikan ulang, keduanya bisa berbeda pendapat,
 dan ukuran batch jadi tidak bermakna sama dengan yang benar-benar dijalankan.
 
 **Verifikasi:** 10 test (`tests/test_sweep_only_batch.py`), **7 MERAH** saat
-perbaikannya dimatikan. Suite **508 lulus**, gate **READY 9/9**.
+perbaikannya dimatikan. Suite **508 lulus saat itu** (kini **510**), gate **READY 9/9**.
 
 ---
 
@@ -418,7 +467,7 @@ menyuntikkan test rusak → gate melaporkan **NOT READY**, exit 1.
 
 | Verifikasi | Hasil |
 |---|---|
-| Unit test | **453 lulus** |
+| Unit test | **510 lulus** |
 | Preflight repo | **50/50 pristine** |
 | Fairness budget | **FAIR** — 200/200/200 |
 | Putaran revisi | Setiap act revisi **6+6** (kebutuhan terukur: 6) |
@@ -456,7 +505,7 @@ Sweep **tidak** mengulang dari nol; savepoint per run dibaca dan yang sudah sele
 | **Budget tool-turn** | ✅ Done | `agents/budget.py` — total sama per strategi, sekarang **200** (skala referensi) |
 | **Pre-flight validator** | ✅ Done | `tools/preflight_modal.py` — replikasi kontrak Modal secara lokal |
 | **Rate-limit handling** | ✅ Done | Backoff 429 + circuit breaker |
-| **Test suite** | ✅ Done | **498 lulus** (dari 426). **Lulus di env bersih MAUPUN env kotor** |
+| **Test suite** | ✅ Done | **510 lulus** (dari 426). **Lulus di env bersih MAUPUN env kotor** |
 | **Thinking mode** | ✅ **ON** | `deepseek` thinking + effort `medium`; `*_reasoning.md` ditulis per role |
 | **MAX_TOKENS** | ✅ **65536** | Naik dari 32768; reasoning + jawaban berbagi anggaran ini |
 | **Rate card cbai** | ✅ **FIXED** | Diukur dari key yang BENAR (`…da2fe1`), bukan `…b04880` |
@@ -971,7 +1020,20 @@ Per instance — ketiganya resolve himpunan yang **sama persis**:
 
 **Baseline naik: 2/3 (67%) → 4/5 (80%)**, dan kini pada **lima** instance, bukan tiga.
 
-##### 🎯 PERTANYAAN LAMA TERJAWAB: `11019` = **BATAS KAPABILITAS**, bukan budget
+##### 🎯 PERTANYAAN LAMA TERJAWAB: `11019` = **BATAS KAPABILITAS** — pada thinking **OFF**
+
+> ⚠️ **JUDUL INI BERLAKU UNTUK THINKING OFF.** Semua bukti di bawah berasal dari
+> `EXP-20260930-415` (`EXP-20260930-030`), yang berjalan **tanpa thinking**. Pada
+> thinking **ON** medium, `11019` justru **BERHASIL di ketiga strategi** (§"Per-issue:
+> HANYA 11019 yang berubah", `EXP-20261001-799`). Keduanya benar dan **tidak
+> bertentangan** — mereka mengukur **regime yang berbeda**.
+>
+> **Status final (untuk tesis):** `11019` adalah **batas kapabilitas model TANPA
+> thinking**, dan **thinking medium mendobraknya** (memecah kebuntuan 20 percobaan).
+> Karena sweep final memakai **thinking ON**, `11019` **tidak boleh** dilaporkan
+> sebagai "tidak bisa diselesaikan" — **menyelesaikannya adalah temuan RQ1**, bukan
+> kasus yang dikecualikan. Yang masih berlaku: **n=15 tidak membuktikan thinking lebih
+> baik secara umum** (lihat §"PERINGATAN: +3 itu dari SATU issue").
 
 Sejak `EXP-20260929-003` pertanyaan ini menggantung: apakah 11019 butuh lebih banyak turn, atau
 memang di luar kemampuan model? Sekarang terukur — **0 truncation** dan act-nya **berhenti sendiri**:
@@ -986,8 +1048,9 @@ Ketiganya memakai **~20% anggaran**, menghasilkan patch **VALID** yang menyentuh
 tapi **tetap salah secara semantik**. Gold patch lulus 1/1 di instance ini (dibuktikan sebelumnya)
 → **bukan artefak harness**.
 
-**Konsekuensi untuk tesis:** `11019` boleh dilaporkan sebagai **batas kapabilitas** pada model dan
-budget ini — tidak perlu lagi dilaporkan sebagai "terkonfound budget".
+**Konsekuensi untuk tesis (thinking OFF):** `11019` boleh dilaporkan sebagai **batas
+kapabilitas** pada model dan budget ini — tidak perlu lagi dilaporkan sebagai "terkonfound
+budget". **Tapi lihat kotak di atas:** dengan thinking ON, instance ini resolved.
 
 ##### 🔴 AUDIT PARTNER (2 ronde) — 4 BLOCKER OPS + 1 BLOCKER BUDGET
 
@@ -1428,7 +1491,7 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 20. **Gate yang bisa hijau sementara suite merah lebih buruk daripada tidak ada gate.** `tools/readiness_report.py` versi pertama menjalankan 7 check konfigurasi dan **tidak menjalankan test suite**, lalu mencetak "READY". Ia mengubah "aku belum memeriksa" menjadi "aku sudah periksa dan aman". Sekarang ia menjalankan suite **pertama**, dan `tools/_prove_gate_fails.py` membuktikan gate itu **bisa gagal** (menyuntikkan test rusak → NOT READY).
 21. **Test yang tidak bisa gagal adalah dekorasi.** Aku menulis dua versi test penjaga yang **lulus meski perbaikannya dimatikan**: yang pertama mem-assert identitas class modul (ternyata bergantung **urutan import**), yang kedua dijalankan **sendirian** sehingga tidak ada yang bisa dideteksi. Selalu buktikan test baru **bisa gagal** sebelum mempercayainya — `tools/_prove_containment.py` dan `tools/_prove_gate_fails.py` melakukannya secara otomatis.
 22. **Fixture teardown pytest berjalan TERBALIK.** Fixture yang dideklarasikan **setelah** `monkeypatch` di signature dibongkar **lebih dulu**, jadi fixture yang me-reload config akan me-reload **sebelum** env dipulihkan → kebocoran tetap ada. Jangan bergantung pada urutan fixture untuk hal yang urutannya penting; lakukan pemulihan di dalam `finally` test itu sendiri.
-23. **Token pipeline ≠ token yang ditagih (beda ~5×).** `input_tokens_total` mencatat token **baru per turn**; provider menagih **konteks penuh yang dikirim ulang tiap request**. Terukur `EXP-20261002-279`: pipeline 1,20 juta vs bill **6,33 juta** = **5,25×**. Ini **bukan** bug dan **bukan** pencemaran sesi agent — terverifikasi karena rasio konteks kumulatif (12,5 juta char `review` vs 1,5 juta `direct`) cocok, sedangkan rasio request hanya 1,53×. **Implikasi:** biaya ~**kuadratik** terhadap jumlah turn; **turn adalah variabel biaya utama, bukan token**. Untuk angka biaya, **bill yang menang**. Lihat §"Koreksi penting: token" di atas.
+23. **Token pipeline ≠ token yang ditagih (beda ~5×).** `input_tokens_total` mencatat token **baru per turn**; provider menagih **konteks penuh yang dikirim ulang tiap request**. Terukur `EXP-20261002-279`: pipeline 1,20 juta vs bill **6,33 juta** = **5,25×**. Ini **bukan** bug dan **bukan** pencemaran sesi agent — terverifikasi karena rasio konteks kumulatif (12,5 juta char `review` vs 1,5 juta `direct`) cocok, sedangkan rasio request hanya 1,53×. **Implikasi:** biaya naik **lebih cepat daripada jumlah turn** (konteks menumpuk **per act**, jadi `total_turns` bukan prediktor yang baik); **turn adalah variabel biaya utama, bukan token**. Untuk angka biaya, **bill yang menang**. Eksponen persisnya **belum terkalibrasi** — jangan kutip satu angka. Lihat §"Koreksi penting: token" di atas.
 24. **Hitung request dari turn assistant, bukan dari entri trajectory.** Tool call dieksekusi **lokal** oleh harness (provider hanya menyediakan model), jadi eksekusi tool **gratis** — tapi hasilnya dikirim balik sebagai `tool_result` dan itu **request baru yang ditagih penuh**. `review` punya **162 entri** trajectory tapi hanya **54 request**; 108 sisanya hasil tool. Menghitung dari total entri → **over-count 3×**. Field yang benar: `type == "assistant"`. Penyebab mudah salah: saya sempat memakai `kind` yang tidak ada (fieldnya `type`), sehingga hitungannya kacau dua kali.
 25. **Jangan menguji flag baru pada direktori eksperimen nyata.** Saat menguji `--only`, saya menjalankannya pada `EXP-20261002-279` **tanpa `--dry-run`** → **2 run berbayar tak sengaja** (~$0,019), dan CSV pilot itu bertambah dari 3 → 5 baris. **Uji dengan `--dry-run` dulu**, atau pada salinan sekali pakai. Flag yang memicu run adalah **destruktif**: ia menulis ke direktori yang ditunjuk, bukan ke tempat aman. Gate tidak menahannya karena preflight hanya memeriksa **repo pristine**, bukan "apakah kamu yakin menjalankan ini".
 
@@ -1485,7 +1548,7 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 ---
 
-**Last working state:** commit M3 (`--only`) — **508 test lulus**, gate **READY 9/9**, preflight **50/50 pristine**. Pipeline **SIAP run 50 issue**, bisa **bertahap** dengan `--only N`. Budget **200/200/200**, revisi **48 (4 putaran × 6+6)**. `--resume` + interrupt + `--only` **terbukti bekerja** di run berbayar nyata (`EXP-20261002-542`) — lihat §"Verifikasi end-to-end".
+**Last working state:** commit M3 (`--only`) — **510 test lulus**, gate **READY 9/9**, preflight **50/50 pristine**. Pipeline **SIAP run 50 issue**, bisa **bertahap** dengan `--only N`. Budget **200/200/200**, revisi **48 (4 putaran × 6+6)**. `--resume` + interrupt + `--only` **terbukti bekerja** di run berbayar nyata (`EXP-20261002-542`) — lihat §"Verifikasi end-to-end".
 
 **Langkah berikutnya (prioritas):**
 
@@ -1509,7 +1572,11 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 4. **Ablation reviewer (opsional, untuk tesis):** `review` tanpa ronde review = `planning`. Kalau ketiga strategi seri di 50 issue, ablation ini memisahkan "review berguna" dari "review tidak berpengaruh".
 
-5. **`11019`** sudah dijawab: **batas kapabilitas**, bukan budget (0 truncation, act berhenti di ~20% anggaran, patch VALID tapi salah semantik). Tidak perlu run tambahan.
+5. **`11019`** sudah dijawab — **tapi jawabannya bergantung regime.** Tanpa thinking:
+   **batas kapabilitas** (0 truncation, act berhenti di ~20% anggaran, patch VALID tapi
+   salah semantik). Dengan thinking **ON** (yang dipakai sweep final): **resolved di
+   ketiga strategi**. Jadi **jangan** laporkan sebagai "tidak bisa diselesaikan" —
+   menyelesaikannya adalah **temuan RQ1**. Tidak perlu run tambahan.
 
 6. **M3 (`--only N`) — SELESAI** (commit berikutnya). Jalankan sweep **bertahap**:
    ```

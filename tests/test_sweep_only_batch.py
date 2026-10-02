@@ -1,4 +1,4 @@
-"""`--only N`: run at most N runs that are still INCOMPLETE.
+"""`--only N`: run about N still-INCOMPLETE runs (rounded up to whole issues).
 
 Why this exists. A 150-run sweep is ~14 hours, so it gets run in stages: 30 runs,
 check the output, continue. `--limit` cannot express that, because it is measured
@@ -19,6 +19,9 @@ Design decisions pinned here:
     first N issues would be a different meaning under the same flag.
   * `--only` may need MORE issues than N to yield N runs, because an issue whose
     direct run is done still contributes its planning and review runs.
+  * `--only` ROUNDS UP to whole issues, so it is not a hard cap: `--only 4` with 3
+    strategies selects 2 issues = 6 runs. The overshoot is at most
+    len(strategies) - 1 runs, and --dry-run prints the exact count beforehand.
   * `runs_planned` records THIS session's runs; `runs_planned_cumulative` records
     the experiment total. Reporting only one of them misstates either the work
     about to happen or the experiment's size.
@@ -323,4 +326,66 @@ def test_session_and_cumulative_run_counts_are_both_reported(sweep, capsys):
     assert state.get("runs_planned_cumulative") == 4, (
         "the experiment's outstanding runs must also be recorded: "
         f"got {state.get('runs_planned_cumulative')}"
+    )
+
+
+def test_only_rounds_up_to_whole_issues(sweep, capsys):
+    """`--only` counts RUNS but selects ISSUES, so it rounds UP -- it is not a cap.
+
+    A brand-new experiment with the default 3 strategies: `--only 4` cannot run
+    exactly 4, because one issue yields 3 runs. It takes 2 whole issues = 6 runs.
+
+    This is deliberate (the runner takes issue ids, not (issue, strategy) pairs, so
+    a partial issue could not be evaluated), and the overshoot is at most
+    len(strategies) - 1 runs. What was WRONG was the help text saying "at most N
+    runs" -- false by up to 2 runs. This test pins the real behaviour so the wording
+    cannot drift back to a claim the code does not honour.
+    """
+    mod, tmp_path, captured = sweep
+    rc = _run(mod, ["--only", "4", "--resume", "--exp-id", "EXP-NEW"])
+    assert rc == 0
+    ids = _ids_in(_sweep_cmd(captured))
+    assert len(ids) == 2, (
+        f"4 requested runs must round UP to 2 issues (6 runs), not {len(ids)} issues"
+    )
+    out = capsys.readouterr().out
+    assert "runs       : 6" in out, (
+        f"the overshoot must be visible BEFORE running, not discovered afterwards: {out}"
+    )
+    assert "issues     : 2" in out, f"issue count must be shown: {out}"
+
+
+def test_only_help_does_not_claim_a_hard_cap():
+    """The help text must not promise "at most N" -- the code cannot honour it.
+
+    Kept as a test because the wrong wording survived review once already: a claim
+    in --help is documentation that users act on, and this one was off by up to
+    len(strategies) - 1 runs.
+    """
+    import contextlib
+    import io
+    import sys
+
+    mod = _load_sweep_module()
+    old = sys.argv
+    sys.argv = ["run_final_sweep.py", "--help"]
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            with contextlib.suppress(SystemExit):
+                mod.main()
+    finally:
+        sys.argv = old
+
+    text = buf.getvalue()
+    assert text, "argparse --help produced no output; the test would pass vacuously"
+    # argparse WRAPS help at terminal width, so a phrase can be split across lines
+    # ("Rounded\nUP"). Collapse whitespace before matching, or this test fails for a
+    # reason that has nothing to do with the wording it is guarding.
+    flat = " ".join(text.split())
+    assert "at most N runs" not in flat, (
+        "the help claims a hard cap the code does not enforce; --only rounds UP"
+    )
+    assert "rounded up" in flat.lower(), (
+        "the help must state that --only rounds up to whole issues"
     )
