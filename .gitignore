@@ -52,6 +52,11 @@ _*.json
 # The same thing for a verification pass: probe scripts and their captured
 # output. A `git add -A` picked these up once and they had to be unstaged.
 .verify_*
+# Config-consistency probe output (test_zz_probe_config_leak.py,
+# tools/_find_config_leak.py). A throwaway diagnostic dump, but written with a
+# LEADING DOT -- so the `_*.json` rule above does not match it and it showed up in
+# `git status` unnoticed until it was caught by hand.
+.tr_probe_observed.json
 
 # doc
 docs/*

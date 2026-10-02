@@ -229,70 +229,114 @@ def _resume_key(instance_id: str, model: str, thinking: bool) -> str:
     return f"{instance_id}|{model}|{thinking}"
 
 
-#: A row counts as "done" only if the run actually produced a patch. An errored
-#: row is appended with the same resume keys as a success so that a later
-#: --resume can RETRY it; treating it as done would make --resume silently
-#: preserve the failures it exists to recover from.
+#: Statuses that mean the run died for an INFRASTRUCTURE reason rather than
+#: reaching an outcome. Such a row must always be retried by --resume -- the
+#: number of retries is NOT bounded (only no-diff outcomes are bounded, see
+#: ``_MAX_NO_PATCH_ATTEMPTS``).
 #:
 #: RATE_LIMIT and PROVIDER_ERROR were added when the error path stopped stamping
 #: every exception "TIMEOUT" (runner.py:493-498), but this set was not updated --
-#: so those two statuses fell outside it. Today ``_is_finished_entry`` still
-#: rejects them via the empty patch, but only by accident of the error path
-#: writing ``model_patch: ""``. If that ever changed, a rate-limited run would be
-#: counted as finished and skipped by every later --resume. The list is the
-#: explicit statement of intent, so it has to name them.
+#: so those two statuses fell outside it. The list is the explicit statement of
+#: intent, so it has to name them.
+#:
+#: NOTE for the thesis: on this repo's measured history (6_125 rows) only TIMEOUT
+#: ever appears (382 rows); RATE_LIMIT / PROVIDER_ERROR / ERROR / FAILED appear
+#: zero times, because the error path derives them from the exception type. They
+#: are kept as a CONTRACT, not as a reproduction of an observed incident.
 _PATCH_STATUS_FAILED = {
     "TIMEOUT",
     "ERROR",
     "FAILED",
     "RATE_LIMIT",
     "PROVIDER_ERROR",
+    # Written when the operator interrupts the run (Ctrl-C). ``KeyboardInterrupt``
+    # is a BaseException and was previously NOT caught at all, so the instance
+    # vanished with no row -- see the ``except KeyboardInterrupt`` branch below.
+    "INTERRUPTED",
 }
 
+#: How many times a "no diff" outcome is retried before it is accepted as final.
+#:
+#: One, deliberately. A run can finish normally and produce NO diff -- the model
+#: answered with prose. That is an OUTCOME, not an interruption, and retrying it
+#: on every resume is a silent cost leak: measured on this repo's own history,
+#: 299 (strategy x instance) combinations sit in that state and every resume
+#: re-paid for them. But zero retries is also wrong -- a provider that returns an
+#: empty completion once may not the next time. One attempt buys the safety net
+#: and bounds the leak.
+#:
+#: This is the number of no-patch ROWS allowed before the key is treated as done.
+#: Note what this does NOT bound: infrastructure deaths (see
+#: ``_PATCH_STATUS_FAILED``) retry for as long as they keep failing.
+_MAX_NO_PATCH_ATTEMPTS = 2
 
-def _is_finished_entry(entry: dict) -> bool:
-    """Did this jsonl row represent a completed run?
 
-    A row is finished when it carries a non-empty patch. The error path writes
-    ``model_patch: ""`` together with ``patch_status: "TIMEOUT"``
-    (runner.py:452-465), so an empty patch is the reliable signal that the
-    instance still needs to run.
+def _is_infrastructure_failure(entry: dict) -> bool:
+    """Did this row die for an infrastructure reason (so it must always retry)?
 
-    NOTE for the completeness check: use ``_is_completed_entry`` instead. This
-    predicate answers "should --resume retry it?", and a run that finished
-    normally but produced NO diff must be retried (the model may answer with prose
-    on one attempt and a diff on the next). For "did the sweep cover this
-    instance?", that same row is a completed run -- see the docstring there.
+    Two independent signals, because neither alone is sufficient:
+
+    * ``error_type`` -- written ONLY by the error path (runner.py:987, and a
+      repo-wide grep finds no other writer). This is the load-bearing signal:
+      the retry policy for infrastructure deaths depends on it entirely, so if
+      that path ever stops writing it, failures silently become "outcomes".
+    * a member of ``_PATCH_STATUS_FAILED`` -- covers the case where a status is
+      recorded but ``error_type`` is missing.
+
+    Deliberately NOT the same as "the patch is empty": a no-diff outcome also has
+    an empty patch, and treating the two alike is what this whole module's resume
+    logic had to be split to avoid.
     """
-    status = str(entry.get("patch_status") or "").upper()
-    if status in _PATCH_STATUS_FAILED:
-        return False
     if entry.get("error_type"):
-        return False
-    return bool((entry.get("model_patch") or "").strip())
+        return True
+    status = str(entry.get("patch_status") or "").upper()
+    return status in _PATCH_STATUS_FAILED
 
 
 def _is_completed_entry(entry: dict) -> bool:
     """Did this row represent a run that actually RAN to completion?
 
-    Different question from ``_is_finished_entry``, and conflating them broke the
-    completeness check: it counted a legitimate "the model produced no diff" as a
-    missing run. A model answering with prose instead of a diff is a valid
-    OUTCOME, not an absent run -- the runner records it as ``NO_DIFF``/``EMPTY``
-    with no ``error_type``.
+    A run counts as covered unless it failed for an INFRASTRUCTURE reason. A model
+    answering with prose instead of a diff is a valid OUTCOME, not an absent run --
+    the runner records it as ``NO_DIFF``/``EMPTY`` with no ``error_type``.
 
-    On real data (EXP-20260824-005, 150 runs) the patch-based predicate flagged 84
+    On real data (EXP-20260824-005, 150 runs) a patch-based predicate flagged 84
     rows as unfinished, of which 44 were legitimate no-diff outcomes and only 40
     were infrastructure deaths. Reporting a false alarm on 44 of 150 runs would
     have discredited the very check meant to catch real losses -- and a control
     that cries wolf is worse than none, because the real alarm is then ignored.
 
-    So: a run counts as covered unless it failed for an INFRASTRUCTURE reason.
+    This answers "did the sweep cover this instance?", which is a DIFFERENT
+    question from "should --resume retry it?" -- see ``_load_existing_ids``.
     """
-    if entry.get("error_type"):
-        return False
-    status = str(entry.get("patch_status") or "").upper()
-    return status not in _PATCH_STATUS_FAILED
+    return not _is_infrastructure_failure(entry)
+
+
+def _no_patch_attempts(entries: list[dict]) -> int:
+    """How many no-patch OUTCOME attempts do these rows represent?
+
+    A "no-patch outcome" row is one that:
+      * has NO ``error_type`` and no infrastructure status (else it is a death,
+        which is never bounded), AND
+      * carries no patch.
+
+    The status-less row counts. It is the SINGLE MOST COMMON case in real data
+    (2_318 of 6_125 rows), not an edge case -- verbatim example:
+
+        {"instance_id": "psf__requests-1963", "model_patch": "",
+         "model_name_or_path": "deepseek-v4-flash", "strategy": "direct"}
+
+    A row WITH a patch is not counted: once a patch exists the key is finished and
+    the loader skips it regardless.
+    """
+    n = 0
+    for entry in entries:
+        if _is_infrastructure_failure(entry):
+            continue
+        if (entry.get("model_patch") or "").strip():
+            continue
+        n += 1
+    return n
 
 
 def _load_existing_ids(jsonl_path: str) -> set[str]:
@@ -300,15 +344,32 @@ def _load_existing_ids(jsonl_path: str) -> set[str]:
 
     Each key is ``instance_id|model|thinking`` (see ``_resume_key``).
 
-    Only FINISHED runs are returned. A run that died (provider 502, rate limit,
-    git failure) leaves a row with an empty patch and ``patch_status: TIMEOUT``;
-    counting it as done would skip the instance on every later --resume, so the
-    failure would never be retried and would stay in the results as if it were a
-    real outcome. Measured on EXP-20260929-022 django-11019/review, a 502.
+    A key is returned (= "--resume may skip it") when EITHER:
+
+    1. some row produced a patch -- the run plainly finished; or
+    2. the key has already used up its no-diff retries
+       (``_MAX_NO_PATCH_ATTEMPTS`` rows with no patch and no ``error_type``).
+
+    Case 2 is option "D" of docs/PLAN_RESUME_FIX_20261002.md. Before it, ANY empty
+    patch was retried forever. Measured on this repo: 299 (strategy x instance)
+    combinations are no-diff outcomes, so every resume re-ran all of them. One
+    retry keeps the recovery chance and bounds that leak.
+
+    A key whose rows are infrastructure deaths is NEVER returned -- it stays
+    retryable no matter how many times it has died, which is the entire point of
+    --resume. Measured on EXP-20260929-022 django-11019/review, a 502.
+
+    The count is deliberately per FILE (one strategy), matching how the runner
+    looks it up: it calls this once per strategy with that strategy's jsonl.
     """
-    ids = set()
+    ids: set[str] = set()
     if not os.path.exists(jsonl_path):
         return ids
+
+    # Group first: the retry budget is per key, so the whole history for a key
+    # must be seen before deciding. A previous version decided row by row, which
+    # cannot express "two no-patch rows" at all.
+    grouped: dict[str, list[dict]] = {}
     with open(jsonl_path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -316,16 +377,30 @@ def _load_existing_ids(jsonl_path: str) -> set[str]:
                 continue
             try:
                 entry = json.loads(line)
-                iid = entry.get("instance_id")
-                if iid is None:
-                    continue
-                model = entry.get("model_name_or_path", "")
-                thinking = entry.get("thinking", False)
-                if not _is_finished_entry(entry):
-                    continue
-                ids.add(_resume_key(iid, model, thinking))
             except json.JSONDecodeError:
                 continue
+            iid = entry.get("instance_id")
+            if iid is None:
+                continue
+            model = entry.get("model_name_or_path", "")
+            thinking = entry.get("thinking", False)
+            grouped.setdefault(_resume_key(iid, model, thinking), []).append(entry)
+
+    for key, entries in grouped.items():
+        if any((e.get("model_patch") or "").strip() for e in entries):
+            ids.add(key)                     # finished (1)
+            continue
+        if any(_is_infrastructure_failure(e) for e in entries):
+            continue                         # always retryable
+        attempts = _no_patch_attempts(entries)
+        if attempts >= _MAX_NO_PATCH_ATTEMPTS:
+            ids.add(key)                     # option D: budget used up (2)
+            if attempts > _MAX_NO_PATCH_ATTEMPTS:
+                logger.warning(
+                    f"Resume: {key} has {attempts} no-patch attempts, more than the "
+                    f"expected {_MAX_NO_PATCH_ATTEMPTS} -- treating as final. An "
+                    "unexpected history is worth a look, not silence."
+                )
     return ids
 
 
@@ -534,6 +609,32 @@ def _write_csv_atomically(df, csv_path: str) -> None:
         except OSError as exc:
             logger.warning(f"Could not write the CSV backup: {exc}")
     os.replace(tmp, target)
+
+
+def _export_interrupted_run(exp_dir, all_results, pred_dir, strategies, issues,
+                            strategy_names) -> None:
+    """Flush the CSV when the operator interrupts the run.
+
+    The CSV is written once at the END of ``run_experiments``, so a Ctrl-C would
+    otherwise discard the accounting for every run that DID finish -- the results
+    survive only in the jsonl savepoints, which do not record tokens, cost or
+    timing (see ``_rows_from_savepoints``). This performs the same merge-then-write
+    the normal path does, so an interrupted sweep keeps its numbers.
+
+    Best effort by design: an interrupt must not be turned into a crash by this
+    bookkeeping, so every failure is logged and swallowed. The savepoints remain
+    the authority either way.
+    """
+    try:
+        csv_path = f"{exp_dir}/generation_result.csv"
+        new_rows = [flatten_for_csv(r) for r in all_results]
+        merged_rows = _merge_csv_rows(csv_path, new_rows, pred_dir, list(strategies))
+        _write_csv_atomically(pd.DataFrame(merged_rows), csv_path)
+        logger.info(
+            f"  Exported {len(merged_rows)} row(s) for the interrupted run: {csv_path}"
+        )
+    except Exception as exc:  # noqa: BLE001 - never mask the operator's interrupt
+        logger.warning(f"Could not export the CSV after the interrupt: {exc}")
 
 
 def _results_from_flat_rows(rows: list[dict]) -> list[ExperimentResult]:
@@ -1022,6 +1123,47 @@ def run_experiments(
                     error=f"{type(e).__name__}: {error_detail[:400]}",
                 )
 
+            except KeyboardInterrupt:
+                # Ctrl-C. ``KeyboardInterrupt`` derives from BaseException, so the
+                # ``except Exception`` above does NOT catch it -- the instance used
+                # to vanish with no row at all, and the operator's interruption was
+                # indistinguishable from an instance that was never planned.
+                #
+                # This matters most for the real use: a 150-run sweep is ~6-14
+                # hours, so Ctrl-C is the likely way it ends. Record the row so the
+                # instance stays retryable, then re-raise so the interrupt still
+                # stops the run instead of being swallowed.
+                #
+                # ``error_type`` is set deliberately: it is what makes the resume
+                # predicate classify this as an infrastructure death, i.e. always
+                # retried, never counted as an outcome.
+                logger.warning(
+                    f"  ⏹ INTERRUPTED: {issue.instance_id} ({name}) — operator "
+                    "pressed Ctrl-C. Recording the row so --resume will retry it."
+                )
+                interrupted_entry = {
+                    "instance_id": issue.instance_id,
+                    "model_patch": "",
+                    "model_name_or_path": effective_model,
+                    "strategy": name,
+                    "patch_status": "INTERRUPTED",
+                    "thinking": Config.DEEPSEEK_THINKING,
+                    "error_type": "KeyboardInterrupt",
+                    "error_message": "operator interrupted the run",
+                }
+                _append_jsonl(str(pred_dir / f"{name}.jsonl"), interrupted_entry)
+                _append_jsonl(str(pred_dir / "predictions.jsonl"), interrupted_entry)
+                all_predictions.append(interrupted_entry)
+
+                # Export what we have before letting the interrupt propagate: the
+                # CSV and manifest are written at the end of this function, so
+                # without this the interruption would discard the accounting for
+                # every run that DID finish, leaving only the savepoints.
+                _export_interrupted_run(
+                    exp_dir, all_results, pred_dir, list(strategies), issues, strategies
+                )
+                raise
+
             if rate_limit_stopped:
                 break
         if rate_limit_stopped:
@@ -1097,7 +1239,28 @@ def run_experiments(
     # outcome, not a gap. Using the resume predicate here flagged 44 of 150
     # legitimate no-diff runs as missing on real data, which would have turned
     # this control into noise.
-    expected_total = len(issues) * len(strategies)
+    #
+    # ---- THE TWO NUMBERS MUST SHARE A BASE ----
+    # ``expected`` used to be ``len(issues) * len(strategies)`` for THIS session
+    # only, while ``completed`` counts every entry in the savepoints -- i.e. all
+    # sessions. Resuming a batch smaller than the folder already holds therefore
+    # compared a small expected against a large completed, which measured as
+    # "Completeness: 3/1 runs completed -- 0 run(s) not covered" and still wrote
+    # INCOMPLETE.json. A control that fires on every resume is one nobody reads,
+    # which is worse than having none (MEMORY, trap #17).
+    #
+    # So the denominator is the UNION: this session's batch plus every instance
+    # already recorded in the savepoints.
+    expected_keys: set[str] = set()
+    for strat_name in strategies:
+        for issue in issues:
+            expected_keys.add(f"{strat_name}:{issue.instance_id}")
+    for strat_name in strategies:
+        for entry in _read_jsonl_entries(str(pred_dir / f"{strat_name}.jsonl")):
+            if entry.get("instance_id"):
+                expected_keys.add(f"{strat_name}:{entry.get('instance_id')}")
+    expected_total = len(expected_keys)
+
     covered_total = 0
     missing: list[str] = []
     failed: list[str] = []
@@ -1113,14 +1276,26 @@ def run_experiments(
             if not _is_completed_entry(entry)
         }
         covered_total += len(covered_here)
-        for issue in issues:
-            if issue.instance_id not in covered_here:
+        for key in sorted(expected_keys):
+            k_strat, _, k_iid = key.partition(":")
+            if k_strat != strat_name:
+                continue
+            if k_iid not in covered_here:
                 # Distinguish "ran and died" from "never ran": they need different
                 # actions (retry vs investigate), and merging them hides which.
-                if issue.instance_id in failed_here:
-                    failed.append(f"{strat_name}:{issue.instance_id}")
+                if k_iid in failed_here:
+                    failed.append(key)
                 else:
-                    missing.append(f"{strat_name}:{issue.instance_id}")
+                    missing.append(key)
+
+    if covered_total > expected_total:
+        # Cannot happen once both sides share a base. If it ever does, the bases
+        # have drifted apart again -- say so rather than silently comparing them.
+        logger.error(
+            f"Completeness arithmetic is incoherent: completed={covered_total} "
+            f"exceeds expected={expected_total}. The two figures are being counted "
+            "on different bases; treat the coverage result as unknown."
+        )
 
     incomplete_marker = Path(f"{exp_dir}/INCOMPLETE.json")
     if covered_total == expected_total:
@@ -1153,9 +1328,15 @@ def run_experiments(
         )
         # Persist the shortfall so a downstream reader cannot mistake this for a
         # complete sweep just because the process exited 0.
+        #
+        # ``skipped_already_done`` is named explicitly because a reader must be
+        # able to tell "deliberately skipped as already done" from "never ran" --
+        # they need opposite actions, and the old payload only reported absences.
         completeness = {
             "expected": expected_total,
             "completed": covered_total,
+            "completed_this_session": len(all_predictions),
+            "skipped_already_done": skipped,
             "failed": failed,
             "never_ran": missing,
             "missing": failed + missing,  # kept for readers of the old key

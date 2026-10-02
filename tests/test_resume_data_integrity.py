@@ -233,16 +233,23 @@ def test_completeness_check_is_quiet_when_everything_finished(tmp_path):
 
 
 def test_crash_before_the_first_export_does_not_lose_data(tmp_path):
-    """THE CASE --resume EXISTS FOR: the process dies before any CSV is written.
+    """THE CASE --resume EXISTS FOR: the process dies partway through the sweep.
 
-    The CSV is written ONCE at the end of run_experiments, so a crash mid-sweep
-    leaves no CSV at all -- and merging with a file that does not exist recovers
-    nothing. The earlier merge fix only handled "session one reached the end",
-    which is precisely when resume is not needed.
+    The CSV used to be written ONCE at the end of run_experiments, so a crash
+    mid-sweep left no CSV at all -- and merging with a file that does not exist
+    recovers nothing. The earlier merge fix only handled "session one reached the
+    end", which is precisely when resume is not needed.
 
     The jsonl savepoints are appended per run, so they survive. This asserts the
-    CSV is rebuilt from them, and that the recovered rows are marked so a reader
-    cannot mistake the missing token/cost columns for zeros.
+    CSV ends up complete and that the recovered rows are marked, so a reader cannot
+    mistake the missing token/cost columns for zeros.
+
+    Behavioral note (2026-10-02): a KeyboardInterrupt now ALSO flushes the CSV
+    before re-raising -- see the ``except KeyboardInterrupt`` branch in runner.py
+    and ``_export_interrupted_run``. The earlier version of this test asserted
+    "no CSV exists" as a precondition, which was a description of the old
+    behaviour rather than a requirement. Both paths are asserted below so the
+    recovery is verified whether or not the interrupt got its export out.
     """
     calls: list[str] = []
     exp_dir = None
@@ -257,7 +264,7 @@ def test_crash_before_the_first_export_does_not_lose_data(tmp_path):
                 raise KeyboardInterrupt("simulated Ctrl+C")
             return super().run(issue)
 
-    # Session 1: dies on the third issue, so no CSV is ever written.
+    # Session 1: dies on the third issue.
     try:
         run_experiments(
             [_issue(1), _issue(2), _issue(3), _issue(4)],
@@ -272,11 +279,37 @@ def test_crash_before_the_first_export_does_not_lose_data(tmp_path):
 
     exp_id = sorted(p.name for p in tmp_path.glob("EXP-*"))[-1]
     exp_dir = tmp_path / exp_id
-    assert not (exp_dir / "generation_result.csv").exists(), (
-        "precondition: a crash mid-sweep must leave no CSV"
+
+    # The interruption must be recorded as a retryable row, NOT swallowed: the
+    # whole point of the KeyboardInterrupt branch. Without the row the instance
+    # would look like it was never planned.
+    interrupted_rows = [
+        json.loads(line)
+        for line in (exp_dir / "predictions" / "direct.jsonl")
+        .read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert any(r.get("patch_status") == "INTERRUPTED" for r in interrupted_rows), (
+        "Ctrl-C must leave a resumable row; otherwise the instance vanishes"
     )
 
-    # Session 2: resume. Two runs are already saved; two remain.
+    csv_path = exp_dir / "generation_result.csv"
+    if csv_path.exists():
+        # The interrupt flushed what it had. The CSV must NOT claim a patch for the
+        # interrupted instance -- its row has an empty model_patch, and the savepoint
+        # columns (tokens/cost) are honestly empty.
+        import pandas as pd
+
+        df = pd.read_csv(csv_path)
+        df.columns = [str(c).lstrip("[") for c in df.columns]
+        interrupted = df[df["instance_id"] == "django__django-3"]
+        if len(interrupted):
+            assert not str(interrupted.iloc[0].get("generated", "") or "").strip() or \
+                not str(interrupted.iloc[0].get("patch_preview", "") or "").strip(), (
+                "an interrupted run must not be recorded as if it produced a patch"
+            )
+
+    # Session 2: resume. Anything the interrupt did not finish is retried.
     calls.clear()
     _run(tmp_path, [_issue(1), _issue(2), _issue(3), _issue(4)], calls,
          resume=True, experiment_id=exp_id)

@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -22,10 +23,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from experiments.runner import (  # noqa: E402
-    _is_finished_entry,
     _is_completed_entry,
+    _no_patch_attempts,
     _load_existing_ids,
     _resume_key,
+    _MAX_NO_PATCH_ATTEMPTS,
 )
 
 MODEL = "cbai/deepseek-v4.1-flash"
@@ -53,31 +55,40 @@ def main() -> None:
     }
     key = _resume_key("django__django-10914", MODEL, False)
     checks.append((
-        "a VALID run with a patch counts as finished (would be skipped)",
-        _is_finished_entry(success),
-        f"_is_finished_entry -> {_is_finished_entry(success)}",
-    ))
-    checks.append((
-        "a VALID run counts as completed for the coverage check",
+        "a VALID run with a patch counts as completed for the coverage check",
         _is_completed_entry(success),
         f"_is_completed_entry -> {_is_completed_entry(success)}",
     ))
 
     # ---- 2. A FAILED run must NOT be skipped (that is the point of --resume).
-    for status in ("TIMEOUT", "ERROR", "RATE_LIMIT", "PROVIDER_ERROR", "FAILED"):
-        failed = dict(success, patch_status=status, model_patch="")
-        checks.append((
-            f"a {status} run is NOT finished, so --resume retries it",
-            not _is_finished_entry(failed),
-            f"_is_finished_entry -> {_is_finished_entry(failed)}",
-        ))
+    for status in ("TIMEOUT", "ERROR", "RATE_LIMIT", "PROVIDER_ERROR", "FAILED", "INTERRUPTED"):
+        failed = dict(success, patch_status=status, model_patch="", error_type="SomeError")
         checks.append((
             f"a {status} run is NOT covered (it never produced an outcome)",
             not _is_completed_entry(failed),
             f"_is_completed_entry -> {_is_completed_entry(failed)}",
         ))
 
-    # ---- 3. A run that finished with NO diff is an OUTCOME, not a missing run.
+    # ---- 2b. Infrastructure deaths are NEVER bounded by the retry budget: they
+    #          keep retrying however many times they have died.
+    checks.append((
+        "repeated infrastructure deaths are never treated as finished",
+        _no_patch_attempts([
+            dict(success, patch_status="RATE_LIMIT", model_patch="", error_type="RateLimitError"),
+            dict(success, patch_status="RATE_LIMIT", model_patch="", error_type="RateLimitError"),
+            dict(success, patch_status="RATE_LIMIT", model_patch="", error_type="RateLimitError"),
+        ]) == 0,
+        "3 rate-limited rows count as 0 no-patch attempts",
+    ))
+
+    # ---- 3. A run that finished with NO diff is an OUTCOME, not a missing run,
+    #         and it gets exactly _MAX_NO_PATCH_ATTEMPTS tries before being final.
+    #
+    #         This section used to assert the OPPOSITE ("a NO_DIFF run IS retried
+    #         by --resume"), which was option "E" -- retry forever. That is what
+    #         docs/PLAN_RESUME_FIX_20261002.md replaced: measured on this repo,
+    #         299 (strategy x instance) combinations sit in the no-diff state, so
+    #         every resume re-paid for all of them.
     no_diff = dict(success, model_patch="", patch_status="NO_DIFF")
     checks.append((
         "a NO_DIFF run is an outcome (counts as covered)",
@@ -85,9 +96,51 @@ def main() -> None:
         f"_is_completed_entry -> {_is_completed_entry(no_diff)}",
     ))
     checks.append((
-        "a NO_DIFF run IS retried by --resume (the model may answer differently)",
-        not _is_finished_entry(no_diff),
-        f"_is_finished_entry -> {_is_finished_entry(no_diff)}",
+        "a NO_DIFF run counts as ONE no-patch attempt",
+        _no_patch_attempts([no_diff]) == 1,
+        f"_no_patch_attempts -> {_no_patch_attempts([no_diff])}",
+    ))
+
+    # A single no-diff row must still be retried: option D is "retry once", not
+    # "never retry" (that would be option B, rejected because failures could then
+    # be frozen by a single empty answer).
+    one_row = tempfile.mkdtemp()
+    try:
+        p = Path(one_row) / "direct.jsonl"
+        p.write_text(json.dumps(no_diff) + "\n", encoding="utf-8")
+        ids_one = _load_existing_ids(str(p))
+    finally:
+        shutil.rmtree(one_row, ignore_errors=True)
+    checks.append((
+        "after ONE no-diff row the instance is still retried",
+        _resume_key("django__django-10914", MODEL, False) not in ids_one,
+        f"keys -> {sorted(ids_one)}",
+    ))
+
+    # Two no-diff rows exhaust the budget -> the instance becomes final.
+    two_rows = tempfile.mkdtemp()
+    try:
+        p = Path(two_rows) / "direct.jsonl"
+        p.write_text(
+            json.dumps(no_diff) + "\n" + json.dumps(no_diff) + "\n", encoding="utf-8"
+        )
+        ids_two = _load_existing_ids(str(p))
+    finally:
+        shutil.rmtree(two_rows, ignore_errors=True)
+    checks.append((
+        f"after {_MAX_NO_PATCH_ATTEMPTS} no-diff rows the instance is final",
+        _resume_key("django__django-10914", MODEL, False) in ids_two,
+        f"keys -> {sorted(ids_two)}",
+    ))
+
+    # A row with no patch_status at all must behave like NO_DIFF. This is the MOST
+    # COMMON shape in real data (2_318 of 6_125 rows), not an edge case.
+    stateless = {k: v for k, v in success.items() if k != "patch_status"}
+    stateless["model_patch"] = ""
+    checks.append((
+        "a row with NO patch_status counts as a no-patch attempt",
+        _no_patch_attempts([stateless]) == 1,
+        f"_no_patch_attempts -> {_no_patch_attempts([stateless])}",
     ))
 
     # ---- 4. The key must depend on model and thinking, so a config change
