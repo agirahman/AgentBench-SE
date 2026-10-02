@@ -1,10 +1,130 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-10-02 01:45 WIB
-**Status:** **SIAP run 50 issue**, kini dengan **THINKING ON (medium)**. Budget 200 turn, sama 200/200/200, **revisi 48 turn (4 putaran × 2 act × 6)**. Trajectory penuh + `*_reasoning.md`. **453 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
+**Last Updated:** 2026-10-03 (sesi uji `--resume` + audit biaya token)
+**Status:** **SIAP run 50 issue**, **THINKING ON (medium)**. Budget 200/200/200, revisi **48 (4 putaran × 2 act × 6)**. `--resume` **terbukti bekerja di run berbayar nyata** (interrupt → resume). Gate **READY 9/9**, preflight **50/50 pristine**. **498 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
 **Active Branch:** `19/toolcall-commandcode`
+**Commit terakhir:** `e618b8d` (completeness-on-interrupt + attempts window), `38a1c57` (interrupt exports + preflight scope), `cf19d98` (resume opsi D)
 **Handoff sesi terakhir:** [`HANDOFF_20261002.md`](HANDOFF_20261002.md) · sebelumnya [`HANDOFF_20261001.md`](HANDOFF_20261001.md)
 **Detail audit:** [`AUDIT_OPS_PARTNER.md`](AUDIT_OPS_PARTNER.md) · [`AUDIT_SCALE_PARTNER.md`](AUDIT_SCALE_PARTNER.md) · [`AUDIT_PROMPTS_PARTNER.md`](AUDIT_PROMPTS_PARTNER.md) · [`AUDIT_RUN_TESTS_PARTNER.md`](AUDIT_RUN_TESTS_PARTNER.md) · [`RESEARCH_BUDGET_20260929.md`](RESEARCH_BUDGET_20260929.md)
+
+---
+
+## 💰 KOREKSI PENTING: TOKEN PIPELINE ≠ TOKEN YANG DITAGIH (2026-10-03)
+
+**Ini bisa membuat angka biaya Bab IV salah ~5× kalau tertukar. Jangan dikutip campur.**
+
+Diukur pada run berbayar nyata (`EXP-20261002-279`, 1 issue × 3 strategi, model
+`cbai/deepseek-v4.1-flash`):
+
+| Bacaan | Nilai | Sumber |
+|---|---|---|
+| `input_tokens_total` (pipeline) | **1.204.978** | `generation_result.csv` |
+| prompt tokens **yang ditagih** | **6.326.176** | bill 9router |
+| **Rasio** | **5,25×** | |
+
+**Sebabnya bukan bug, dan bukan sesi agent yang mencemari.** Kedua angka mengukur
+hal berbeda:
+
+- Pipeline mencatat **token BARU per turn** (isi request itu saja).
+- Provider menagih **seluruh konteks yang dikirim ulang tiap request**. Konteks
+  tumbuh monoton, jadi request ke-N membawa turn 1..N.
+
+Terbukti dari trajectory: konteks kumulatif `review` = **12,5 juta char** vs
+`direct` 1,5 juta → rasio ~5–6×, cocok dengan 5,25×. Kalau ini cuma pencemaran
+sesi agent, rasionya akan mengikuti rasio **request** (1,53×), bukan 5,25×.
+
+**Aturan pakai:**
+
+1. **Jangan** mengutip `input_tokens_total` sebagai "token yang dibayar". Untuk
+   biaya, **bill yang menang** (`tools/read_actual_bill.py`).
+2. **Biaya tumbuh ~kuadratik** terhadap jumlah turn (N turn → ~N²/2 token konteks).
+   Ini menjelaskan kenapa `review` (54 turn) jauh lebih mahal dari `direct` (30
+   turn) — bukan 1,8×, tapi lebih. **Turn adalah variabel biaya utama, bukan token.**
+3. `input_tokens_cached` **tidak** berarti hemat: route `cbai/` menagih cache hit
+   **sepenuhnya** (terverifikasi 2026-09-30, `charged/full-price = 1.0000`).
+   `review` punya 454.272 cached dari 672.546 — semuanya tetap dibayar penuh.
+
+### Best practice (dari dokumentasi primer OpenAI & Anthropic)
+
+- **Request = jumlah turn assistant**, bukan entri `trajectory.jsonl`.
+  Tool call dieksekusi **lokal** (harness), jadi **gratis**; tapi hasilnya dikirim
+  balik sebagai `tool_result` dan itu **request baru yang ditagih penuh**.
+  Terukur: `review` punya **162 entri** tapi hanya **54 request** (108 entri
+  adalah hasil tool). Menghitung dari total entri → **over-count 3×**.
+  Field yang benar: `type == "assistant"` (bukan `kind`).
+- Eksekusi tool lokal tidak menagih, **round trip-nya yang menagih**. Kutipan
+  Anthropic: *"every tool call is a round trip: the model asks, you execute, you
+  report back, the model continues"*; OpenAI: *"Make a second request to the model
+  with the tool output"*.
+- Batasi **jumlah turn** (sudah: cap 200) karena efek kuadratiknya.
+- **Selalu** rekonsiliasi ke bill; jeda jendela harus mencakup **setiap** attempt.
+
+### Uji `--resume` end-to-end (2026-10-03, run berbayar, interrupt sungguhan)
+
+**Hasil: resume BEKERJA.** Ctrl-C di tengah `review` → resume:
+
+| Bukti | Hasil |
+|---|---|
+| Skip yang selesai | `direct` **SKIP**, `planning` **SKIP** |
+| Retry yang interrupted | `review` **RUN** (baris `INTERRUPTED` + `error_type`) |
+| Penyelesaian | `review` **INTERRUPTED → VALID** (patch 4.824 char) |
+| Anti-duplikat | 3 baris, 3 unik |
+| Akuntansi utuh | `direct` 417.772 & `planning` 134.729 token **tidak hilang** |
+| Kelengkapan | `Completeness: 3/3 runs completed` |
+| Biaya | **$0,090187** (akuntansi pipeline) |
+
+**2 bug ditemukan uji ini, keduanya di sekeliling happy path — sudah diperbaiki
+(commit `e618b8d`):**
+
+1. **`INCOMPLETE.json` tidak ditulis saat interrupt.** Cek kelengkapan ada **setelah**
+   try/except, jadi `raise` melompatinya → run terputus **terlihat lengkap**.
+   Diperbaiki: diekstrak jadi `_check_completeness()`, dipanggil juga dari jalur
+   interrupt (lewat `_check_completeness_quietly()` agar tidak menutupi interrupt).
+2. **Jendela tagihan attempt terakhir tidak pernah tercatat.** Fix B2 membuat resume
+   **append**, tapi hanya melipat attempt yang **sudah ada di file** → daftar selalu
+   tertinggal satu. Sweep yang selesai tanpa resume lagi **tidak merekam jendelanya
+   sama sekali**. Diperbaiki: attempt dilipat saat sweep **selesai**.
+
+**Catatan resolusi jam:** `attempts` di-dedupe berdasarkan `started_utc`
+(resolusi **detik**). Dua attempt dalam detik yang sama **melebur jadi satu** —
+benar untuk kunci itu, dan sebabnya test harus menggeser jam, bukan menjalankan
+dua kali beruntun.
+
+**Setelah interrupt, jalankan `tools/clean_repos.py`.** Runner membersihkan
+**sebelum** tiap strategi tapi **tidak sesudah**, jadi run yang diinterrupt
+meninggalkan checkout kotor (terukur: `django__django-10914`, 7 path). Preflight
+menangkapnya — itulah gunanya gate.
+
+---
+
+## ✅ PERBAIKAN `--resume` (2026-10-02/03) — ringkas
+
+| # | Perbaikan | Bukti |
+|---|---|---|
+| 1 | **Opsi D: retry `NO_DIFF` maks 1×** (bukan selamanya) | 299 kombinasi tanpa-patch di 6.125 baris; `verify_resume_logic.py` hijau |
+| 2 | **Predikat digabung** (opsi B) — `_is_finished_entry` dihapus | rawan drift hilang |
+| 3 | **`KeyboardInterrupt` ditangkap** → baris `INTERRUPTED` + `error_type` | sebelumnya hilang **tanpa jejak** (`except Exception` tidak menangkapnya) |
+| 4 | **Interrupt menulis 4 artefak** (CSV, stats, report, manifest) | sebelumnya **hanya CSV** — diukur dengan Ctrl-C nyata |
+| 5 | **Kelengkapan jalan saat interrupt** | sebelumnya `raise` melompatinya |
+| 6 | **`attempts` direkam saat selesai** | sebelumnya tertinggal satu attempt |
+| 7 | **Gate preflight meneruskan `--limit`** | sebelumnya memeriksa 50 repo walau batch 10 |
+| 8 | **`.tr_probe_observed.json` di-ignore** | berawalan titik → lolos dari `_*.json` |
+
+**Koreksi diagnosis (penting agar tidak diulang):**
+
+- Klaim "angka `NO_DIFF` = 144 baris / ~$10" **SALAH** — dihitung dari semua
+  `*.jsonl` **termasuk agregat** `predictions.jsonl`, jadi run terhitung 2×.
+  Angka benar: **299 kombinasi** (murni per-file strategi, agregat dibuang).
+- Klaim "M2 = `failed`/`never_ran` **tertukar**" **SALAH**. Reproduksi skenario
+  menunjukkan label **sudah benar**. Cacatnya: `expected` dihitung dari **batch sesi
+  ini** sedangkan `completed` dari **seluruh savepoint** → `completed > expected`
+  (terukur `3/1`) → alarm menyala **selalu**.
+- Klaim "selisih biaya -67% karena sesi agent" **hanya sebagian benar** — sebagian
+  besar adalah perbedaan definisi token (5,25×), lihat §Koreksi di atas.
+
+**Pelajaran proses:** uji ulang membongkar **3 dari 4** diagnosis awal. Angka
+"terlihat masuk akal" bukan bukti; yang membuktikan hanya pengukuran ulang dari
+sumber yang benar.
 
 > ⛔ **GATE — WAJIB KONFIRMASI USER:** Jangan jalankan run besar (50 issue / multi-jam)
 > tanpa persetujuan eksplisit dari user. Boleh tanpa konfirmasi: unit test, smoke test
@@ -215,7 +335,7 @@ Sweep **tidak** mengulang dari nol; savepoint per run dibaca dan yang sudah sele
 | **Budget tool-turn** | ✅ Done | `agents/budget.py` — total sama per strategi, sekarang **200** (skala referensi) |
 | **Pre-flight validator** | ✅ Done | `tools/preflight_modal.py` — replikasi kontrak Modal secara lokal |
 | **Rate-limit handling** | ✅ Done | Backoff 429 + circuit breaker |
-| **Test suite** | ✅ Done | **453 lulus** (dari 426). **Lulus di env bersih MAUPUN env kotor** |
+| **Test suite** | ✅ Done | **498 lulus** (dari 426). **Lulus di env bersih MAUPUN env kotor** |
 | **Thinking mode** | ✅ **ON** | `deepseek` thinking + effort `medium`; `*_reasoning.md` ditulis per role |
 | **MAX_TOKENS** | ✅ **65536** | Naik dari 32768; reasoning + jawaban berbagi anggaran ini |
 | **Rate card cbai** | ✅ **FIXED** | Diukur dari key yang BENAR (`…da2fe1`), bukan `…b04880` |
@@ -1187,6 +1307,8 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 20. **Gate yang bisa hijau sementara suite merah lebih buruk daripada tidak ada gate.** `tools/readiness_report.py` versi pertama menjalankan 7 check konfigurasi dan **tidak menjalankan test suite**, lalu mencetak "READY". Ia mengubah "aku belum memeriksa" menjadi "aku sudah periksa dan aman". Sekarang ia menjalankan suite **pertama**, dan `tools/_prove_gate_fails.py` membuktikan gate itu **bisa gagal** (menyuntikkan test rusak → NOT READY).
 21. **Test yang tidak bisa gagal adalah dekorasi.** Aku menulis dua versi test penjaga yang **lulus meski perbaikannya dimatikan**: yang pertama mem-assert identitas class modul (ternyata bergantung **urutan import**), yang kedua dijalankan **sendirian** sehingga tidak ada yang bisa dideteksi. Selalu buktikan test baru **bisa gagal** sebelum mempercayainya — `tools/_prove_containment.py` dan `tools/_prove_gate_fails.py` melakukannya secara otomatis.
 22. **Fixture teardown pytest berjalan TERBALIK.** Fixture yang dideklarasikan **setelah** `monkeypatch` di signature dibongkar **lebih dulu**, jadi fixture yang me-reload config akan me-reload **sebelum** env dipulihkan → kebocoran tetap ada. Jangan bergantung pada urutan fixture untuk hal yang urutannya penting; lakukan pemulihan di dalam `finally` test itu sendiri.
+23. **Token pipeline ≠ token yang ditagih (beda ~5×).** `input_tokens_total` mencatat token **baru per turn**; provider menagih **konteks penuh yang dikirim ulang tiap request**. Terukur `EXP-20261002-279`: pipeline 1,20 juta vs bill **6,33 juta** = **5,25×**. Ini **bukan** bug dan **bukan** pencemaran sesi agent — terverifikasi karena rasio konteks kumulatif (12,5 juta char `review` vs 1,5 juta `direct`) cocok, sedangkan rasio request hanya 1,53×. **Implikasi:** biaya ~**kuadratik** terhadap jumlah turn; **turn adalah variabel biaya utama, bukan token**. Untuk angka biaya, **bill yang menang**. Lihat §"Koreksi penting: token" di atas.
+24. **Hitung request dari turn assistant, bukan dari entri trajectory.** Tool call dieksekusi **lokal** oleh harness (provider hanya menyediakan model), jadi eksekusi tool **gratis** — tapi hasilnya dikirim balik sebagai `tool_result` dan itu **request baru yang ditagih penuh**. `review` punya **162 entri** trajectory tapi hanya **54 request**; 108 sisanya hasil tool. Menghitung dari total entri → **over-count 3×**. Field yang benar: `type == "assistant"`. Penyebab mudah salah: saya sempat memakai `kind` yang tidak ada (fieldnya `type`), sehingga hitungannya kacau dua kali.
 
 ---
 
@@ -1241,7 +1363,7 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 ---
 
-**Last working state:** commit `1597379` — **426 test lulus**. Pipeline **SIAP run 50 issue** setelah 2 audit partner (5 blocker diperbaiki). Budget **200/200/200**, revisi **48 (4 putaran × 6+6)**. Preflight **50/50 pristine**.
+**Last working state:** commit `e618b8d` — **498 test lulus**, gate **READY 9/9**, preflight **50/50 pristine**. Pipeline **SIAP run 50 issue**. Budget **200/200/200**, revisi **48 (4 putaran × 6+6)**. `--resume` **terbukti bekerja** di run berbayar nyata (interrupt sungguhan → resume → 3/3 lengkap, 0 duplikat).
 
 **Langkah berikutnya (prioritas):**
 
@@ -1250,14 +1372,27 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
    python tools/run_final_sweep.py
    ```
    Kalau terputus: `python tools/run_final_sweep.py --resume --exp-id <EXP-id>`.
+   **Setelah interrupt, jalankan `python tools/clean_repos.py`** sebelum resume —
+   runner membersihkan sebelum tiap strategi tapi tidak sesudah.
 
 2. **Setelah sweep selesai:**
    - `python tools/check_sweep_state.py --exp <EXP-id>` — setiap run hadir?
    - Evaluasi Modal → `python tools/eval_modal.py ...`
    - `python tools/read_actual_bill.py --since ... --until ... --model cbai/deepseek-v4.1-flash --compare results/<EXP-id>` — RQ3, cross-check biaya.
+   - ⚠️ **Saat melaporkan biaya: pakai angka BILL, jangan `input_tokens_total`.**
+     Keduanya beda ~5× dan mengukur hal berbeda — lihat §"Koreksi penting: token".
+     Jendela bill ada di `logs/sweep_started.json` → `attempts` (satu per attempt).
 
 3. **Masalah validitas review (78% → 12,5%)** — **sudah dikoreksi**, tidak perlu keputusan lagi. Angka sebenarnya: **1 dari 8 (12,5%)** penolakan yang bergantung pada file test. Lihat §"Koreksi" baris 276-304.
 
 4. **Ablation reviewer (opsional, untuk tesis):** `review` tanpa ronde review = `planning`. Kalau ketiga strategi seri di 50 issue, ablation ini memisahkan "review berguna" dari "review tidak berpengaruh".
 
 5. **`11019`** sudah dijawab: **batas kapabilitas**, bukan budget (0 truncation, act berhenti di ~20% anggaran, patch VALID tapi salah semantik). Tidak perlu run tambahan.
+
+6. **M3 (`--only N`) — BELUM dikerjakan, dan sifatnya fitur bukan perbaikan.** Kontrol
+   batch sadar-resume: jalankan maks N run **yang belum selesai** (dihitung setelah
+   skip), bukan N issue pertama seperti `--limit`. Berguna untuk melanjutkan sweep
+   secara bertahap (mis. 30 run dulu, cek, baru lanjut); `--limit` tidak bisa
+   dipakai untuk itu karena diukur dalam **issue**, bukan **run tersisa**. Untuk
+   sweep 150 run sekali jalan, tidak dibutuhkan. Rencana lengkap ada di
+   `docs/PLAN_RESUME_FIX_20261002.md` §Langkah 4.
