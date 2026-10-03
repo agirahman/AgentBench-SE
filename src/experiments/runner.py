@@ -527,6 +527,43 @@ def _merge_csv_rows(csv_path: str, new_rows: list[dict],
     merged: dict[tuple[str, str], dict] = {}
     loaded_from_csv = False
 
+    # The strategies this experiment legitimately has: the ones requested now,
+    # plus any strategy that actually ran (every run -- success OR error -- appends
+    # a savepoint, so its ``<strategy>.jsonl`` exists; see the append sites in
+    # run_experiments). A CSV row whose strategy is in NEITHER set is suspicious: it
+    # can be a half-written last line whose strategy name was cut (e.g. "dire" for
+    # "direct"), OR simply a strategy whose savepoint is missing.
+    #
+    # We DETECT and WARN, but never DROP. This function exists to PREVENT data loss;
+    # a default that deletes rows is the wrong direction here. Measured across 29
+    # real CSVs (336 rows): strategy is only ever direct/planning/review, ZERO ghost
+    # rows, and zero files lack a trailing newline -- the CSV is written atomically
+    # (_write_csv_atomically), so truncation is not a real failure mode. A DROP
+    # filter would therefore guard a corruption that never happens while DISCARDING
+    # real rows when a ``<strategy>.jsonl`` goes missing (measured: deleting
+    # planning.jsonl/review.jsonl while their CSV rows remain). Keeping the row
+    # loses nothing; a reader can still tell, and the warning names what to check.
+    known_strategies: set[str] = {str(s) for s in (strategies or [])}
+    if pred_dir is not None:
+        try:
+            known_strategies |= {
+                p.stem for p in Path(pred_dir).glob("*.jsonl")
+                if p.name != "predictions.jsonl"   # the aggregate, not a strategy
+            }
+        except OSError:
+            pass
+    # Only warn when we can actually judge. That needs a pred_dir we can READ
+    # savepoints from -- it must EXIST, not merely be given: a Path to a missing
+    # directory makes glob("*.jsonl") return nothing, so every non-requested
+    # strategy would look savepoint-less and we would warn about rows we never
+    # actually checked. It also needs a non-empty requested set. Otherwise stay
+    # silent (the old behaviour).
+    try:
+        has_readable_pred_dir = pred_dir is not None and Path(pred_dir).is_dir()
+    except OSError:
+        has_readable_pred_dir = False
+    can_warn = has_readable_pred_dir and bool(strategies)
+
     if os.path.exists(csv_path):
         for attempt, kwargs in enumerate(({}, {"on_bad_lines": "skip"})):
             try:
@@ -534,10 +571,25 @@ def _merge_csv_rows(csv_path: str, new_rows: list[dict],
                 # The header is written with a leading "[" (a pandas artifact of
                 # the original writer), so strip it before matching column names.
                 old.columns = [str(c).lstrip("[") for c in old.columns]
+                unexpected: list[tuple[str, str]] = []
                 for record in old.to_dict(orient="records"):
                     key = (str(record.get("instance_id")),
                            str(record.get("strategy")))
+                    # NEVER dropped: keep every row the CSV records.
                     merged[key] = record
+                    if can_warn and key[1] not in known_strategies:
+                        unexpected.append(key)
+                if unexpected:
+                    sample = ", ".join(f"{i}/{s}" for i, s in unexpected[:5])
+                    logger.warning(
+                        f"{csv_path}: {len(unexpected)} row(s) have a strategy that "
+                        f"is neither requested nor backed by a savepoint "
+                        f"({sample}{', ...' if len(unexpected) > 5 else ''}). This can "
+                        f"mean the CSV was truncated mid-write, OR that the matching "
+                        f"<strategy>.jsonl is missing. The row(s) are KEPT (not "
+                        f"dropped) so no data is lost -- check the savepoints and "
+                        f"decide whether they are real."
+                    )
                 loaded_from_csv = True
                 if attempt == 1:
                     logger.warning(

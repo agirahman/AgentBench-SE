@@ -1,7 +1,7 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
 **Last Updated:** 2026-10-03 (audit dokumen + verifikasi kesiapan run bertahap)
-**Status:** **SIAP run 50 issue** — bisa **bertahap** dengan `--limit <N naik> --resume` (prefix tumbuh; `--only M` hanya untuk top-up run yang belum selesai). **THINKING ON (medium)**. Budget 200/200/200, revisi **48 (4 putaran × 2 act × 6)**. `--resume` **terbukti bekerja di run berbayar nyata**. Gate **READY 9/9**, preflight **50/50 pristine**. **549 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
+**Status:** **SIAP run 50 issue** — bisa **bertahap** dengan `--limit <N naik> --resume` (prefix tumbuh; `--only M` hanya untuk top-up run yang belum selesai). **THINKING ON (medium)**. Budget 200/200/200, revisi **48 (4 putaran × 2 act × 6)**. `--resume` **terbukti bekerja di run berbayar nyata**. Gate **READY 9/9**, preflight **50/50 pristine**. **558 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
 **Active Branch:** `19/toolcall-commandcode`
 **Commit terakhir:** `5462f9b` (guard `--resume --exp-id`: tolak typo, jangan fork eksperimen berbayar), `9c91d6a` (reconcile dokumen dengan pengukuran), `b6abf88` (`--only N` untuk sweep bertahap), `e618b8d` (completeness-on-interrupt + attempts window), `38a1c57` (interrupt exports + preflight scope), `cf19d98` (resume opsi D)
 **Handoff sesi terakhir:** [`HANDOFF_20261002.md`](HANDOFF_20261002.md) · sebelumnya [`HANDOFF_20261001.md`](HANDOFF_20261001.md)
@@ -290,7 +290,7 @@ dipakai `--resume`. Kalau diimplementasikan ulang, keduanya bisa berbeda pendapa
 dan ukuran batch jadi tidak bermakna sama dengan yang benar-benar dijalankan.
 
 **Verifikasi:** 10 test (`tests/test_sweep_only_batch.py`), **7 MERAH** saat
-perbaikannya dimatikan. Suite **508 lulus saat itu** (kini **549**), gate **READY 9/9**.
+perbaikannya dimatikan. Suite **508 lulus saat itu** (kini **558**), gate **READY 9/9**.
 
 ---
 
@@ -327,6 +327,63 @@ artifacts/ logs/ predictions/ patches/" — ia hanya membuat **artifacts/** dan
 **logs/**; `patches/` dan `predictions/` dari `runner.py:989-991`.
 
 Semua guard **dikunci test yang terbukti MERAH saat guard dimatikan**.
+
+---
+
+## 🔗 Penggabungan hasil generate patch antar-batch — AMAN (2026-10-03)
+
+Sweep 5 hari = 5 ekspor CSV. Tiap sesi menulis `generation_result.csv` dari
+`all_results` (run **sesi ini** saja), jadi tanpa penggabungan, ekspor sesi ke-N
+**menimpa** sesi 1..N-1 dan menghapus patch berbayar mereka **tanpa jejak**. Ini yang
+membuat resume antar-batch aman.
+
+**Mekanisme yang melindungi data** (semua terverifikasi):
+- `_merge_csv_rows` (`src/experiments/runner.py:492`) menggabungkan CSV lama + baris sesi
+  ini, kunci `(instance_id, strategy)`, **yang baru menang** → retry **mengganti**, bukan
+  menduplikasi (duplikat dulu membuat `resolved/total` > 100%).
+- CSV ditulis **atomik** (`_write_csv_atomically` :643, temp + `os.replace` + `.bak`) →
+  truncation praktis tidak mungkin, dan `.bak` menyimpan file baik sebelumnya.
+- Savepoint JSONL mode **append** (`_append_jsonl` :407) → terakumulasi antar-batch.
+- Setiap run menulis `<strategy>.jsonl`: **sukses** :1215, **error** :1329,
+  **KeyboardInterrupt** :1391 → savepoint selalu lengkap walau CSV belum diekspor.
+- Fallback ke savepoint saat CSV rusak; kolom biaya = **`None`**, bukan `0` palsu
+  (:430-489) — supaya "tidak tercatat" ≠ "nol".
+
+**Bukti pengukuran:**
+- **29 CSV nyata** diperiksa: nilai `strategy` hanya `direct`/`planning`/`review`;
+  **nol** baris strategi tak dikenal; **nol** CSV tanpa newline akhir.
+- `tools/verify_merge_safety.py`: **no corruption** pada 4 eksperimen
+  (`EXP-20260929-003/022`, `EXP-20260930-030`, `EXP-20260928-003`) — round-trip
+  byte-identical + manifest inputs faithful.
+- Verifikasi independen skenario resume: batch 1 (6 baris) + batch 2 (6 baris) = **12
+  baris**, batch 1 **utuh** (token/cost tidak berubah), **0 duplikat**; retry → 1 baris,
+  yang baru menang; CSV rusak → fallback savepoint dengan cost `None`.
+- **9 test** baru di `tests/test_merge_csv_rows.py` mengunci kontrak ini (sebelumnya
+  fungsi ini **tanpa test pytest** — hanya skrip manual round-trip `new_rows=[]`). Tiap
+  test dikunci **mutasi bertarget** (MERAH saat logika relevan dirusak, sumber dipulihkan
+  byte-for-byte).
+
+### ⚠️ KEPUTUSAN: filter "ghost strategy" DITOLAK (jangan diulang)
+
+Sempat ditambahkan filter untuk **MEMBUANG** baris CSV yang `strategy`-nya bukan salah
+satu dari `{strategies}` ∪ `{stem *.jsonl}`, dengan alasan "nama strategi terpotong
+akibat crash saat menulis CSV". **Reviewer independen menilai TIDAK LAYAK**, dan bukti
+menguatkan:
+
+- Baris hantu itu **tidak pernah terjadi**: 29 CSV nyata (336 baris) → 0 baris hantu,
+  0 file tanpa newline akhir.
+- CSV ditulis **atomik**, jadi truncation praktis tidak mungkin.
+- Filter itu justru **membuang DATA NYATA** kalau `<strategy>.jsonl` hilang sementara
+  barisnya masih di CSV (terukur: `planning`/`review` hilang dari hasil merge).
+
+**Keputusan final: KEEP + WARN, bukan DROP.** Baris **tidak pernah** dibuang karena
+keanggotaan strategi; kalau ada strategi tak dikenal, barisnya **dipertahankan** dan
+**diperingatkan** (warning menyebut instance/strategi + kata "KEPT"). Warning hanya
+muncul saat kita **benar-benar bisa menilai** — `pred_dir` harus **`is_dir()`** (bukan
+sekadar ada), kalau tidak file pun lolos dan memicu warning palsu.
+
+**Pelajaran:** di fungsi yang **tujuannya mencegah kehilangan data**, default yang
+**menghapus** baris adalah arah yang **salah**.
 
 ---
 
@@ -557,7 +614,7 @@ menyuntikkan test rusak → gate melaporkan **NOT READY**, exit 1.
 
 | Verifikasi | Hasil |
 |---|---|
-| Unit test | **549 lulus** |
+| Unit test | **558 lulus** |
 | Preflight repo | **50/50 pristine** |
 | Fairness budget | **FAIR** — 200/200/200 |
 | Putaran revisi | Setiap act revisi **6+6** (kebutuhan terukur: 6) |
@@ -595,7 +652,7 @@ Sweep **tidak** mengulang dari nol; savepoint per run dibaca dan yang sudah sele
 | **Budget tool-turn** | ✅ Done | `agents/budget.py` — total sama per strategi, sekarang **200** (skala referensi) |
 | **Pre-flight validator** | ✅ Done | `tools/preflight_modal.py` — replikasi kontrak Modal secara lokal |
 | **Rate-limit handling** | ✅ Done | Backoff 429 + circuit breaker |
-| **Test suite** | ✅ Done | **549 lulus** (dari 426). **Lulus di env bersih MAUPUN env kotor** |
+| **Test suite** | ✅ Done | **558 lulus** (dari 426). **Lulus di env bersih MAUPUN env kotor** |
 | **Thinking mode** | ✅ **ON** | `deepseek` thinking + effort `medium`; `*_reasoning.md` ditulis per role |
 | **MAX_TOKENS** | ✅ **65536** | Naik dari 32768; reasoning + jawaban berbagi anggaran ini |
 | **Rate card cbai** | ✅ **FIXED** | Diukur dari key yang BENAR (`…da2fe1`), bukan `…b04880` |
@@ -1638,7 +1695,7 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 ---
 
-**Last working state:** commit M3 (`--only`) — **549 test lulus**, gate **READY 9/9**, preflight **50/50 pristine**. Pipeline **SIAP run 50 issue**, bisa **bertahap** dengan `--limit <N naik> --resume` (prefix tumbuh; `--only M` hanya untuk top-up). Budget **200/200/200**, revisi **48 (4 putaran × 6+6)**. `--resume` + interrupt + `--only` **terbukti bekerja** di run berbayar nyata (`EXP-20261002-542`) — lihat §"Verifikasi end-to-end".
+**Last working state:** commit M3 (`--only`) — **558 test lulus**, gate **READY 9/9**, preflight **50/50 pristine**. Pipeline **SIAP run 50 issue**, bisa **bertahap** dengan `--limit <N naik> --resume` (prefix tumbuh; `--only M` hanya untuk top-up). Budget **200/200/200**, revisi **48 (4 putaran × 6+6)**. `--resume` + interrupt + `--only` **terbukti bekerja** di run berbayar nyata (`EXP-20261002-542`) — lihat §"Verifikasi end-to-end".
 
 **Langkah berikutnya (prioritas):**
 
