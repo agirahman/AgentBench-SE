@@ -229,18 +229,34 @@ def select_batch_for_only(
             jsonl = pred_dir / f"{s}.jsonl"
             if not jsonl.exists():
                 continue
-            with open(jsonl, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    iid = entry.get("instance_id")
-                    if iid and iid not in seen:
-                        seen.append(iid)
+            # Reading a savepoint is BEST-EFFORT: a jsonl that cannot be read must
+            # never kill the tool while it is deciding what to run. Three shapes
+            # crashed with a raw traceback before this wrap (measured):
+            #   * jsonl is a DIRECTORY -> open() raises PermissionError [WinError 5]
+            #   * jsonl has invalid UTF-8 -> the read raises UnicodeDecodeError
+            #     (raised during ITERATION, not at open(), so the try must wrap the
+            #     whole `with`, not just the open call)
+            #   * a line is valid JSON but not an object (e.g. `[1,2,3]` or `"s"`)
+            #     -> entry.get raises AttributeError
+            # An unreadable file simply contributes no ids (treated as empty); a
+            # non-object line is skipped like any other unparseable line.
+            try:
+                with open(jsonl, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(entry, dict):
+                            continue
+                        iid = entry.get("instance_id")
+                        if iid and iid not in seen:
+                            seen.append(iid)
+            except (OSError, UnicodeDecodeError):
+                continue
         # Deterministic: savepoint order is the run order, but sort to be safe
         # against a partially written file.
         return sorted(seen)
@@ -256,8 +272,28 @@ def select_batch_for_only(
         chosen = candidates[:n_issues]
         return chosen, len(chosen) * len(strategies), len(candidates) * len(strategies)
 
+    def _safe_existing_ids(path: Path) -> set[str]:
+        """``_load_existing_ids`` that never raises on a corrupt jsonl.
+
+        ``_load_existing_ids`` (src/experiments/runner.py:342) reads the file with no
+        guard, so the same corrupt shapes that crashed the two functions above crash
+        HERE too -- reached once the experiment has at least one savepoint, via this
+        call site. Measured: predictions/planning.jsonl as a DIRECTORY -> PermissionError
+        at runner.py:373, rc=1; and a valid-JSON-but-non-object line -> AttributeError
+        from ``entry.get`` at runner.py:382, rc=1. runner.py must not be touched, so
+        the guard lives at the call site. Any of these yields the empty set, the
+        conservative reading ("nothing known done" -> the run is retried rather than
+        silently skipped). AttributeError is caught narrowly because the only ``.get``
+        calls in that loader are on parsed JSON rows, so a non-dict row is its sole
+        cause here.
+        """
+        try:
+            return _load_existing_ids(str(path))
+        except (OSError, UnicodeDecodeError, AttributeError):
+            return set()
+
     done_per_strategy = {
-        s: _load_existing_ids(str(pred_dir / f"{s}.jsonl")) for s in strategies
+        s: _safe_existing_ids(pred_dir / f"{s}.jsonl") for s in strategies
     }
     key = _resume_key("", MODEL, THINKING == "true")
 
@@ -281,6 +317,52 @@ def select_batch_for_only(
         budget -= n
 
     return chosen, sum(outstanding(i) for i in chosen), cumulative
+
+
+def _experiment_has_savepoints(exp_id: str | None, strategies: list[str]) -> bool:
+    """True if the experiment already records at least one instance.
+
+    This mirrors the ``recorded_ids()`` predicate inside ``select_batch_for_only``:
+    an experiment "has savepoints" when any of its ``predictions/<strategy>.jsonl``
+    files holds a row with an ``instance_id``. It decides whether ``--issues`` still
+    does something under ``--only`` (see the warning in ``main``): with no savepoints
+    the candidate pool IS ``--issues``, so the flag is used; with savepoints the batch
+    comes from the experiment's own records and ``--issues`` is inert.
+
+    Kept as a small standalone check so ``select_batch_for_only`` itself is not
+    touched (its batch-sizing logic must not change).
+    """
+    if not exp_id:
+        return False
+    pred_dir = ROOT / "results" / exp_id / "predictions"
+    if not pred_dir.is_dir():
+        return False
+    for s in strategies:
+        jsonl = pred_dir / f"{s}.jsonl"
+        if not jsonl.exists():
+            continue
+        # Same best-effort read as recorded_ids() above: an unreadable jsonl (a
+        # DIRECTORY -> PermissionError, or invalid UTF-8 -> UnicodeDecodeError, which
+        # surfaces while ITERATING the handle) must not crash the tool. Such a file
+        # simply contributes no savepoint. A valid-JSON-but-non-object line would make
+        # entry.get raise AttributeError, so it is skipped too.
+        try:
+            with open(jsonl, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(entry, dict):
+                        continue
+                    if entry.get("instance_id"):
+                        return True
+        except (OSError, UnicodeDecodeError):
+            continue
+    return False
 
 
 def build_cmd(
@@ -322,7 +404,8 @@ def build_cmd(
     # Resume support. Without these two flags a restart creates a NEW experiment
     # directory and re-runs all 150 runs -- the completed work is on disk but never
     # reused, which at ~14 hours and ~$7-11 is the most expensive possible failure
-    # mode. The runner already implements the skip (runner.py:742-750) and main.py
+    # mode. The runner already implements the skip (the resume-skip loop in
+    # src/experiments/runner.py, which consults ``_load_existing_ids``) and main.py
     # already exposes the flags (main.py:64-80); this wrapper simply was not passing
     # them through. Found by a partner audit (docs/AUDIT_OPS_PARTNER.md, blocker B1).
     #
@@ -366,6 +449,147 @@ def main() -> int:
               file=sys.stderr)
         return 2
 
+    # --resume pointing at something that is not a REAL experiment is a TYPO, and it
+    # used to succeed silently. Round 1 only closed the LITERAL case (EXP-TYPO-XXXX);
+    # a reviewer then measured that the guard still leaked, because its predicate asked
+    # "is this an existing directory" rather than "is this an experiment". Measured
+    # (read-only, --dry-run) -- every one of these exited 0 and LAUNCHED a sweep:
+    #
+    #   --exp-id "   "        rc=0  LAUNCHED=YES   <- whitespace trims to results/
+    #   --exp-id .            rc=0  LAUNCHED=YES   <- resolves to results/
+    #   --exp-id ..           rc=0  LAUNCHED=YES   <- resolves to ROOT
+    #   --exp-id /            rc=0  LAUNCHED=YES   <- absolute path
+    #   --exp-id C:\Windows   rc=0  LAUNCHED=YES   <- absolute path (Windows)
+    #   --exp-id csv          rc=0  LAUNCHED=YES   <- an existing non-experiment dir
+    #
+    # Path(ROOT/"results") / ".." is ROOT; a path with a drive/root discards the whole
+    # left side on Windows; trailing spaces are trimmed by the OS. Each made is_dir()
+    # True, so the guard passed -- and the runner then populated that location and ran
+    # PAID jobs into it. The directories came from three places, not one:
+    # create_experiment_dir() mkdirs artifacts/ and logs/ (src/experiment_id.py:133-138),
+    # then the runner mkdirs patches/ (src/experiments/runner.py:989) and predictions/
+    # (runner.py:990-991). That is the ORIGINAL defect again: money spent, results filed
+    # where no analysis reads them (a staged sweep is ~21 h and ~$10.8).
+    #
+    # So the predicate is "is this a REAL experiment", not "does this path exist":
+    # a bare NAME (no separators, not absolute, no surrounding space) that resolves
+    # strictly INSIDE results/ and carries an experiment marker -- predictions/ or
+    # experiment.yaml (see the marker note below) -- so a genuine experiment is never
+    # rejected.
+    #
+    # A name-pattern check (EXP-\d{8}-\d{3}) was tried here and REMOVED: it was wrong
+    # in three ways, all measured. `\d` matches Unicode digits, so the fullwidth
+    # 'EXP-２０２６１００２-２７９' -- a name generate_experiment_id() can never produce --
+    # passed. And it REJECTED real experiments: the counter is `f"{counter:03d}"`, a
+    # MINIMUM width, so the tool's own EXP-20261002-1000 fails the pattern. That id
+    # is reachable, not hypothetical: the counter increments once per main.py
+    # INVOCATION (not per run -- a 150-run sweep is ONE id), and
+    # results/experiment_index.json already shows a daily counter of 815 (20261001),
+    # so >999 is only ~185 more invocations away on a busy day. After that, a
+    # name-pattern guard would refuse to resume the tool's own directories. It also
+    # rejected custom names the tool created on purpose
+    # (results/dry_run, results/dry_run_groq, results/testing_run all have
+    # predictions/), which src/main.py:76-78 documents as valid --exp-id targets. The
+    # real-experiment predicate above covers every original leak without a name shape.
+    #
+    # Deliberately fires under --dry-run too: previewing a typo is what a dry run is
+    # for, so refusing here catches the mistake BEFORE money leaves.
+    #
+    # It does NOT need to fire without --resume, but NOT for the reason an earlier
+    # comment gave. That comment said `--exp-id X` alone re-runs into that directory;
+    # measured, that path does not exist in this tool -- build_cmd (defined below)
+    # appends `--exp-id` ONLY inside `if resume:`, so without --resume the id is
+    # DISCARDED and never reaches main.py. So the guard is simply moot there: the
+    # flag has no effect on what runs. (Do not "fix" build_cmd to pass it: a bare
+    # --exp-id would re-run everything INTO an existing experiment, overwriting it,
+    # which this staged-sweep wrapper does not want.)
+    if args.resume and args.exp_id:
+        exp_id = args.exp_id
+        # Un-resolved on purpose: this is the exact path the user would look at, and
+        # it is what the "Looked for" line prints (resolve() can normalise case or
+        # symlinks on Windows and make the message harder to match against the shell).
+        # Built OUTSIDE the try below so it is always defined for the error message;
+        # it is a pure path join and cannot raise.
+        looked_for = ROOT / "results" / exp_id
+        reason = None
+        # The WHOLE check runs inside ONE try/except, not just is_dir(). Two different
+        # failures live in here and both used to escape as a raw traceback:
+        #
+        #   * NTFS Alternate Data Stream: 'EXP-20261002-279::$DATA'.is_dir() does not
+        #     return False, stat() RAISES PermissionError [WinError 5]. Measured:
+        #     --resume --exp-id EXP-20261002-279::$DATA --only 1 --dry-run -> rc=1.
+        #   * symlink LOOP: (ROOT/"results"/exp_id).resolve() raises RuntimeError
+        #     ("Symlink loop from ..."), which is NOT an OSError, so a try that caught
+        #     only OSError still crashed. Measured with results/_loopA <-> _loopB:
+        #     --resume --exp-id _loopA --only 1 --dry-run -> rc=1, traceback at the
+        #     resolve() line.
+        #
+        # Wrapping only is_dir() left resolve() outside the guard and reintroduced the
+        # exact defect for the fifth time, so the catch is (OSError, RuntimeError) and
+        # covers EVERY filesystem call below (resolve, is_relative_to, is_dir, is_file).
+        # Any such failure means "this cannot be inspected as a path" -> not an
+        # experiment -> refuse (exit 2) with an actionable message, never a traceback.
+        try:
+            results_root = (ROOT / "results").resolve()
+            if not exp_id.strip() or exp_id != exp_id.strip():
+                reason = ("the id is blank or has surrounding whitespace; an experiment "
+                          "id is a name like EXP-20261002-279 with no spaces")
+            elif Path(exp_id).is_absolute() or Path(exp_id).anchor:
+                reason = ("the id is an absolute path; --exp-id takes a NAME under "
+                          "results/, not a location on disk")
+            elif "/" in exp_id or "\\" in exp_id:
+                reason = ("the id contains a path separator; an experiment id is a "
+                          "single directory name, never a path")
+            else:
+                resolved = (ROOT / "results" / exp_id).resolve()
+                if resolved == results_root or not resolved.is_relative_to(results_root):
+                    reason = (f"the id resolves outside results/ (to {resolved}); a typo "
+                              f"like '.' or '..' points at the whole project, not at an "
+                              f"experiment")
+                elif not looked_for.is_dir():
+                    reason = "no such experiment directory"
+                else:
+                    # An experiment is identified by EITHER marker. predictions/ is
+                    # the normal one (runner.py:991), but a run that died between
+                    # create_experiment_dir (runner.py:980) and the predictions/ mkdir
+                    # has experiment.yaml (written by on_experiment_start,
+                    # runner.py:981-988) and no predictions/ yet -- it is still a
+                    # started experiment and must be resumable. Directories that are
+                    # not experiments have neither marker (results/csv, results/verify).
+                    has_predictions = (looked_for / "predictions").is_dir()
+                    has_yaml = (looked_for / "experiment.yaml").is_file()
+                    if not has_predictions and not has_yaml:
+                        reason = ("the directory exists but is not an experiment: it "
+                                  "has neither a predictions/ directory nor an "
+                                  "experiment.yaml file")
+        except (OSError, RuntimeError) as exc:
+            reason = (f"the id cannot be inspected as a path "
+                      f"({type(exc).__name__}: {exc}); it may contain an alternate "
+                      f"data stream (name:stream), a symlink loop, or otherwise "
+                      f"illegal characters")
+        if reason is not None:
+            print(
+                f"ERROR: --resume --exp-id {args.exp_id!r}: {reason}.\n"
+                f"       Looked for: {looked_for}\n"
+                f"       Check the id for a typo. To START a new experiment instead, "
+                f"drop --resume\n"
+                f"       and use --limit N for the first batch (e.g. --limit 5).",
+                file=sys.stderr,
+            )
+            return 2
+
+    # --limit selects the first N usable issues, so N must be >= 1. Measured
+    # (read-only, --dry-run): `--limit -1` planned 147 runs and `--limit -5` planned
+    # 135, both exit 0 -- `usable[:limit]` with a negative index means "all but the
+    # last |limit|", so one stray minus sign launches almost the entire PAID sweep.
+    # `--limit 0` is refused too: `usable[:0]` is no issues at all, a no-op that still
+    # looks like a successful launch. Preview with --dry-run instead of spending.
+    if args.limit is not None and args.limit < 1:
+        print("ERROR: --limit must be at least 1 (it selects the first N usable "
+              "issues). A negative value would run nearly the whole sweep, and 0 "
+              "would run nothing.", file=sys.stderr)
+        return 2
+
     # --only counts runs REMAINING, which is undefined without an experiment to
     # measure against. Running "the first N issues" instead would silently give the
     # flag a second meaning, so refuse rather than guess.
@@ -381,6 +605,33 @@ def main() -> int:
         print("ERROR: --only and --limit both bound the batch differently "
               "(runs remaining vs first N issues). Pick one.", file=sys.stderr)
         return 2
+
+    # --only + --issues is NOT an error -- its meaning depends on whether the
+    # experiment already has savepoints, and both readings are legitimate:
+    #
+    #   * fresh experiment (no savepoints): select_batch_for_only uses `candidates =
+    #     args.issues or select_issues(None)`, so `--only 3 --issues X Y Z` means
+    #     "work the next 3 runs from THIS set" -- the issues are USED.
+    #   * existing experiment (savepoints present): the batch comes from the
+    #     experiment's own recorded issues, and `candidates` is not consulted at all
+    #     (select_batch_for_only only uses it in its fresh-experiment branch), so
+    #     `--issues` has no effect. Measured: `--resume --exp-id EXP-20261002-279
+    #     --only 3 --issues django__django-9999 --dry-run` ran the experiment's own
+    #     10924/11001, not the named 9999.
+    #
+    # An earlier round refused the combination outright. That was too strong: it
+    # rejected the fresh case, which is meaningful. So warn only where the flag is
+    # inert (the existing-experiment case), and stay silent where it does something.
+    if args.only is not None and args.issues:
+        strategies_for_check = ["direct"] if args.smoke else args.strategies
+        if _experiment_has_savepoints(args.exp_id, strategies_for_check):
+            print(
+                "WARNING: --issues is set, but this experiment already has savepoints. "
+                "--only counts the experiment's own still-INCOMPLETE runs, so the "
+                "batch comes from those, not from --issues -- the id list has no "
+                "effect here. Continuing anyway.",
+                file=sys.stderr,
+            )
 
     strategies_preview = ["direct"] if args.smoke else args.strategies
 
@@ -526,11 +777,26 @@ def main() -> int:
     # (docs/AUDIT_OPS_PARTNER.md, blocker B2): the write was unconditional.
     state_path.parent.mkdir(parents=True, exist_ok=True)
     if state_path.exists() and args.resume:
+        # Best-effort read of the previous bill window: it is a bookkeeping file, so
+        # a corrupt one must never stop the sweep from starting. Before this wrap the
+        # read could crash the tool two ways (measured on a real, non-dry-run start):
+        #   * invalid UTF-8 -> UnicodeDecodeError (NOT caught by the old OSError-only
+        #     except, so it escaped as a traceback)
+        #   * valid JSON that is not an object (e.g. `[1,2,3]`) -> AttributeError from
+        #     previous.get below
+        # Any of these means "no usable previous window": fall back to {}.
         try:
             previous = json.loads(state_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+            if not isinstance(previous, dict):
+                previous = {}
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             previous = {}
-        history = previous.get("attempts") or []
+        history = previous.get("attempts")
+        if not isinstance(history, list):
+            history = []
+        # Keep only dict rows: a hand-edited file could put a string in the list, and
+        # ``a.get`` below (and the later fold-in) assumes every row is a mapping.
+        history = [a for a in history if isinstance(a, dict)]
         # Fold the previous top-level attempt into the history if it is not there.
         if previous.get("started_utc") and not any(
             a.get("started_utc") == previous.get("started_utc") for a in history
@@ -542,12 +808,14 @@ def main() -> int:
         state["attempts"] = history
     elif state_path.exists():
         # A fresh (non-resume) sweep still must not silently destroy the record of a
-        # previous one; keep it under a dated backup.
+        # previous one; keep it under a dated backup. The read is byte-for-byte
+        # archival, so it must tolerate the same corrupt shapes as above (invalid
+        # UTF-8 raises UnicodeDecodeError, which is NOT an OSError).
         backup = state_path.with_name(
             f"sweep_started.{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
         )
         try:
-            backup.write_text(state_path.read_text(encoding="utf-8"), encoding="utf-8")
+            backup.write_bytes(state_path.read_bytes())
             print(f"  previous bill window archived: {backup.name}")
         except OSError as exc:
             print(f"  WARNING: could not archive the previous window: {exc}")

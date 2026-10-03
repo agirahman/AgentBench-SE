@@ -27,6 +27,12 @@ import pytest
 
 from tests.test_sweep_preflight_scope import _load_sweep_module
 
+# A real experiment-name shape (generate_experiment_id, src/experiment_id.py:130).
+# The guard does NOT check a name pattern (that was removed: it rejected real ids),
+# so the name itself is free -- the fixture below makes the directory acceptable by
+# giving it predictions/.
+EXP_ID = "EXP-20260101-001"
+
 
 @pytest.fixture
 def sweep_state(tmp_path, monkeypatch):
@@ -42,6 +48,13 @@ def sweep_state(tmp_path, monkeypatch):
     monkeypatch.setattr(subprocess, "call", lambda cmd, **kw: 0)
     monkeypatch.setattr(mod, "select_issues", lambda limit: ["inst-1"])
     monkeypatch.setattr(mod, "build_cmd", lambda *a, **k: ["python", "-c", "pass"])
+    # The resume tests below pass `--resume --exp-id EXP-20260101-001`. The guard
+    # requires a REAL experiment: an experiment marker (predictions/ or
+    # experiment.yaml), with no name-pattern check (see test_sweep_only_batch: it stops
+    # a typo from silently creating a new, paid-for experiment). Create that shape so
+    # these tests keep exercising the bill-window bookkeeping they are about, rather
+    # than tripping the guard first.
+    (tmp_path / "results" / EXP_ID / "predictions").mkdir(parents=True, exist_ok=True)
     return mod, tmp_path / "logs" / "sweep_started.json"
 
 
@@ -114,7 +127,7 @@ def test_two_attempts_are_both_recorded(sweep_state, monkeypatch):
     first_started = first["started_utc"]
 
     _advance_clock(mod, monkeypatch, 3600)          # an hour later, like a real resume
-    _run(mod, ["--limit", "1", "--resume", "--exp-id", "EXP-TEST-1"])
+    _run(mod, ["--limit", "1", "--resume", "--exp-id", EXP_ID])
     state = json.loads(state_path.read_text(encoding="utf-8"))
 
     attempts = state.get("attempts") or []
@@ -124,7 +137,7 @@ def test_two_attempts_are_both_recorded(sweep_state, monkeypatch):
         f"expected both attempts recorded, got {len(attempts)}: {attempts}"
     )
     assert len(set(starts)) == len(starts), f"duplicate attempt entries: {attempts}"
-    assert attempts[-1]["resumed_from"] == "EXP-TEST-1", (
+    assert attempts[-1]["resumed_from"] == EXP_ID, (
         "the resumed attempt must record what it continued"
     )
 
@@ -134,9 +147,9 @@ def test_the_attempt_is_not_recorded_twice_on_repeated_resume(sweep_state, monke
     mod, state_path = sweep_state
     _run(mod, ["--limit", "1"])
     _advance_clock(mod, monkeypatch, 3600)
-    _run(mod, ["--limit", "1", "--resume", "--exp-id", "EXP-TEST-1"])
+    _run(mod, ["--limit", "1", "--resume", "--exp-id", EXP_ID])
     _advance_clock(mod, monkeypatch, 3600)
-    _run(mod, ["--limit", "1", "--resume", "--exp-id", "EXP-TEST-1"])
+    _run(mod, ["--limit", "1", "--resume", "--exp-id", EXP_ID])
 
     state = json.loads(state_path.read_text(encoding="utf-8"))
     starts = [a["started_utc"] for a in (state.get("attempts") or [])]
@@ -153,7 +166,7 @@ def test_attempts_in_the_same_second_collapse_to_one(sweep_state):
     """
     mod, state_path = sweep_state
     _run(mod, ["--limit", "1"])
-    _run(mod, ["--limit", "1", "--resume", "--exp-id", "EXP-TEST-1"])
+    _run(mod, ["--limit", "1", "--resume", "--exp-id", EXP_ID])
 
     state = json.loads(state_path.read_text(encoding="utf-8"))
     starts = [a["started_utc"] for a in (state.get("attempts") or [])]
