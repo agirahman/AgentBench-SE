@@ -1,9 +1,9 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
 **Last Updated:** 2026-10-03 (audit dokumen + verifikasi kesiapan run bertahap)
-**Status:** **SIAP run 50 issue** — bisa **bertahap** dengan `--only N`. **THINKING ON (medium)**. Budget 200/200/200, revisi **48 (4 putaran × 2 act × 6)**. `--resume` **terbukti bekerja di run berbayar nyata**. Gate **READY 9/9**, preflight **50/50 pristine**. **510 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
+**Status:** **SIAP run 50 issue** — bisa **bertahap** dengan `--limit <N naik> --resume` (prefix tumbuh; `--only M` hanya untuk top-up run yang belum selesai). **THINKING ON (medium)**. Budget 200/200/200, revisi **48 (4 putaran × 2 act × 6)**. `--resume` **terbukti bekerja di run berbayar nyata**. Gate **READY 9/9**, preflight **50/50 pristine**. **549 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
 **Active Branch:** `19/toolcall-commandcode`
-**Commit terakhir:** `e618b8d` (completeness-on-interrupt + attempts window), `38a1c57` (interrupt exports + preflight scope), `cf19d98` (resume opsi D)
+**Commit terakhir:** `5462f9b` (guard `--resume --exp-id`: tolak typo, jangan fork eksperimen berbayar), `9c91d6a` (reconcile dokumen dengan pengukuran), `b6abf88` (`--only N` untuk sweep bertahap), `e618b8d` (completeness-on-interrupt + attempts window), `38a1c57` (interrupt exports + preflight scope), `cf19d98` (resume opsi D)
 **Handoff sesi terakhir:** [`HANDOFF_20261002.md`](HANDOFF_20261002.md) · sebelumnya [`HANDOFF_20261001.md`](HANDOFF_20261001.md)
 **Detail audit:** [`AUDIT_OPS_PARTNER.md`](AUDIT_OPS_PARTNER.md) · [`AUDIT_SCALE_PARTNER.md`](AUDIT_SCALE_PARTNER.md) · [`AUDIT_PROMPTS_PARTNER.md`](AUDIT_PROMPTS_PARTNER.md) · [`AUDIT_RUN_TESTS_PARTNER.md`](AUDIT_RUN_TESTS_PARTNER.md) · [`RESEARCH_BUDGET_20260929.md`](RESEARCH_BUDGET_20260929.md)
 
@@ -149,7 +149,7 @@ menangkapnya — itulah gunanya gate.
 | 6 | **`attempts` direkam saat selesai** | sebelumnya tertinggal satu attempt |
 | 7 | **Gate preflight meneruskan `--limit`** | sebelumnya memeriksa 50 repo walau batch 10 |
 | 8 | **`.tr_probe_observed.json` di-ignore** | berawalan titik → lolos dari `_*.json` |
-| 9 | **`--only N`** — jalankan N run berikutnya yang belum selesai | bergantung pada `--resume`; lihat §M3 |
+| 9 | **`--only N`** — jalankan N run berikutnya yang belum selesai **di dalam eksperimen itu** (top-up; **bukan** menambah issue baru) | bergantung pada `--resume`; lihat §M3 |
 
 **Koreksi diagnosis (penting agar tidak diulang):**
 
@@ -169,21 +169,37 @@ sumber yang benar.
 
 ---
 
-## 🚩 M3 — `--only N`: MENJALANKAN SWEEP BERTAHAP (2026-10-03) — SELESAI
+## 🚩 M3 — Sweep bertahap: `--limit <N naik> --resume` (dan `--only` untuk top-up) (2026-10-03) — SELESAI
 
-**Untuk apa:** sweep 150 run ~14 jam, jadi dijalankan **bertahap** — kerjakan
-sebagian, cek hasilnya, lanjut. `--limit` **tidak bisa** dipakai untuk ini karena
-diukur dalam **issue**: setelah sebagian selesai, "20 issue pertama" mungkin sudah
-dikerjakan semua, sehingga hampir tidak ada yang jalan padahal perintahnya terlihat
-meminta 20 run.
+**Untuk apa:** sweep 150 run ~21 jam (thinking ON; lihat estimasi di bawah), jadi
+dijalankan **bertahap** — kerjakan sebagian, cek hasilnya, lanjut.
+
+**Cara staging yang benar = naikkan `--limit` tiap batch + `--resume --exp-id <ID>`**
+(prefix tumbuh). `--limit` diukur dalam **issue**, jadi batch ke-2 dst cukup menaikkan
+N: `--limit 20 --resume` menjalankan issue 11-20 (runner men-skip 1-10 lewat
+`SKIP (resume)`). Yang **tidak** berguna adalah `--limit 20` **tanpa menaikkan N** di
+batch berikutnya — 20 issue pertama sudah selesai, sehingga runner men-skip semuanya
+dan hampir tidak ada yang jalan. Tapi itu **bukan** alasan menolak `--limit`: cukup
+**naikkan N** setiap batch, dan prefix yang tumbuh justru **cara yang benar**
+(terbukti end-to-end: `--limit 10` → `--limit 20 --resume` → … → `--limit 50 --resume`,
+tepat 10 issue baru tiap hari, 5 hari berturut-turut PASS).
+
+**`--only M` BUKAN alat staging** — ia dipakai untuk **top-up**: menambal run yang
+**belum selesai** di dalam issue yang **sudah terekam** di eksperimen itu (mis.
+terputus di tengah, sebagian strategi belum jalan). Ia **tidak bisa menambah issue
+baru** — cakupan sengaja dibatasi ke instance yang sudah ada di EXP (lihat bagian
+"`--only N` TIDAK BISA melanjutkan ke issue BARU" di bawah).
 
 **Cara pakai:**
 ```bash
-# lanjutkan EXP, kerjakan 15 run berikutnya yang belum selesai
+# STAGING: lanjutkan ke issue baru — naikkan --limit tiap batch
+python tools/run_final_sweep.py --limit 20 --resume --exp-id EXP-XXXX
+
+# TOP-UP: tambal run yang belum selesai di issue yang sudah terekam
 python tools/run_final_sweep.py --resume --exp-id EXP-XXXX --only 15
 ```
-Artinya: *"lanjutkan dari yang tersisa, kerjakan 15 run berikutnya, lewati yang
-sudah selesai"* — persis seperti yang diminta.
+Yang kedua berarti: *"kerjakan 15 run berikutnya yang belum selesai, lewati yang sudah
+selesai"* — untuk **top-up** dalam eksperimen, bukan untuk menambah issue.
 
 **`--only` WAJIB didampingi `--resume`.** "Belum selesai" tidak terdefinisi tanpa
 direktori eksperimen untuk dibaca, jadi `--only` tanpa `--resume` → **exit 2**
@@ -220,12 +236,50 @@ menulis *"at most N runs"* — **salah**; sudah dikoreksi, dan dikunci test
 pemborosan.
 
 **⚠️ Batch PERTAMA tidak bisa pakai `--only`** (butuh `--exp-id`, yang belum ada).
-Gunakan `--limit N` untuk batch pertama, lalu `--only` untuk selanjutnya:
+
+**⚠️⚠️ `--only N` TIDAK BISA melanjutkan ke issue BARU.** Ini koreksi resep yang
+sebelumnya salah di sini. `select_batch_for_only` membatasi cakupan ke instance yang
+**sudah terekam** di eksperimen itu (`run_final_sweep.py:202-207`, `in_experiment =
+recorded_ids()` di :264). Jadi setelah batch 1 (10 issue) selesai **penuh**,
+`--resume --exp-id <ID> --only 30` → **"Nothing to do: all 0 run(s) … are already
+complete"** (terukur, `--dry-run`). `--only` hanya menghitung **run yang belum selesai
+DALAM issue yang sudah terekam** — ia sengaja tidak bisa memperluas (melanjutkan ≠
+memperluas; lihat komentar `select_batch_for_only`).
+
+**Cara melanjutkan ke issue baru = prefix yang tumbuh:** `--limit <N naik> --resume
+--exp-id <ID>`. Runner men-skip issue yang sudah selesai (`runner.py:1033-1036`
+`SKIP (resume)`), sehingga hanya issue baru yang jalan.
 
 | Tahap | Perintah | Satuan |
 |---|---|---|
 | Batch 1 | `run_final_sweep.py --limit 10` | **issue** (10 issue = 30 run) |
-| Batch 2+ | `run_final_sweep.py --resume --exp-id <ID> --only 30` | **run** |
+| Batch 2+ (lanjut issue baru) | `run_final_sweep.py --limit <N naik> --resume --exp-id <ID>` | **issue** |
+| Top-up dalam eksperimen (mis. terinterupsi) | `run_final_sweep.py --resume --exp-id <ID> --only <M>` | **run** |
+
+**Kapan `--only` berguna:** hanya untuk **menambal run yang belum selesai dalam issue
+yang sudah terekam** — mis. run terputus di tengah (sebagian strategi belum jalan).
+Untuk itu `--only` tepat, karena ia menghitung run sisa dan memakai cakupan eksperimen.
+Untuk **menambah** issue, pakai `--limit <N naik> --resume`.
+
+**Terbukti end-to-end 5 hari berturut-turut** (stub lokal, bukan run berbayar).
+`--limit` menghitung **issue**, bukan run — pada sweep 3-strategi 10 issue = 30 run
+(tabel di atas); stub memakai 1 strategi, jadi 10 issue = 10 run di sana:
+```
+HARI 1  --limit 10 + fresh   -> 10 issue baru (1-10)   PASS
+HARI 2  --limit 20 + resume  -> 10 issue baru (11-20)  PASS
+HARI 3  --limit 30 + resume  -> 10 issue baru (21-30)  PASS
+HARI 4  --limit 40 + resume  -> 10 issue baru (31-40)  PASS
+HARI 5  --limit 50 + resume  -> 10 issue baru (41-50)  PASS
+direktori eksperimen dibuat: 1 (harus 1)
+```
+
+**⚠️ Caveat `--limit <N> --resume`:** wrapper **melaporkan "runs" terlalu tinggi** — ia
+menghitung `len(issues) × len(strategies)` tanpa tahu berapa yang akan di-skip runner.
+Terukur: `--limit 20 --resume` pada eksperimen yang sudah punya 10 issue → tampil
+**"runs: 60"**, padahal yang benar-benar jalan **30**. **Tidak berbahaya** (tidak akan
+melebihi), tapi **jangan** pakai angka itu untuk estimasi biaya — **hitung manual**
+`(N − jumlah issue yang sudah selesai) × 3`. (`--only` **tidak bisa** dipakai di sini:
+ia tidak menambah issue baru, lihat di atas.)
 
 **Di antara batch: `python tools/clean_repos.py`** — runner membersihkan *sebelum*
 tiap strategi, **tidak sesudah**; checkout kotor membuat `git diff` menangkap
@@ -236,7 +290,43 @@ dipakai `--resume`. Kalau diimplementasikan ulang, keduanya bisa berbeda pendapa
 dan ukuran batch jadi tidak bermakna sama dengan yang benar-benar dijalankan.
 
 **Verifikasi:** 10 test (`tests/test_sweep_only_batch.py`), **7 MERAH** saat
-perbaikannya dimatikan. Suite **508 lulus saat itu** (kini **510**), gate **READY 9/9**.
+perbaikannya dimatikan. Suite **508 lulus saat itu** (kini **549**), gate **READY 9/9**.
+
+---
+
+## 🛡️ Guard `--resume --exp-id` (commit `5462f9b`) — ringkas
+
+Commit **`5462f9b`** ("stop `--resume --exp-id` from silently forking a paid experiment").
+
+**Masalahnya:** `--resume --exp-id <typo>` **tidak ditolak**. `runner.py:979-980`
+melakukan `exp_id = experiment_id or generate_experiment_id()` lalu
+`create_experiment_dir(...)` yang **membuat** direktori → run berbayar jalan di
+eksperimen salah. Terukur: `--resume --exp-id EXP-TYPO-XXXX --only 3 --dry-run`
+→ **exit 0**, "150 run(s) total; 147 already done" (kedua angka salah: direktori tidak
+ada, dan "147 already done" dihitung dari kandidat 50 issue, bukan dari eksperimen).
+
+**Predikat final** (berurutan): blank/whitespace → absolut → ada separator path →
+harus resolve **di dalam** `results/` → harus ada → harus punya `predictions/`
+**ATAU** `experiment.yaml`. Semua panggilan filesystem dibungkus
+`except (OSError, RuntimeError)` sehingga **tidak ada input** yang menghasilkan
+traceback (termasuk ADS `name::$DATA` dan symlink loop).
+
+**Guard lain:** `--limit` harus ≥ 1 (`--limit -1` dulu **merencanakan** 147 run berbayar — terukur read-only dengan `--dry-run`);
+`--only` + `--issues` kini **warning** (bukan error) karena pada eksperimen baru
+`--issues` memang dipakai sebagai kandidat.
+
+**6 putaran worker/reviewer** — tiap putaran menemukan cacat nyata: guard tidak ada →
+predikat terlalu longgar (`.`/`..`/`/`/`C:\Windows`/`csv` lolos) → regex menolak
+eksperimen sah (counter sudah **815**, akan lewat 999; `\d` cocok digit Unicode) →
+`resolve()` melempar `RuntimeError` pada symlink loop → baca savepoint rusak (jsonl =
+direktori, UTF-8 rusak, JSON non-objek) → bersih.
+
+**2 klaim dikoreksi setelah terukur salah:** (1) "sweep 150 run melewati 1000" —
+counter naik **per invokasi**, bukan per run; (2) "`create_experiment_dir` membuat
+artifacts/ logs/ predictions/ patches/" — ia hanya membuat **artifacts/** dan
+**logs/**; `patches/` dan `predictions/` dari `runner.py:989-991`.
+
+Semua guard **dikunci test yang terbukti MERAH saat guard dimatikan**.
 
 ---
 
@@ -467,7 +557,7 @@ menyuntikkan test rusak → gate melaporkan **NOT READY**, exit 1.
 
 | Verifikasi | Hasil |
 |---|---|
-| Unit test | **510 lulus** |
+| Unit test | **549 lulus** |
 | Preflight repo | **50/50 pristine** |
 | Fairness budget | **FAIR** — 200/200/200 |
 | Putaran revisi | Setiap act revisi **6+6** (kebutuhan terukur: 6) |
@@ -505,7 +595,7 @@ Sweep **tidak** mengulang dari nol; savepoint per run dibaca dan yang sudah sele
 | **Budget tool-turn** | ✅ Done | `agents/budget.py` — total sama per strategi, sekarang **200** (skala referensi) |
 | **Pre-flight validator** | ✅ Done | `tools/preflight_modal.py` — replikasi kontrak Modal secara lokal |
 | **Rate-limit handling** | ✅ Done | Backoff 429 + circuit breaker |
-| **Test suite** | ✅ Done | **510 lulus** (dari 426). **Lulus di env bersih MAUPUN env kotor** |
+| **Test suite** | ✅ Done | **549 lulus** (dari 426). **Lulus di env bersih MAUPUN env kotor** |
 | **Thinking mode** | ✅ **ON** | `deepseek` thinking + effort `medium`; `*_reasoning.md` ditulis per role |
 | **MAX_TOKENS** | ✅ **65536** | Naik dari 32768; reasoning + jawaban berbagi anggaran ini |
 | **Rate card cbai** | ✅ **FIXED** | Diukur dari key yang BENAR (`…da2fe1`), bukan `…b04880` |
@@ -1544,11 +1634,11 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 - **Sudah dievaluasi (2026-09-29):** `EXP-20260928-003` dijalankan di Modal SWE-bench harness. Hasil: direct 8/10, planning 8/10, review 6/10.
 - **Temuan tambahan (2026-09-29, evaluasi):** kegagalan `review` di 10924 & 11001 **bukan** kegagalan penalaran — keduanya artefak pembagian budget. Di 11001 reviewer mendiagnosis dengan benar tapi act revisi hanya dapat 1 turn (cukup untuk *membaca*, tidak untuk *mengedit*). Di 10924 executor dipotong di cap 15 turn lalu patch setengah jadi disetujui reviewer (false approval). **Implikasi untuk skripsi:** dengan budget 40, strategi 3-act (`review`) berada di bawah strategi 2-act (`planning`) bukan karena review tidak berguna, tapi karena split `total//n` menghukum strategi dengan lebih banyak act.
 - **Implikasi metodologis:** `APPROVED` tidak berkorelasi dengan `resolved` (9 approved → 6 resolved). Reviewer tanpa oracle tidak bisa memverifikasi; verdict-nya tidak boleh dipakai sebagai sinyal kualitas patch di analisis.
-- **Temuan metodologis (2026-10-01, audit 2 partner):** **lima blocker** di pipeline 150-run, semuanya **tak terlihat dari angka hasil**. Yang paling berbahaya bukan bug yang membuat run gagal, tapi yang membuat run **sukses dengan pengukuran yang salah**: (1) `--resume` tidak diteruskan → restart mengulang 150 run; (2) review mengukur **1 putaran** padahal reserve untuk **4**; (3) `--compare` biaya **mati total** sehingga RQ3 tak tervalidasi; (4) checkout kotor → skor naik tanpa jejak; (5) warning yang salah membuat pembaca mengejar bug hantu. **Pola:** semua lolos dari 408 test karena test-nya memeriksa **total**, bukan **apakah konfigurasi itu bisa dijalankan**. Pelajaran: audit pipeline yang akan memakan 14 jam harus menanyakan "apa yang **tidak** diuji", bukan "apakah test lulus".
+- **Temuan metodologis (2026-10-01, audit 2 partner):** **lima blocker** di pipeline 150-run, semuanya **tak terlihat dari angka hasil**. Yang paling berbahaya bukan bug yang membuat run gagal, tapi yang membuat run **sukses dengan pengukuran yang salah**: (1) `--resume` tidak diteruskan → restart mengulang 150 run; (2) review mengukur **1 putaran** padahal reserve untuk **4**; (3) `--compare` biaya **mati total** sehingga RQ3 tak tervalidasi; (4) checkout kotor → skor naik tanpa jejak; (5) warning yang salah membuat pembaca mengejar bug hantu. **Pola:** semua lolos dari 408 test karena test-nya memeriksa **total**, bukan **apakah konfigurasi itu bisa dijalankan**. Pelajaran: audit pipeline yang akan memakan ~21 jam (thinking ON) harus menanyakan "apa yang **tidak** diuji", bukan "apakah test lulus".
 
 ---
 
-**Last working state:** commit M3 (`--only`) — **510 test lulus**, gate **READY 9/9**, preflight **50/50 pristine**. Pipeline **SIAP run 50 issue**, bisa **bertahap** dengan `--only N`. Budget **200/200/200**, revisi **48 (4 putaran × 6+6)**. `--resume` + interrupt + `--only` **terbukti bekerja** di run berbayar nyata (`EXP-20261002-542`) — lihat §"Verifikasi end-to-end".
+**Last working state:** commit M3 (`--only`) — **549 test lulus**, gate **READY 9/9**, preflight **50/50 pristine**. Pipeline **SIAP run 50 issue**, bisa **bertahap** dengan `--limit <N naik> --resume` (prefix tumbuh; `--only M` hanya untuk top-up). Budget **200/200/200**, revisi **48 (4 putaran × 6+6)**. `--resume` + interrupt + `--only` **terbukti bekerja** di run berbayar nyata (`EXP-20261002-542`) — lihat §"Verifikasi end-to-end".
 
 **Langkah berikutnya (prioritas):**
 
@@ -1578,13 +1668,19 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
    ketiga strategi**. Jadi **jangan** laporkan sebagai "tidak bisa diselesaikan" —
    menyelesaikannya adalah **temuan RQ1**. Tidak perlu run tambahan.
 
-6. **M3 (`--only N`) — SELESAI** (commit berikutnya). Jalankan sweep **bertahap**:
+6. **M3 — SELESAI** (commit berikutnya). Jalankan sweep **bertahap** dengan
+   **prefix `--limit` yang tumbuh**:
+   ```
+   # staging: lanjut ke issue baru — naikkan --limit tiap batch
+   python tools/run_final_sweep.py --limit 20 --resume --exp-id <EXP-id>
+   ```
+   `--only M` **bukan** alat staging: ia hanya untuk **top-up** run yang belum
+   selesai di issue yang sudah terekam:
    ```
    python tools/run_final_sweep.py --resume --exp-id <EXP-id> --only 15
    ```
-   Kerjakan 15 run berikutnya yang belum selesai, lewati yang sudah. Wajib
-   didampingi `--resume`. Scope dibatasi ke issue yang sudah ada di EXP.
-   Lihat §"M3 — `--only N`".
+   Wajib didampingi `--resume`. Scope `--only` dibatasi ke issue yang sudah ada di EXP.
+   Lihat §"M3 — Sweep bertahap: `--limit <N naik> --resume`".
 
 7. **⚠️ Kalau menguji flag baru: pakai `--dry-run` DULU.** Jangan jalankan pada
    direktori eksperimen nyata — lihat pelajaran #25.

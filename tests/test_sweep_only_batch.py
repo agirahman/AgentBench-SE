@@ -1,6 +1,6 @@
 """`--only N`: run about N still-INCOMPLETE runs (rounded up to whole issues).
 
-Why this exists. A 150-run sweep is ~14 hours, so it gets run in stages: 30 runs,
+Why this exists. A 150-run sweep is ~21 hours (thinking ON), so it gets run in stages: 30 runs,
 check the output, continue. `--limit` cannot express that, because it is measured
 in ISSUES:
 
@@ -511,11 +511,12 @@ def test_resume_with_existing_exp_id_dir_still_works(sweep):
 
 @pytest.mark.parametrize("bad_limit", ["-1", "-5", "0"])
 def test_negative_or_zero_limit_is_an_error(sweep, bad_limit):
-    """THE SECOND ROUND-2 LEAK: --limit -1 launched 147 paid runs.
+    """THE SECOND ROUND-2 LEAK: --limit -1 planned 147 paid runs.
 
     Measured (read-only, --dry-run): `--limit -1` planned 147 runs and `--limit -5`
     planned 135, both exit 0 -- `usable[:limit]` with a negative index means "all but
-    the last |limit|". One stray minus sign nearly runs the whole sweep for real money.
+    the last |limit|". One stray minus sign would have launched the whole sweep for
+    real money. (Planned, not executed: the evidence is --dry-run, which is read-only.)
     `--limit 0` is refused too: `usable[:0]` runs nothing, a no-op that still looks
     like a launch.
     """

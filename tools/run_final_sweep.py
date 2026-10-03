@@ -403,8 +403,8 @@ def build_cmd(
     ]
     # Resume support. Without these two flags a restart creates a NEW experiment
     # directory and re-runs all 150 runs -- the completed work is on disk but never
-    # reused, which at ~14 hours and ~$7-11 is the most expensive possible failure
-    # mode. The runner already implements the skip (the resume-skip loop in
+    # reused, which at ~21 hours (thinking ON) and ~$11 is the most expensive possible
+    # failure mode. The runner already implements the skip (the resume-skip loop in
     # src/experiments/runner.py, which consults ``_load_existing_ids``) and main.py
     # already exposes the flags (main.py:64-80); this wrapper simply was not passing
     # them through. Found by a partner audit (docs/AUDIT_OPS_PARTNER.md, blocker B1).
