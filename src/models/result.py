@@ -59,6 +59,17 @@ class CostSummary:
     peak_total_cost_idr: float = 0.0
     actual_cost_usd: float = 0.0
     actual_cost_idr: float = 0.0
+    # True when ANY request of this run was served from the provider's semantic
+    # (response) cache instead of being generated. Such a run did not measure the
+    # strategy, so it must be excluded from cross-strategy comparison rather than
+    # averaged in. This is NOT the same as ``cached_input_tokens`` (prefix cache),
+    # which is a normal, expected discount on a shared prompt prefix.
+    semantic_cache_hit: bool = False
+    semantic_cache_cost_saved_usd: float = 0.0
+    # How many REQUESTS in this run were served from the response cache. The
+    # boolean answers "is this run tainted?"; this answers "how badly?" -- one
+    # repeated request and a fully replayed run are different findings.
+    semantic_cache_hit_turns: int = 0
 
 
 @dataclass

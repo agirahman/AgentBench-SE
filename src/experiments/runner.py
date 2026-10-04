@@ -484,6 +484,14 @@ def _rows_from_savepoints(pred_dir: Path, strategies) -> list[dict]:
                 "input_cost_usd_regular": None,
                 "execution_time": None,
                 "pricing_version": "",
+                # None (not False): the savepoints do not record the cache signal,
+                # so a recovered row genuinely does not know. Writing False would
+                # assert "verified: no cache hit" for a row nobody checked -- the
+                # same "not recorded" vs "zero" distinction the numeric columns
+                # above already make.
+                "semantic_cache_hit": None,
+                "semantic_cache_cost_saved_usd": None,
+                "semantic_cache_hit_turns": None,
                 "_recovered_from_savepoint": True,
             })
     return rows
@@ -960,6 +968,18 @@ def _results_from_flat_rows(rows: list[dict]) -> list[ExperimentResult]:
             peak_total_cost_idr=_num(row.get("cost_idr_peak_total")),
             actual_cost_usd=_num(row.get("cost_usd_actual")),
             actual_cost_idr=_num(row.get("cost_idr_actual")),
+            # Rebuilt from the CSV so a resumed experiment keeps the integrity
+            # flag. _truthy, not bool(): a blank cell arrives as NaN and bool(NaN)
+            # is True, which would invent a hit on every recovered row.
+            #
+            # A blank cell means "not recorded" (pre-fix rows, savepoint
+            # recovery) and reads back as False here, because CostSummary's field
+            # is a plain bool. The CSV keeps the blank, so a reader who needs the
+            # unknown-vs-clean distinction still has it; only the in-memory
+            # rebuild collapses it.
+            semantic_cache_hit=_truthy(row.get("semantic_cache_hit")),
+            semantic_cache_cost_saved_usd=_num(row.get("semantic_cache_cost_saved_usd")),
+            semantic_cache_hit_turns=int(_num(row.get("semantic_cache_hit_turns"))),
         )
         result = ExperimentResult(
             instance_id=_text(row.get("instance_id")),

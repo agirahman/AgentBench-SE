@@ -53,14 +53,20 @@ def report(exp):
     lines.append(f"  regular(uncached) input tokens: {int(tot_r)}")
 
     # Per-inference detail: did any single call report cached tokens, and did the
-    # proxy's semantic-cache header ever fire?
-    infs = sorted(glob.glob(str(ROOT / "results" / exp / "artifacts" / "*" / "*.jsonl")))
+    # provider's response cache ever fire?
+    #
+    # The glob is 3 levels deep (artifacts/<instance>/<strategy>/<file>.jsonl).
+    # A 2-level pattern matched NOTHING, so this whole section silently reported
+    # zeros for every experiment -- a report that cannot fail loudly is worse than
+    # no report, because its zeros read as "measured, found nothing".
+    infs = sorted(glob.glob(str(ROOT / "results" / exp / "artifacts" / "*" / "*" / "*.jsonl")))
     hit_calls = 0
     with_cache = 0
     total_calls = 0
-    or_hits = 0
+    semantic_hits = 0
+    semantic_turns = 0
     for path in infs:
-        if "tool_calls" in path:
+        if "tool_calls" in path or "trajectory" in path:
             continue
         try:
             for line in Path(path).read_text(encoding="utf-8").splitlines():
@@ -70,6 +76,8 @@ def report(exp):
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(rec, dict):
+                    continue
                 u = rec.get("usage") or {}
                 if not u:
                     continue
@@ -77,15 +85,21 @@ def report(exp):
                 if (u.get("cached_tokens") or 0) > 0:
                     with_cache += 1
                     hit_calls += int(u.get("cached_tokens") or 0)
-                if u.get("omniroute_cache_hit"):
-                    or_hits += 1
+                # Response-cache hit: read the FLAG only. A high cached_tokens
+                # ratio is normal prefix caching (76-81% here) and is NOT a hit.
+                if u.get("semantic_cache_hit"):
+                    semantic_hits += 1
+                semantic_turns += int(u.get("semantic_cache_hit_turns") or 0)
         except OSError:
             continue
 
+    lines.append(f"  artifact jsonl files scanned: {len(infs)}")
     lines.append(f"  inference records with usage: {total_calls}")
-    lines.append(f"  calls reporting cached_tokens>0: {with_cache}")
+    lines.append(f"  calls reporting cached_tokens>0: {with_cache} (prefix cache - normal)")
     lines.append(f"  sum cached_tokens (per-call): {hit_calls}")
-    lines.append(f"  calls with omniroute_cache_hit=true: {or_hits}")
+    lines.append(f"  calls with semantic_cache_hit=true: {semantic_hits}")
+    if semantic_turns:
+        lines.append(f"  sum semantic_cache_hit_turns: {semantic_turns}")
     return lines
 
 

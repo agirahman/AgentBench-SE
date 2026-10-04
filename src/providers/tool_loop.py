@@ -32,6 +32,8 @@ from evaluation.cost import PricingTable
 from evaluation.retry import call_with_retry
 from providers.response_utils import (
     build_openai_inference_result,
+    create_completion_with_headers,
+    extract_semantic_cache,
     _extract_cached_tokens,
     _extract_content,
     _extract_reasoning,
@@ -293,6 +295,15 @@ def run_tool_loop(
         "completion_tokens": 0,
         "total_tokens": 0,
         "cached_tokens": 0,
+        # Accumulated across every request of this act. A single hit is enough to
+        # disqualify the act from strategy comparison, so these are OR/SUM rather
+        # than an average: the flag must survive even when 59 of 60 turns missed.
+        "semantic_cache_hit": False,
+        "semantic_cache_cost_saved_usd": 0.0,
+        # How many REQUESTS hit (not a boolean): "one request happened to repeat"
+        # and "the whole act was replayed" are very different findings, and the
+        # boolean alone cannot tell them apart.
+        "semantic_cache_hit_turns": 0,
     }
     api_turns = 0
 
@@ -313,7 +324,26 @@ def run_tool_loop(
 
         Called on every successful HTTP response, including one that is about to
         be retried for empty content — that request was still billed.
+
+        The response-cache signal is accumulated HERE, not read once at the end.
+        ``_finalize`` replaces ``result.usage`` with ``usage_totals``, so any
+        signal that only lived on the final response object was discarded — and
+        because every sweep run goes through this loop, the flag was lost for
+        every run, making a cache hit impossible to detect after the fact. The
+        header is on EVERY response, so it must be collected on every response.
         """
+        # Read the cache signal BEFORE the usage guard: it travels in the HTTP
+        # headers, not the body, so it can be present on a response whose usage
+        # block is missing. Returning early on `u is None` would drop exactly the
+        # signal this function exists to preserve.
+        hit, saved = extract_semantic_cache(getattr(resp, "response_headers", None))
+        if hit:
+            # Sticky: one hit anywhere in the act is enough to taint it, so this
+            # is never reset back to False by a later miss.
+            usage_totals["semantic_cache_hit"] = True
+            usage_totals["semantic_cache_cost_saved_usd"] += saved
+            usage_totals["semantic_cache_hit_turns"] += 1
+
         u = getattr(resp, "usage", None)
         if u is None:
             return
@@ -334,7 +364,11 @@ def run_tool_loop(
         """
 
         def _attempt():
-            resp = client.chat.completions.create(**kwargs)
+            # Goes through the raw-response path so the HTTP headers (which carry
+            # the response-cache signal) are attached to the parsed object. A
+            # plain create() returns a model with no header field at all, so the
+            # signal would be unreadable no matter what this loop did with it.
+            resp = create_completion_with_headers(client, **kwargs)
             _record_usage(resp)
             return resp
 

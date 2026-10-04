@@ -9,7 +9,9 @@ def flatten_for_csv(result: ExperimentResult) -> dict:
       1. Meta  : id, strategy, model, difficulty, inference_count,
                  total_tool_calls, api_turns, total_turns, truncated_acts,
                  truncated, execution_time,
-                 timestamp, timestamp_wib, window, pricing_version, generated, error
+                 timestamp, timestamp_wib, window, pricing_version, generated, error,
+                 semantic_cache_hit, semantic_cache_cost_saved_usd,
+                 semantic_cache_hit_turns
       2. INPUT (token → cost paired, USD + IDR):
                  input_tokens_cached, input_cost_usd_cached, input_cost_idr_cached,
                  input_tokens_regular, input_cost_usd_regular, input_cost_idr_regular,
@@ -77,6 +79,13 @@ def flatten_for_csv(result: ExperimentResult) -> dict:
         "pricing_version": result.cost.pricing_version,
         "generated": result.evaluation.success,
         "error": result.evaluation.error,
+        # Explicit per-run integrity flag: True means the provider replayed a
+        # cached response, so the run did not measure the strategy. Kept as its
+        # own column (NOT inferred from the cached-token ratio) so a run that hit
+        # it is visible in the exported results rather than silently averaged in.
+        "semantic_cache_hit": bool(result.cost.semantic_cache_hit),
+        "semantic_cache_cost_saved_usd": result.cost.semantic_cache_cost_saved_usd,
+        "semantic_cache_hit_turns": result.cost.semantic_cache_hit_turns,
 
         # ── INPUT (token → cost paired) ──
         "input_tokens_cached": cached_tok,

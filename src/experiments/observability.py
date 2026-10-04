@@ -99,6 +99,16 @@ def build_experiment_manifest(
                     "total": r.execution.total_tokens,
                 },
                 "execution_time_seconds": round(r.execution.execution_time, 3),
+                # Response-cache integrity flag, per run. True means the provider
+                # replayed a cached response, so this run did not measure the
+                # strategy and must not be compared against the others. Kept
+                # separate from ``tokens.cached_input`` (prefix caching), which is
+                # a normal discount rather than an integrity problem.
+                "semantic_cache_hit": bool(r.cost.semantic_cache_hit),
+                "semantic_cache_cost_saved_usd": round(
+                    r.cost.semantic_cache_cost_saved_usd, 6
+                ),
+                "semantic_cache_hit_turns": r.cost.semantic_cache_hit_turns,
                 "cost": {
                     "total_usd": round(r.cost.total_cost_usd, 6),
                     "total_idr": round(r.cost.total_cost_idr, 2),
@@ -153,6 +163,12 @@ def build_experiment_manifest(
                 else "COMPLETED"
             ),
             "api_requests_by_strategy": api_requests_by_strategy,
+            # Integrity headline: how many runs were served from the provider's
+            # semantic (response) cache. Non-zero means those runs must be
+            # excluded before any strategy comparison is read.
+            "semantic_cache_hits": sum(
+                1 for r in results if getattr(r.cost, "semantic_cache_hit", False)
+            ),
         },
         "results": result_entries,
     }

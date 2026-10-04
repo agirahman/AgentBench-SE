@@ -356,9 +356,22 @@ class CostCalculator:
         cached_tok = regular_tok = 0
         cached_usd = regular_usd = peak_usd = peak_idr = 0.0
         actual_usd = actual_idr = 0.0
+        semantic_hit = False
+        semantic_saved = 0.0
+        semantic_turns = 0
         version = ""
         for inf in inferences:
             c = self.calculate(inf)
+            # OR/SUM across the run's inferences: one cached response anywhere is
+            # enough to disqualify the whole run from strategy comparison, so this
+            # must never be averaged away.
+            inf_usage = inf.usage or {}
+            if inf_usage.get("semantic_cache_hit"):
+                semantic_hit = True
+                semantic_saved += float(
+                    inf_usage.get("semantic_cache_cost_saved_usd") or 0.0
+                )
+            semantic_turns += int(inf_usage.get("semantic_cache_hit_turns") or 0)
             input_usd += c.input_cost_usd
             output_usd += c.output_cost_usd
             total_usd += c.total_cost_usd
@@ -393,4 +406,7 @@ class CostCalculator:
             peak_total_cost_idr=peak_idr,
             actual_cost_usd=actual_usd,
             actual_cost_idr=actual_idr,
+            semantic_cache_hit=semantic_hit,
+            semantic_cache_cost_saved_usd=semantic_saved,
+            semantic_cache_hit_turns=semantic_turns,
         )

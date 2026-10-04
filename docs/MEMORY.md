@@ -1,7 +1,7 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
 **Last Updated:** 2026-10-03 (audit dokumen + verifikasi kesiapan run bertahap)
-**Status:** **SIAP run 50 issue** — bisa **bertahap** dengan `--limit <N naik> --resume` (prefix tumbuh; `--only M` hanya untuk top-up run yang belum selesai). **THINKING ON (medium)**. Budget 200/200/200, revisi **48 (4 putaran × 2 act × 6)**. `--resume` **terbukti bekerja di run berbayar nyata**. Gate **READY 9/9**, preflight **50/50 pristine**. **558 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
+**Status:** **SIAP run 50 issue** — bisa **bertahap** dengan `--limit <N naik> --resume` (prefix tumbuh; `--only M` hanya untuk top-up run yang belum selesai). **THINKING ON (medium)**. Budget 200/200/200, revisi **48 (4 putaran × 2 act × 6)**. `--resume` **terbukti bekerja di run berbayar nyata**. Gate **READY 9/9**, preflight **50/50 pristine**. **610 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
 **Active Branch:** `19/toolcall-commandcode`
 **Commit terakhir:** `5462f9b` (guard `--resume --exp-id`: tolak typo, jangan fork eksperimen berbayar), `9c91d6a` (reconcile dokumen dengan pengukuran), `b6abf88` (`--only N` untuk sweep bertahap), `e618b8d` (completeness-on-interrupt + attempts window), `38a1c57` (interrupt exports + preflight scope), `cf19d98` (resume opsi D)
 **Handoff sesi terakhir:** [`HANDOFF_20261002.md`](HANDOFF_20261002.md) · sebelumnya [`HANDOFF_20261001.md`](HANDOFF_20261001.md)
@@ -290,7 +290,7 @@ dipakai `--resume`. Kalau diimplementasikan ulang, keduanya bisa berbeda pendapa
 dan ukuran batch jadi tidak bermakna sama dengan yang benar-benar dijalankan.
 
 **Verifikasi:** 10 test (`tests/test_sweep_only_batch.py`), **7 MERAH** saat
-perbaikannya dimatikan. Suite **508 lulus saat itu** (kini **558**), gate **READY 9/9**.
+perbaikannya dimatikan. Suite **508 lulus saat itu** (kini **610**), gate **READY 9/9**.
 
 ---
 
@@ -384,6 +384,78 @@ sekadar ada), kalau tidak file pun lolos dan memicu warning palsu.
 
 **Pelajaran:** di fungsi yang **tujuannya mencegah kehilangan data**, default yang
 **menghapus** baris adalah arah yang **salah**.
+
+---
+
+## 🔍 Pengecekan SEMANTIC CACHE (response cache provider) (2026-10-04)
+
+**Masalah:** provider bisa mengembalikan **respons lama** kalau request identik
+(*semantic cache* / *response cache*). Kalau itu terjadi **antar-strategi**,
+perbandingan strategi **tidak sah** — dan skor skripsi bergantung padanya. Sebelum ini
+**tidak ada apa pun** yang mendeteksinya.
+
+### ⚠️ DUA bug berlapis yang ditemukan (jangan diulang)
+
+1. **`tool_loop.py`** — `usage_totals` hanya membawa **4 kunci** (prompt/completion/
+   total/cached); flag cache **tidak pernah disalin**, lalu
+   `result.usage = dict(usage_totals)` **menimpanya**. Karena **semua** run sweep pakai
+   tool-calling, flag hilang di **setiap** run.
+2. **LEBIH DALAM — headernya tidak pernah terbaca.** `ChatCompletion` (openai 2.45.0)
+   **tidak punya** field `response_headers`, dan `src/` **tidak pernah** memakai
+   `with_raw_response`. Jadi `getattr(resp, "response_headers", None)` **selalu `None`**
+   dan seluruh pembacaan header adalah **DEAD CODE** di produksi. Bukti
+   (`httpx.MockTransport`, tanpa jaringan): header ada di `raw.headers`, **hilang** di
+   objek `ChatCompletion` hasil parse.
+
+> **Konsekuensi yang bikin ini berbahaya:** memperbaiki **(1) saja** akan membuat
+> `semantic_cache_hit` **selalu `False`** → gate bilang **"aman" untuk setiap batch**,
+> termasuk batch yang penuh replay. Itu **lebih berbahaya** daripada tidak punya gate:
+> rasa aman palsu.
+
+### Perbaikan
+
+- `create_completion_with_headers()` (`response_utils.py`) memakai
+  `with_raw_response.create(...)` → `.parse()` → **menempelkan header** ke objek parsed.
+  Dipakai di `tool_loop.py` + `commandcode`/`opencode`/`openrouter`. Error tetap
+  **raise** (429 → `RateLimitError`), jadi retry tidak berubah; ada fallback untuk
+  client tanpa `with_raw_response`.
+- Flag diakumulasi **OR per request** ke `usage_totals` (dibaca **sebelum** guard
+  `usage is None`, karena header tak ikut hilang bersama body).
+- Diteruskan ke **`CostSummary` → CSV → `manifest.json`** (`summary.semantic_cache_hits`
+  + flag per run), dan **dipertahankan saat resume** (`_results_from_flat_rows`).
+
+### 🚦 ATURAN GATE (WAJIB, agar tidak berbunyi palsu)
+
+> **HIT = `semantic_cache_hit == True`** (dari header).
+> **JANGAN** memakai rasio token cached / `cached/prompt ≈ 1` sebagai bukti hit.
+> **Prefix cache** normal (**batch-1: 76-81% cached**) itu **AMAN**. Gate berbasis rasio
+> akan **berbunyi palsu di setiap run panjang**, lalu diabaikan orang.
+
+**Kolom:** `semantic_cache_hit` (bool, gate), `semantic_cache_cost_saved_usd` (float),
+`semantic_cache_hit_turns` (int — membedakan "1 request kebetulan" dari "seluruh run
+direplay").
+
+**Cara pakai:**
+```
+python tools/check_semantic_cache.py --exp EXP-20261004-034
+python tools/check_semantic_cache.py --all          # seluruh results/
+```
+Exit **1** bila ada hit, **0** bila bersih. File rusak/hilang **tidak** membuatnya
+crash (exit **2** = tak bisa memverifikasi, dibedakan dari exit 1 = ada hit, supaya
+crash tidak terbaca sebagai temuan).
+
+### Kejujuran (yang belum terverifikasi)
+
+- Apakah provider **benar-benar mengirim** header itu di rute sweep: **BELUM
+  terverifikasi** (tidak ada panggilan API; semua bukti dari mock in-process).
+- Eksperimen **pra-fix** dilaporkan **UNVERIFIABLE**, **bukan** "bersih" — *absence of
+  evidence ≠ evidence of absence*. Batch-1 masuk kelas ini (CSV/manifest-nya ditulis
+  sebelum kolomnya ada).
+- Bukti batch-1 (hash respons berbeda, tool call berbeda, rasio cached < 89%)
+  **konsisten dengan** tidak ada replay — **indikasi, bukan bukti**.
+
+**Gate preflight tetap perlu `tools/clean_repos.py`.** Terbukti lagi setelah batch-1:
+`readiness_report` → **NOT READY** (9 repo kotor) → `clean_repos.py` → **READY 9/9**.
 
 ---
 
@@ -614,7 +686,7 @@ menyuntikkan test rusak → gate melaporkan **NOT READY**, exit 1.
 
 | Verifikasi | Hasil |
 |---|---|
-| Unit test | **558 lulus** |
+| Unit test | **610 lulus** |
 | Preflight repo | **50/50 pristine** |
 | Fairness budget | **FAIR** — 200/200/200 |
 | Putaran revisi | Setiap act revisi **6+6** (kebutuhan terukur: 6) |
@@ -652,7 +724,7 @@ Sweep **tidak** mengulang dari nol; savepoint per run dibaca dan yang sudah sele
 | **Budget tool-turn** | ✅ Done | `agents/budget.py` — total sama per strategi, sekarang **200** (skala referensi) |
 | **Pre-flight validator** | ✅ Done | `tools/preflight_modal.py` — replikasi kontrak Modal secara lokal |
 | **Rate-limit handling** | ✅ Done | Backoff 429 + circuit breaker |
-| **Test suite** | ✅ Done | **558 lulus** (dari 426). **Lulus di env bersih MAUPUN env kotor** |
+| **Test suite** | ✅ Done | **610 lulus** (dari 426). **Lulus di env bersih MAUPUN env kotor** |
 | **Thinking mode** | ✅ **ON** | `deepseek` thinking + effort `medium`; `*_reasoning.md` ditulis per role |
 | **MAX_TOKENS** | ✅ **65536** | Naik dari 32768; reasoning + jawaban berbagi anggaran ini |
 | **Rate card cbai** | ✅ **FIXED** | Diukur dari key yang BENAR (`…da2fe1`), bukan `…b04880` |
@@ -1656,6 +1728,7 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 | `tools/run_final_sweep.py` | **Entry point run 50 issue** — gate preflight, pass semua config eksplisit |
 | `tools/preflight_repos.py` | Cek 50 repo pristine; sweep **gagal** kalau tidak |
 | `tools/clean_repos.py` | Bersihkan checkout yang kotor |
+| `tools/check_semantic_cache.py` | **Gate integritas**: deteksi response-cache hit (exit 1 bila ada) |
 | `tools/verify_revision_rounds.py` | Apakah reserve membiayai **setiap** putaran revisi? |
 | `tools/audit_revision_rounds.py` | Berapa putaran revisi yang **benar-benar** jalan? |
 | `tools/audit_revision_edits.py` | Apakah act revisi **mengedit** apa pun? |
@@ -1695,7 +1768,7 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 ---
 
-**Last working state:** commit M3 (`--only`) — **558 test lulus**, gate **READY 9/9**, preflight **50/50 pristine**. Pipeline **SIAP run 50 issue**, bisa **bertahap** dengan `--limit <N naik> --resume` (prefix tumbuh; `--only M` hanya untuk top-up). Budget **200/200/200**, revisi **48 (4 putaran × 6+6)**. `--resume` + interrupt + `--only` **terbukti bekerja** di run berbayar nyata (`EXP-20261002-542`) — lihat §"Verifikasi end-to-end".
+**Last working state:** commit M3 (`--only`) — **610 test lulus**, gate **READY 9/9**, preflight **50/50 pristine**. Pipeline **SIAP run 50 issue**, bisa **bertahap** dengan `--limit <N naik> --resume` (prefix tumbuh; `--only M` hanya untuk top-up). Budget **200/200/200**, revisi **48 (4 putaran × 6+6)**. `--resume` + interrupt + `--only` **terbukti bekerja** di run berbayar nyata (`EXP-20261002-542`) — lihat §"Verifikasi end-to-end".
 
 **Langkah berikutnya (prioritas):**
 

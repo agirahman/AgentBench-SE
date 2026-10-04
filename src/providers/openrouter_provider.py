@@ -7,7 +7,10 @@ from config import Config
 from utils.logger import logger
 from models.inference import InferenceResult
 from evaluation.retry import with_retry
-from providers.response_utils import build_openai_inference_result
+from providers.response_utils import (
+    build_openai_inference_result,
+    create_completion_with_headers,
+)
 from providers.tool_loop import run_tool_loop
 from providers.system_prompts import TOOL_SYSTEM_PROMPT, NO_TOOL_SYSTEM_PROMPT
 from agents.tools import TOOL_SCHEMAS
@@ -60,7 +63,7 @@ class OpenRouterProvider:
                 "max_tokens": Config.MAX_TOKENS,
             }
             kwargs["extra_body"] = self._extra_body()
-            response = self.client.chat.completions.create(**kwargs)
+            response = create_completion_with_headers(self.client, **kwargs)
 
             elapsed = time.perf_counter() - t0
             result = build_openai_inference_result(

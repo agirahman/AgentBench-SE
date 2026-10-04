@@ -3,8 +3,302 @@ import types
 import pytest
 
 from config import Config
-from providers.response_utils import build_openai_inference_result
+from providers.response_utils import (
+    build_openai_inference_result,
+    create_completion_with_headers,
+    extract_semantic_cache,
+)
 from models.inference import InferenceResult
+
+# The response-cache signal travels in HTTP headers, so the tests below drive the
+# REAL OpenAI SDK through httpx.MockTransport (no network). That matters: an
+# earlier version of this file only built fake response objects by hand, so it
+# stayed green while the feature was dead in production -- the SDK's
+# ChatCompletion has NO ``response_headers`` field, so
+# ``getattr(response, "response_headers", None)`` was always None and the whole
+# header-parsing block never executed.
+
+CACHE_HIT_HEADERS = {"x-omniroute-cache-hit": "true",
+                     "x-omniroute-cost-saved": "0.0042"}
+CACHE_MISS_HEADERS = {"x-omniroute-cache-hit": "false"}
+
+_COMPLETION_BODY = {
+    "id": "chatcmpl-test",
+    "object": "chat.completion",
+    "created": 1,
+    "model": "test-model",
+    "choices": [
+        {"index": 0, "finish_reason": "stop",
+         "message": {"role": "assistant", "content": "hello"}}
+    ],
+    "usage": {"prompt_tokens": 1000, "completion_tokens": 5, "total_tokens": 1005},
+}
+
+
+def _sdk_client(headers):
+    """A real OpenAI client whose transport returns canned headers (no network)."""
+    import httpx
+    from openai import OpenAI
+
+    def handler(request):
+        return httpx.Response(200, json=_COMPLETION_BODY, headers=headers)
+
+    return OpenAI(
+        api_key="test",
+        base_url="http://test.invalid/v1",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+
+def test_sdk_plain_create_loses_the_cache_header():
+    """Document WHY the raw path is required: the parsed model has no header field.
+
+    This is the defect, pinned. If a future SDK starts exposing the headers on the
+    parsed object this test fails -- which is the correct moment to revisit
+    ``create_completion_with_headers`` rather than leave dead code in place.
+    """
+    client = _sdk_client(CACHE_HIT_HEADERS)
+    parsed = client.chat.completions.create(
+        model="test-model", messages=[{"role": "user", "content": "hi"}]
+    )
+    assert not hasattr(parsed, "response_headers"), (
+        "the SDK now exposes response_headers on the parsed completion; the "
+        "with_raw_response workaround in create_completion_with_headers may no "
+        "longer be necessary"
+    )
+
+
+def test_create_completion_with_headers_captures_real_sdk_headers():
+    """END-TO-END: the header must survive a real SDK round trip.
+
+    Goes RED if ``create_completion_with_headers`` stops using
+    ``with_raw_response`` -- the exact Lapis-2 bug, where the signal was silently
+    unreadable and every run looked cache-clean.
+    """
+    client = _sdk_client(CACHE_HIT_HEADERS)
+    response = create_completion_with_headers(
+        client, model="test-model", messages=[{"role": "user", "content": "hi"}]
+    )
+
+    headers = getattr(response, "response_headers", None)
+    assert headers, (
+        "the HTTP headers were not attached; without them the response-cache "
+        "signal is unreadable and every run reports 'no hit'"
+    )
+    hit, saved = extract_semantic_cache(headers)
+    assert hit is True
+    assert saved == pytest.approx(0.0042)
+
+    # The parsed content must still be a normal completion.
+    assert response.choices[0].message.content == "hello"
+    assert response.usage.total_tokens == 1005
+
+
+def test_build_result_reads_semantic_hit_from_sdk_response():
+    """The full chain: real SDK -> build_openai_inference_result -> usage flag."""
+    client = _sdk_client(CACHE_HIT_HEADERS)
+    response = create_completion_with_headers(
+        client, model="test-model", messages=[{"role": "user", "content": "hi"}]
+    )
+    result = build_openai_inference_result(
+        response, role="direct", model="test-model",
+        response_headers=getattr(response, "response_headers", None),
+    )
+    assert result.usage["semantic_cache_hit"] is True
+    assert result.usage["semantic_cache_cost_saved_usd"] == pytest.approx(0.0042)
+
+
+def test_sdk_response_without_hit_headers_is_not_flagged():
+    client = _sdk_client(CACHE_MISS_HEADERS)
+    response = create_completion_with_headers(
+        client, model="test-model", messages=[{"role": "user", "content": "hi"}]
+    )
+    result = build_openai_inference_result(
+        response, role="direct", model="test-model",
+        response_headers=getattr(response, "response_headers", None),
+    )
+    assert result.usage["semantic_cache_hit"] is False
+
+
+def test_sdk_error_still_raises_so_retry_still_works():
+    """with_raw_response must not swallow errors: call_with_retry needs them.
+
+    If the raw path returned the error body instead of raising, a 429 would look
+    like a successful call and the retry/backoff path would never run.
+    """
+    import httpx
+    from openai import OpenAI
+
+    def handler(request):
+        return httpx.Response(
+            429,
+            json={"error": {"message": "slow down", "type": "rate_limit_error"}},
+            headers=CACHE_HIT_HEADERS,
+        )
+
+    client = OpenAI(api_key="test", base_url="http://test.invalid/v1",
+                    http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(Exception) as excinfo:
+        create_completion_with_headers(
+            client, model="test-model", messages=[{"role": "user", "content": "hi"}]
+        )
+    assert "rate" in type(excinfo.value).__name__.lower(), (
+        f"expected a rate-limit error, got {type(excinfo.value).__name__}"
+    )
+
+
+def test_create_completion_falls_back_for_clients_without_raw_response():
+    """Fake/limited clients must keep working (they simply carry no headers)."""
+
+    class _Completions:
+        def create(self, **kwargs):
+            return types.SimpleNamespace(ok=True)
+
+    client = types.SimpleNamespace(
+        chat=types.SimpleNamespace(completions=_Completions())
+    )
+    out = create_completion_with_headers(client, model="m", messages=[])
+    assert out.ok is True
+
+
+# ---------------------------------------------------------------------------
+# The ``response_headers`` fallback: providers that pass only the response
+# ---------------------------------------------------------------------------
+# ``build_openai_inference_result`` can be called WITHOUT ``response_headers``; it
+# then reads the attribute off the response object. That fallback is load-bearing:
+# ``openrouter_provider``, ``deepseek_provider`` and ``groq_provider`` all call it
+# that way, so for those routes the fallback is the ONLY path the signal can take.
+# These tests pin it so a refactor cannot quietly drop it.
+
+def test_fallback_reads_headers_attached_to_the_response_object():
+    """No ``response_headers`` argument -> read it off the response. HIT survives."""
+    resp = _make_response([_make_choice(content="hi")], prompt=1000, comp=5)
+    resp.response_headers = {"x-omniroute-cache-hit": "true",
+                             "x-omniroute-cost-saved": "0.007"}
+
+    result = build_openai_inference_result(resp, role="direct", model="m")
+
+    assert result.usage["semantic_cache_hit"] is True, (
+        "the fallback path must carry the signal; providers that call this "
+        "function without response_headers depend on it"
+    )
+    assert result.usage["semantic_cache_cost_saved_usd"] == pytest.approx(0.007)
+
+
+def test_fallback_without_the_attribute_is_not_a_hit():
+    """A response with no headers attached at all must stay clean, not crash."""
+    resp = _make_response([_make_choice(content="hi")])
+    assert not hasattr(resp, "response_headers")
+
+    result = build_openai_inference_result(resp, role="direct", model="m")
+
+    assert result.usage["semantic_cache_hit"] is False
+    assert result.usage["semantic_cache_cost_saved_usd"] == 0.0
+
+
+def test_explicit_headers_win_over_the_response_attribute():
+    """An explicit argument must not be silently overridden by the attribute."""
+    resp = _make_response([_make_choice(content="hi")])
+    resp.response_headers = {"x-omniroute-cache-hit": "false"}
+
+    result = build_openai_inference_result(
+        resp, role="direct", model="m",
+        response_headers={"x-omniroute-cache-hit": "true"},
+    )
+    assert result.usage["semantic_cache_hit"] is True, (
+        "the explicit response_headers argument must take precedence"
+    )
+
+
+def test_openrouter_generate_carries_the_cache_signal(monkeypatch):
+    """END-TO-END through OpenRouterProvider.generate -- the real call site.
+
+    OpenRouter is the provider that calls ``build_openai_inference_result`` with
+    only the response object, so this exercises the fallback exactly as production
+    does. A real OpenAI client + mock transport is used, so the header can only be
+    reached through the raw-response path; a hand-built fake response would not
+    prove anything about the wiring.
+    """
+    import httpx
+    from openai import OpenAI
+
+    from providers.openrouter_provider import OpenRouterProvider
+
+    body = {
+        "id": "chatcmpl-or", "object": "chat.completion", "created": 1,
+        "model": "openrouter/test",
+        "choices": [{"index": 0, "finish_reason": "stop",
+                     "message": {"role": "assistant", "content": '{"patch": "x"}'}}],
+        "usage": {"prompt_tokens": 500, "completion_tokens": 5, "total_tokens": 505},
+    }
+
+    def handler(request):
+        return httpx.Response(200, json=body,
+                              headers={"x-omniroute-cache-hit": "true",
+                                       "x-omniroute-cost-saved": "0.011"})
+
+    # Bypass __init__ (it requires an API key from .env); only the client matters.
+    provider = OpenRouterProvider.__new__(OpenRouterProvider)
+    provider.model = "openrouter/test"
+    provider.client = OpenAI(
+        api_key="test", base_url="http://test.invalid/v1",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    # generate() is wrapped by @with_retry, which reads Config.MAX_RETRIES.
+    import evaluation.retry as retry_mod
+    monkeypatch.setattr(retry_mod.Config, "MAX_RETRIES", 1)
+    monkeypatch.setattr(retry_mod.Config, "RATE_LIMIT_BACKOFF_BASE", 0.0)
+    monkeypatch.setattr(retry_mod.Config, "RATE_LIMIT_BACKOFF_MAX", 0.0)
+    monkeypatch.setattr(retry_mod.time, "sleep", lambda _s: None)
+
+    result = provider.generate("fix it", role="direct")
+
+    assert result.usage is not None
+    assert result.usage.get("semantic_cache_hit") is True, (
+        "OpenRouterProvider.generate did not carry the response-cache signal; "
+        f"usage={result.usage}"
+    )
+    assert result.usage.get("semantic_cache_cost_saved_usd") == pytest.approx(0.011)
+
+
+def test_semantic_hit_promotes_cached_tokens_to_full_prompt():
+    """On a hit the whole prompt was served from cache -- but this is NOT the gate.
+
+    ``cached_tokens == prompt_tokens`` is produced by a semantic hit AND by a fully
+    prefix-cached call, so it can never be used to DECIDE a hit. It is kept because
+    it makes the cost/cache columns honest. The decision comes from the flag only.
+    """
+    usage = types.SimpleNamespace(prompt_tokens=1000, completion_tokens=5,
+                                  total_tokens=1005,
+                                  prompt_tokens_details=types.SimpleNamespace(
+                                      cached_tokens=0))
+    resp = types.SimpleNamespace(usage=usage, choices=[_make_choice(content="hi")])
+    result = build_openai_inference_result(
+        resp, role="direct", model="m",
+        response_headers={"x-omniroute-cache-hit": "true"},
+    )
+    assert result.usage["cached_tokens"] == 1000, "promoted for honest cost metrics"
+    assert result.usage["semantic_cache_hit"] is True, "flag, not the ratio, decides"
+
+
+def test_full_prefix_cache_without_header_is_not_a_semantic_hit():
+    """The mirror case: 100% cached and NO header must stay unflagged.
+
+    Together with the test above this pins the discrimination rule: identical
+    ``cached_tokens`` values, different verdicts -- so the verdict cannot come from
+    the token counts.
+    """
+    usage = types.SimpleNamespace(prompt_tokens=1000, completion_tokens=5,
+                                  total_tokens=1005,
+                                  prompt_tokens_details=types.SimpleNamespace(
+                                      cached_tokens=1000))
+    resp = types.SimpleNamespace(usage=usage, choices=[_make_choice(content="hi")])
+    result = build_openai_inference_result(resp, role="direct", model="m")
+    assert result.usage["cached_tokens"] == 1000, "same token count as the hit case"
+    assert result.usage["semantic_cache_hit"] is False, (
+        "100% prefix caching is normal and must NOT be reported as a semantic hit"
+    )
 
 
 def _make_choice(content="", finish="stop", reasoning=""):
