@@ -28,6 +28,26 @@ class InferenceResult:
     # tool-loop results report the real turn count so token/turn metrics are
     # not understated.
     api_turns: int = 1
+    # True when the tool loop ran out of turns instead of the agent choosing to
+    # stop. Such a result measures the granted budget, not the agent's own
+    # judgement, so it must be reported separately: SWE-bench's convention is to
+    # keep it in the denominator under its own heading rather than drop it
+    # (docs/guides/evaluation.md: the failure lines "never remove anything from
+    # the total"). Recorded here because the alternative -- re-deriving it from
+    # log warnings after the fact -- is how EXP-20260928-003 ended up reporting
+    # 8/8/6 with no truncation count.
+    truncated: bool = False
+    # The FULL turn-by-turn record of a tool-calling act: every assistant turn
+    # (its text, its reasoning, the tools it asked for) and every tool result it
+    # saw, in order. Without this the only trace of an act was its LAST message
+    # plus a flat list of calls, so the reasoning behind each individual step --
+    # why the agent read that file, why it abandoned that approach -- was not
+    # recoverable from the artifacts at all.
+    #
+    # Each entry is a dict with a "type" of "assistant" or "tool" (see
+    # providers/tool_loop.py). Kept on the result rather than reconstructed from
+    # the provider message list because that list is discarded when the act ends.
+    trajectory: list = field(default_factory=list)
 
     def __post_init__(self):
         if not self.timestamp:
@@ -52,6 +72,19 @@ class InferenceResult:
     @property
     def total_tokens(self) -> int:
         return (self.usage or {}).get("total_tokens", 0)
+
+    @property
+    def cost_usd(self) -> float:
+        """Cost of this act in USD, per the rate card (override-aware).
+
+        Exists so a caller can debit a task-level dollar budget without
+        re-deriving pricing. Returns 0.0 when the model has no card, which is
+        the correct answer for a free testing model and keeps the dollar guard
+        inert rather than silently binding on a $0 rate.
+        """
+        from evaluation.cost import CostCalculator
+
+        return CostCalculator().calculate(self).total_cost_usd
 
 
 @dataclass

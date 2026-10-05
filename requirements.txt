@@ -1,11 +1,20 @@
-google-genai
-openai
-python-dotenv
-PyYAML
-loguru
-pytest
-swebench
-datasets
-pandas
-pyright
-modal
+# Pinned to the versions the experiments were run with.
+#
+# WHY PINNED: these were previously unpinned, and `openai` changed its client
+# surface between releases — real runs failed intermittently with
+# "'function' object has no attribute 'completions'" (14 occurrences in the
+# 2026-08-23 logs) because the installed SDK no longer matched what the provider
+# code assumed. An unpinned dependency makes an experiment unreproducible: a
+# re-run months later can silently use a different SDK and produce different
+# results. Do not loosen these without re-running the test suite.
+openai==2.45.0
+google-genai==2.11.0
+python-dotenv==1.2.2
+PyYAML==6.0.3
+loguru==0.7.3
+pytest==9.1.1
+swebench==4.1.0
+datasets==5.0.0
+pandas==3.0.3
+pyright==1.1.411
+modal==1.5.2

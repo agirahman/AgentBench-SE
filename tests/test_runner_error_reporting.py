@@ -10,14 +10,18 @@ from models.inference import InferenceResult
 def test_load_existing_ids_skips_invalid_json_lines(tmp_path):
     jsonl_path = tmp_path / "done.jsonl"
     jsonl_path.write_text(
-        '{"instance_id": "A"}\n'
+        '{"instance_id": "A", "model_patch": "diff --git a b"}\n'
         'not-json\n'
-        '{"instance_id": "B"}\n',
+        '{"instance_id": "B", "model_patch": "diff --git c d"}\n',
         encoding="utf-8",
     )
 
     result = _load_existing_ids(str(jsonl_path))
 
+    # The malformed line is skipped; the two finished runs are still seen. Note
+    # the rows carry a non-empty patch: a row with an empty patch is an errored
+    # run, which must be RETRIED by --resume rather than counted as done
+    # (see tests/test_resume_skips_failures.py).
     assert result == {"A||False", "B||False"}
 
 

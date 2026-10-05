@@ -64,7 +64,19 @@ def parse_args():
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Lanjutkan eksperimen sebelumnya — skip issue yang sudah selesai",
+        help=(
+            "Lanjutkan eksperimen yang sudah ada — skip issue yang sudah selesai. "
+            "Butuh --exp-id: tanpa itu tidak ada eksperimen yang bisa dilanjutkan."
+        ),
+    )
+    parser.add_argument(
+        "--exp-id",
+        default=None,
+        help=(
+            "Tulis ke direktori eksperimen ini (mis. EXP-20260929-022) alih-alih "
+            "membuat ID baru. Dipakai bersama --resume untuk melanjutkan run yang "
+            "terputus. Tanpa --resume, ID ini dijalankan ulang dari awal."
+        ),
     )
     parser.add_argument(
         "--issues",
@@ -77,6 +89,16 @@ def parse_args():
         action="append",
         default=[],
         help="Override sampling repo, format: repo=count (mis. django/django=10)",
+    )
+    parser.add_argument(
+        "--instance-ids",
+        nargs="+",
+        default=None,
+        help=(
+            "Jalankan instance tertentu saja, mis. django__django-11001. "
+            "Mengabaikan --repo-spec. Dipakai untuk re-run bertarget satu kegagalan "
+            "yang sudah terukur, bukan untuk run besar."
+        ),
     )
     return parser.parse_args()
 
@@ -102,6 +124,8 @@ def _save_experiment_config(
     pricing = PricingTable.get(model_name) or {}
     off_peak = PricingTable.rates_for(model_name, "off_peak")
     peak = PricingTable.rates_for(model_name, "peak")
+    # getattr: callers that build args by hand (tests, tooling) predate this flag.
+    targeted_ids = getattr(args, "instance_ids", None)
     config = {
         "experiment_meta": {
             "project": "Skripsi AI Agent SWE-bench Lite",
@@ -135,6 +159,23 @@ def _save_experiment_config(
         "tool_calling": {
             "enabled": Config.TOOLCALL_ENABLED,
             "max_tool_turns": Config.MAX_TOOL_TURNS,
+            "total_tool_turns": Config.TOTAL_TOOL_TURNS,
+            # Separate from total_tool_turns: only review's revision acts draw
+            # it, so review's total is total + this when non-zero. Recorded here
+            # because a run that used it is not directly comparable to one that
+            # did not (EXP-20260928-003 ran with 0).
+            "revision_tool_turns": Config.REVISION_TOOL_TURNS,
+            # How the pool is divided. These three decide the result as much as
+            # total_tool_turns does, so a run that omits them cannot be compared
+            # to a later one: per_act caps the first act (13 of 40 for review),
+            # per_task lets it draw the remainder minus the floor. EXP-003 ran
+            # per_act with no floor; the budget curve varies both.
+            "budget_mode": Config.BUDGET_MODE,
+            "budget_floor_per_act": Config.BUDGET_FLOOR_PER_ACT,
+            "cost_limit_usd": Config.COST_LIMIT_USD,
+            # Non-empty means every cost column is MODELLED, not billed: the
+            # run used a free model and the tokens were priced with this card.
+            "pricing_model_override": Config.PRICING_MODEL_OVERRIDE or None,
             "repo_dir": Config.TOOLCALL_REPO_DIR,
             "tools": [
                 {"agent": name, "tools": list(T.AGENT_TOOLS.get(name, T.TOOL_FUNCTIONS.keys()))}
@@ -146,6 +187,10 @@ def _save_experiment_config(
             "name": "SWE-bench/SWE-bench_Lite",
             "repos": repos or {},
             "n_issues": issue_count,
+            # A targeted re-run selects by id instead of by repo count; recording
+            # the ids is what makes it reproducible (the repos map is then only
+            # a summary of what those ids happened to be).
+            "instance_ids": list(targeted_ids) if targeted_ids else None,
         },
         "strategies": strategy_names,
         "agents": agents or [],
@@ -185,7 +230,15 @@ def _save_experiment_config(
 
 
 def _yaml_scalar(value):
-    """Quote scalar strings that YAML would misread (flow indicators, ': ')."""
+    """Render a scalar so a YAML loader reads it back as the same value.
+
+    ``None`` must become ``null``: returning the object leaves the f-string to
+    render it as the string ``"None"``, which yaml.safe_load reads back as the
+    STRING 'None' rather than as null. That silently turns "no targeted ids"
+    into "an id named None" for anyone reading experiment.yaml.
+    """
+    if value is None:
+        return "null"
     if isinstance(value, str) and (
         value.startswith(("{", "[")) or ": " in value or value.strip() != value
     ):
@@ -202,6 +255,13 @@ def _to_yaml(data, indent: int = 0) -> str:
             lines.append(f"{pad}{key}:")
             lines.append(_to_yaml(value, indent + 1))
         elif isinstance(value, list):
+            if not value:
+                # An empty list must not render as a bare "key:" — a YAML
+                # loader reads that back as null, so a consumer doing
+                # len(cfg["agents"]) would crash on a field that is meant to
+                # be an empty list.
+                lines.append(f"{pad}{key}: []")
+                continue
             lines.append(f"{pad}{key}:")
             for item in value:
                 lines.append(f"{pad}  - {_yaml_scalar(item)}")
@@ -244,9 +304,15 @@ def main():
             logger.warning(f"Health check skipped/unavailable: {e}")
 
     from dataset_loader import DEFAULT_REPO_SPECS
-    repo_specs = _parse_repo_specs(args.repo_spec) if args.repo_spec else DEFAULT_REPO_SPECS
-    logger.info(f"Loading SWE-bench Lite — multi-repo: {repo_specs}")
-    issues = select_issues(repo_specs)
+    if args.instance_ids:
+        # A targeted re-run: --instance-ids wins over --repo-spec, so the same
+        # command cannot silently measure a different set than the one asked for.
+        logger.info(f"Targeted run — instances: {args.instance_ids}")
+        issues = select_issues(instance_ids=args.instance_ids)
+    else:
+        repo_specs = _parse_repo_specs(args.repo_spec) if args.repo_spec else DEFAULT_REPO_SPECS
+        logger.info(f"Loading SWE-bench Lite — multi-repo: {repo_specs}")
+        issues = select_issues(repo_specs)
     logger.info(f"Loaded {len(issues)} issues")
 
     if args.issues:
@@ -271,6 +337,19 @@ def main():
 
     Path(args.output).mkdir(parents=True, exist_ok=True)
 
+    def _write_early_config(exp_dir: str, exp_id: str) -> None:
+        """Record the configuration as soon as the experiment directory exists.
+
+        Previously this only happened after every run finished, so a crash, a
+        kill, or a full disk left a directory of patches with no record of the
+        settings that produced them -- and the longer the run, the more that
+        matters. A 6-hour sweep is exactly that case.
+        """
+        repos_actual = dict(Counter(issue.repo for issue in issues))
+        _save_experiment_config(
+            exp_dir, args, len(issues), strategy_names, exp_id, agents, repos_actual, agent_team
+        )
+
     df, exp_id = run_experiments(
         issues,
         strategies,
@@ -280,6 +359,8 @@ def main():
         resume=args.resume,
         agents=agents,
         model=provider.model,
+        on_experiment_start=_write_early_config,
+        experiment_id=getattr(args, "exp_id", None),
     )
 
     # Save experiment.yaml to per-experiment folder

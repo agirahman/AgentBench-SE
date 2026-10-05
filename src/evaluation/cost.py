@@ -10,15 +10,22 @@ from config import Config
 if TYPE_CHECKING:
     from models.result import CostSummary
 
-# DeepSeek peak window (WIB / UTC+7), per official pricing docs:
-#   peak  = 08:00–11:00 WIB  and  13:00–17:00 WIB
-#   off_peak = everything else
-_WIB_OFFSET = 7  # hours
-_PEAK_RANGES_WIB_HOUR = [(8, 11), (13, 17)]  # inclusive start, exclusive end
+# DeepSeek peak window, per official pricing docs:
+#   https://api-docs.deepseek.com/quick_start/pricing
+#   peak = 01:00-04:00 UTC and 06:00-10:00 UTC, Monday-Friday
+#   off_peak = everything else, INCLUDING weekends in full and Chinese public
+#              holidays in full
+# The docs state these hours in UTC. Any pre-2026-10 card that expressed them in
+# WIB (UTC+7) was wrong twice over: it shifted the window by 7 hours AND dropped
+# the weekend/holiday exclusion, so it billed Sat/Sun requests at peak.
+_PEAK_RANGES_UTC_HOUR = [(1, 4), (6, 10)]  # inclusive start, exclusive end
 
 
 def window_for(timestamp_utc: str, model: str = "") -> str:
-    """Return ``"peak"`` or ``"off_peak"`` for a UTC timestamp, in WIB (UTC+7).
+    """Return ``"peak"`` or ``"off_peak"`` for a UTC timestamp.
+
+    Official DeepSeek peak hours are 01:00-04:00 and 06:00-10:00 UTC on
+    weekdays only; weekends and Chinese public holidays are off-peak in full.
 
     Only models with a ``peak`` rate card (e.g. deepseek-v4-flash) are
     window-sensitive; everything else is always ``"off_peak"``.
@@ -33,9 +40,13 @@ def window_for(timestamp_utc: str, model: str = "") -> str:
         return "off_peak"
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    wib_hour = (dt.hour + _WIB_OFFSET) % 24
-    for start, end in _PEAK_RANGES_WIB_HOUR:
-        if start <= wib_hour < end:
+    else:
+        dt = dt.astimezone(timezone.utc)
+    # Weekends are off-peak in full. Python weekday(): Mon=0 .. Sun=6.
+    if dt.weekday() >= 5:
+        return "off_peak"
+    for start, end in _PEAK_RANGES_UTC_HOUR:
+        if start <= dt.hour < end:
             return "peak"
     return "off_peak"
 
@@ -69,11 +80,46 @@ class PricingTable:
             "currency": "USD",
             "pricing_version": "2026-07",
         },
+        # OpenRouter testing model: free tier, so cost metrics are genuinely $0
+        # (not a dummy rate). Used only for pipeline validation before the final
+        # DeepSeek run, so a $0 cost card is accurate, not a placeholder.
+        "stealth/space-bunny-alpha": {
+            "input_per_million": 0.0,
+            "output_per_million": 0.0,
+            "currency": "USD",
+            "pricing_version": "2026-09-free",
+        },
+        # OpenRouter route to the SAME DeepSeek model as the official API. The
+        # official DeepSeek rate card is applied so RQ3 is comparable across the
+        # two routes; note in the methodology that this is a modelled price.
+        "deepseek/deepseek-v4-flash": {
+            "off_peak": {
+                "input_per_million": 0.22,
+                "cached_input_per_million": 0.007,
+                "output_per_million": 0.66,
+            },
+            "peak": {
+                "input_per_million": 0.44,
+                "cached_input_per_million": 0.014,
+                "output_per_million": 1.32,
+            },
+            "currency": "USD",
+            "pricing_version": "2026-08-16-via-openrouter",
+        },
         "oc/deepseek-v4-flash-free": {
             "input_per_million": 0.0,
             "output_per_million": 0.0,
             "currency": "USD",
             "pricing_version": "2026-07",
+        },
+        # 9router (OpenCode route) free testing model. Genuinely $0, not a dummy
+        # rate: it is only used to validate the pipeline before the final
+        # DeepSeek run, so a zero cost card is accurate.
+        "oc/space-bunny-free": {
+            "input_per_million": 0.0,
+            "output_per_million": 0.0,
+            "currency": "USD",
+            "pricing_version": "2026-09-free",
         },
         "deepseek-v4-flash": {
             "off_peak": {
@@ -126,6 +172,62 @@ class PricingTable:
             "currency": "USD",
             "pricing_version": "2026-07",
         },
+        # cbai route on 9router, served by DeepSeek-V4.1-Flash (the 9router
+        # upstream is codebuddy-intl, which fronts DeepSeek's own API).
+        #
+        # These rates are MEASURED from 9router's own usageHistory, for the API key
+        # this pipeline ACTUALLY uses. That last part is the whole story: 9router
+        # bills PER KEY, and this project holds two keys for the same model.
+        #
+        #   ...da2fe1  = Config.OPENCODE_API_KEY  <-- THE PIPELINE'S KEY
+        #                n=8225 rows -> regular=0.139410 cached=0.002467
+        #                output=0.513450, median error -0.0407%
+        #   ...b04880  = a DIFFERENT key, held in the shell but NOT used by the
+        #                pipeline: n=2041 rows -> output=0.280000
+        #
+        # An earlier version of this card was solved on ...b04880 and therefore
+        # under-stated output by 1.83x ($0.28 vs the $0.5135 we are actually
+        # charged). The reconciliation that exposed it: in the EXP-20261001-765
+        # run window, 9router recorded 567 requests on ...da2fe1 and ZERO on
+        # ...b04880. Always confirm the suffix of Config.OPENCODE_API_KEY before
+        # re-solving this card.
+        #
+        # Rates are flat (no peak/off_peak split): the bill for our key shows no
+        # time-of-day structure, and 9router is a reseller whose per-key pricing
+        # is its own. This is also why the official DeepSeek card is NOT used for
+        # reported cost -- our key pays $0.5135/M output, not DeepSeek's $0.60,
+        # and paying a reseller's rate is what the thesis must report.
+        #
+        # Proof the cached rate is a real discount (~57x): 7341 of 8225 rows carry
+        # a cache hit, and the solve reproduces them at median error -0.04%. An
+        # earlier card set cached == full rate on the claim that no discount was
+        # granted; that claim came from two requests on the OTHER key and is
+        # refuted by the 8225 rows here.
+        #
+        # tools/read_actual_bill.py remains the authority: if it disagrees with
+        # this card, the bill wins.
+        "cbai/deepseek-v4.1-flash": {
+            "input_per_million": 0.13941,
+            "cached_input_per_million": 0.002467,
+            "output_per_million": 0.51345,
+            "currency": "USD",
+            "pricing_version": "2026-10-01-measured-9router-usageHistory-key-da2fe1",
+        },
+        # Guard card for the runaway cost cap. It is the SAME numbers as the
+        # reported card above, and kept as a separate entry on purpose: the two
+        # answer different questions ("what do we report?" vs "what is this act
+        # about to spend?"), and on some routes they genuinely diverge. Keeping
+        # the seam means calibrating one can never silently move the other.
+        #
+        # Here they coincide because the reported card is already the measured
+        # billed rate. See _cost_so_far() for why the split exists at all.
+        "cbai/deepseek-v4.1-flash-billed": {
+            "input_per_million": 0.13941,
+            "cached_input_per_million": 0.002467,
+            "output_per_million": 0.51345,
+            "currency": "USD",
+            "pricing_version": "2026-10-01-measured-9router-usageHistory-key-da2fe1",
+        },
         "tencent/hy3": {
             "input_per_million": 0.14,
             "output_per_million": 0.58,
@@ -160,7 +262,19 @@ class PricingTable:
 
     @staticmethod
     def get(model: str) -> Optional[dict]:
-        return PricingTable.PRICING.get(model)
+        """Return the rate card for *model*, honouring PRICING_MODEL_OVERRIDE.
+
+        The override exists because the budget-curve runs use a deliberately free
+        testing model (oc/space-bunny-free) whose genuine rate is $0. Without it
+        every cost column reads 0.00, a dollar cost cap can never bind, and RQ3
+        has no data at all -- which is exactly what happened to EXP-20260928-003.
+
+        Set PRICING_MODEL_OVERRIDE=deepseek-v4-flash to price those tokens with
+        the paid card this project reports on. That produces an ESTIMATE, not a
+        measurement, and `aggregate()` marks the version string so the CSV never
+        presents it as a real charge.
+        """
+        return PricingTable.PRICING.get(Config.PRICING_MODEL_OVERRIDE or model)
 
     @staticmethod
     def rates_for(model: str, window: str = "off_peak") -> dict:
@@ -205,7 +319,8 @@ class CostCalculator:
         peak_total_idr = peak_total_usd * Config.USD_IDR_RATE
 
         # Window-aware actual cost: use the rate card for the window the
-        # inference actually ran in (WIB peak 08-11 & 13-17, per docs).
+        # inference actually ran in (official DeepSeek peak = 01-04 & 06-10 UTC,
+        # weekdays only).
         window = window_for(inference.timestamp, inference.model)
         actual_card = PricingTable.rates_for(inference.model, window)
         actual_input_usd = (regular / 1_000_000) * actual_card["input_per_million"] + (cached / 1_000_000) * actual_card["cached_input_per_million"]
@@ -241,9 +356,22 @@ class CostCalculator:
         cached_tok = regular_tok = 0
         cached_usd = regular_usd = peak_usd = peak_idr = 0.0
         actual_usd = actual_idr = 0.0
+        semantic_hit = False
+        semantic_saved = 0.0
+        semantic_turns = 0
         version = ""
         for inf in inferences:
             c = self.calculate(inf)
+            # OR/SUM across the run's inferences: one cached response anywhere is
+            # enough to disqualify the whole run from strategy comparison, so this
+            # must never be averaged away.
+            inf_usage = inf.usage or {}
+            if inf_usage.get("semantic_cache_hit"):
+                semantic_hit = True
+                semantic_saved += float(
+                    inf_usage.get("semantic_cache_cost_saved_usd") or 0.0
+                )
+            semantic_turns += int(inf_usage.get("semantic_cache_hit_turns") or 0)
             input_usd += c.input_cost_usd
             output_usd += c.output_cost_usd
             total_usd += c.total_cost_usd
@@ -259,6 +387,11 @@ class CostCalculator:
             pricing = PricingTable.get(inf.model)
             if pricing:
                 version = pricing.get("pricing_version", "")
+        # When an override priced this run, say so in the artefact. Otherwise the
+        # CSV would show a non-zero cost for a run served by a free model, and a
+        # reader would take an estimate for a real charge.
+        if Config.PRICING_MODEL_OVERRIDE:
+            version = f"{version}+priced-as-{Config.PRICING_MODEL_OVERRIDE}"
         return CostSummary(
             input_cost_usd=input_usd,
             output_cost_usd=output_usd,
@@ -273,4 +406,7 @@ class CostCalculator:
             peak_total_cost_idr=peak_idr,
             actual_cost_usd=actual_usd,
             actual_cost_idr=actual_idr,
+            semantic_cache_hit=semantic_hit,
+            semantic_cache_cost_saved_usd=semantic_saved,
+            semantic_cache_hit_turns=semantic_turns,
         )

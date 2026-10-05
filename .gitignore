@@ -38,6 +38,26 @@ gen_out.txt
 tencent__hy3
 *.modal-*.json
 
+# Scratch files used to pass multi-line commit messages to git, plus captured
+# command output. They are written and deleted around a commit, but `git add -A`
+# catches them while they exist, so they must never be tracked.
+_msg.txt
+_commitmsg.txt
+_*.txt
+# Captured command output and JSON responses, written while investigating.
+# They are scratch by definition: `git add -A` catches them while they exist.
+_*.json
+# Scratch scripts agents write into the repo root during an audit.
+.audit_*.py
+# The same thing for a verification pass: probe scripts and their captured
+# output. A `git add -A` picked these up once and they had to be unstaged.
+.verify_*
+# Config-consistency probe output (test_zz_probe_config_leak.py,
+# tools/_find_config_leak.py). A throwaway diagnostic dump, but written with a
+# LEADING DOT -- so the `_*.json` rule above does not match it and it showed up in
+# `git status` unnoticed until it was caught by hand.
+.tr_probe_observed.json
+
 # doc
 docs/*
 !docs/MEMORY.md
@@ -51,5 +71,27 @@ docs/*
 !docs/UPDATE_PLAN.md
 !docs/setup-docker.md
 !docs/MULTI_AGENT_MIGRATION.md
+!docs/RUNBOOK.md
 !docs/FRAMEWORK_FLOW_RESEARCH.md
 !docs/FRAMEWORK_FLOW_TECHNICAL.md
+# Research deliverables: these carry citations that back the thesis, so they must
+# be versioned rather than left as local scratch.
+!docs/RESEARCH_*.md
+!docs/SPIKE_ORACLE_20260929.md
+!docs/PARALLEL_RUN_20260929.md
+
+# Session handoffs: the first thing the next session reads, so losing them to a
+# scratch-files ignore rule would cost more than it saves.
+!docs/HANDOFF_*.md
+
+# Audit and verification reports. These record what was checked and what was found
+# wrong, including findings against this project's own fixes -- evidence that has
+# to be citable, not local scratch.
+!docs/AUDIT_*.md
+!docs/VERIFY_*.md
+
+# Local agent tooling (Command Code config + workstream briefs)
+.commandcode/
+
+# Research source cache (re-fetchable via tools/research_fetch.py)
+.research_cache/

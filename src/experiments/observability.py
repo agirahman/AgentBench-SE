@@ -8,10 +8,32 @@ from models.issue import Issue
 from models.result import ExperimentResult
 
 
+#: Failure statuses that are NOT "the model produced nothing" -- they mean the run
+#: never got a fair chance. Kept separate so the manifest can distinguish an
+#: infrastructure failure from a model that genuinely returned an empty patch.
+_FAILURE_STATUSES = (
+    "TIMEOUT",
+    "RATE_LIMIT",
+    "PROVIDER_ERROR",
+    "ERROR",
+    "FAILED",
+)
+
+
 def _result_status(result: ExperimentResult) -> str:
-    if result.patch_status == "TIMEOUT":
-        return "TIMEOUT"
-    if result.patch_status in ("VALID", "NORMALIZE") and result.execution.patch.strip():
+    """Map a run's outcome to one manifest bucket.
+
+    Every failure status used to fall through to ``EMPTY_PATCH``, so a provider
+    502, a rate limit and a model that really returned nothing were
+    indistinguishable in the manifest -- and ``execution_status`` only looked at
+    the ``TIMEOUT`` bucket, so a sweep that died entirely on rate limits was
+    reported as ``COMPLETED``. Both hid exactly the failures a 150-run sweep needs
+    to see.
+    """
+    status = str(result.patch_status or "").upper()
+    if status in _FAILURE_STATUSES:
+        return status
+    if status in ("VALID", "NORMALIZE") and result.execution.patch.strip():
         return "PATCH_GENERATED"
     return "EMPTY_PATCH"
 
@@ -40,9 +62,12 @@ def build_experiment_manifest(
         difficulty_counts[difficulty] = difficulty_counts.get(difficulty, 0) + 1
         repo_counts[issue.repo] = repo_counts.get(issue.repo, 0) + 1
 
-    status_counts = {"PATCH_GENERATED": 0, "EMPTY_PATCH": 0, "TIMEOUT": 0}
+    status_counts = {"PATCH_GENERATED": 0, "EMPTY_PATCH": 0}
+    for name in _FAILURE_STATUSES:
+        status_counts[name] = 0
     for r in results:
-        status_counts[_result_status(r)] += 1
+        bucket = _result_status(r)
+        status_counts[bucket] = status_counts.get(bucket, 0) + 1
 
     model = results[0].model if results else provider_name
 
@@ -74,6 +99,16 @@ def build_experiment_manifest(
                     "total": r.execution.total_tokens,
                 },
                 "execution_time_seconds": round(r.execution.execution_time, 3),
+                # Response-cache integrity flag, per run. True means the provider
+                # replayed a cached response, so this run did not measure the
+                # strategy and must not be compared against the others. Kept
+                # separate from ``tokens.cached_input`` (prefix caching), which is
+                # a normal discount rather than an integrity problem.
+                "semantic_cache_hit": bool(r.cost.semantic_cache_hit),
+                "semantic_cache_cost_saved_usd": round(
+                    r.cost.semantic_cache_cost_saved_usd, 6
+                ),
+                "semantic_cache_hit_turns": r.cost.semantic_cache_hit_turns,
                 "cost": {
                     "total_usd": round(r.cost.total_cost_usd, 6),
                     "total_idr": round(r.cost.total_cost_idr, 2),
@@ -112,14 +147,28 @@ def build_experiment_manifest(
             "total_issues_processed": len(results),
             "patch_generated_count": status_counts["PATCH_GENERATED"],
             "empty_patch_count": status_counts["EMPTY_PATCH"],
-            "timeout_count": status_counts["TIMEOUT"],
-            # Honest status: a run with timeouts/errors is not plain COMPLETED.
+            "timeout_count": status_counts.get("TIMEOUT", 0),
+            # Every failure bucket, not just TIMEOUT. A sweep that died on rate
+            # limits or provider errors used to report plain COMPLETED, because
+            # only the TIMEOUT bucket was inspected.
+            "failure_counts": {
+                name: status_counts.get(name, 0)
+                for name in _FAILURE_STATUSES
+                if status_counts.get(name, 0)
+            },
+            # Honest status: a run with any failure is not plain COMPLETED.
             "execution_status": (
                 "COMPLETED_WITH_ERRORS"
-                if status_counts["TIMEOUT"] > 0
+                if any(status_counts.get(name, 0) for name in _FAILURE_STATUSES)
                 else "COMPLETED"
             ),
             "api_requests_by_strategy": api_requests_by_strategy,
+            # Integrity headline: how many runs were served from the provider's
+            # semantic (response) cache. Non-zero means those runs must be
+            # excluded before any strategy comparison is read.
+            "semantic_cache_hits": sum(
+                1 for r in results if getattr(r.cost, "semantic_cache_hit", False)
+            ),
         },
         "results": result_entries,
     }
