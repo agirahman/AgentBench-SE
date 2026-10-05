@@ -1,7 +1,7 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
 **Last Updated:** 2026-10-03 (audit dokumen + verifikasi kesiapan run bertahap)
-**Status:** **SIAP run 50 issue** — bisa **bertahap** dengan `--limit <N naik> --resume` (prefix tumbuh; `--only M` hanya untuk top-up run yang belum selesai). **THINKING ON (medium)**. Budget 200/200/200, revisi **48 (4 putaran × 2 act × 6)**. `--resume` **terbukti bekerja di run berbayar nyata**. Gate **READY 9/9**, preflight **50/50 pristine**. **610 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
+**Status:** **SIAP run 50 issue** — bisa **bertahap** dengan `--limit <N naik> --resume` (prefix tumbuh; `--only M` hanya untuk top-up run yang belum selesai). **THINKING ON (medium)**. Budget 200/200/200, revisi **48 (4 putaran × 2 act × 6)**. `--resume` **terbukti bekerja di run berbayar nyata**. Gate **READY 11/11**, preflight **50/50 pristine**. **653 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
 **Active Branch:** `19/toolcall-commandcode`
 **Commit terakhir:** `5462f9b` (guard `--resume --exp-id`: tolak typo, jangan fork eksperimen berbayar), `9c91d6a` (reconcile dokumen dengan pengukuran), `b6abf88` (`--only N` untuk sweep bertahap), `e618b8d` (completeness-on-interrupt + attempts window), `38a1c57` (interrupt exports + preflight scope), `cf19d98` (resume opsi D)
 **Handoff sesi terakhir:** [`HANDOFF_20261002.md`](HANDOFF_20261002.md) · sebelumnya [`HANDOFF_20261001.md`](HANDOFF_20261001.md)
@@ -290,7 +290,7 @@ dipakai `--resume`. Kalau diimplementasikan ulang, keduanya bisa berbeda pendapa
 dan ukuran batch jadi tidak bermakna sama dengan yang benar-benar dijalankan.
 
 **Verifikasi:** 10 test (`tests/test_sweep_only_batch.py`), **7 MERAH** saat
-perbaikannya dimatikan. Suite **508 lulus saat itu** (kini **610**), gate **READY 9/9**.
+perbaikannya dimatikan. Suite **508 lulus saat itu** (kini **653**), gate **READY 11/11**.
 
 ---
 
@@ -455,7 +455,101 @@ crash tidak terbaca sebagai temuan).
   **konsisten dengan** tidak ada replay — **indikasi, bukan bukti**.
 
 **Gate preflight tetap perlu `tools/clean_repos.py`.** Terbukti lagi setelah batch-1:
-`readiness_report` → **NOT READY** (9 repo kotor) → `clean_repos.py` → **READY 9/9**.
+`readiness_report` → **NOT READY** (9 repo kotor) → `clean_repos.py` → **READY**.
+
+---
+
+## 🛡️ Mitigasi Kebocoran Solusi (Solution Leak Defense — layer-1) (2026-10-05)
+
+**Latar belakang:** Saat sweep `EXP-20261004-034` berjalan sampai batch-5, ditemukan dua vektor kebocoran solusi upstream:
+1. **Git refs masa depan:** `psf/requests @0be38a0` memuat 2.781 commit masa depan + 159 tag (64 masa depan) → agent menjalankan `git show v2.8.0:requests/adapters.py` dan membaca solusi upstream (`ClosedPoolError`). Selain itu, `psf/requests @fe693c4` memuat branch PR `pr2148` (2 commit solusi).
+2. **Unduh dari internet:** `matplotlib-23563` mengunduh patch via curl/web → patch memuat baris upstream verbatim: `zs = cbook._to_unmasked_float_array(zs).ravel()`.
+
+**Klarifikasi:** `site-packages` dan pembacaan checkout lain **bukan kebocoran** (dialihkan ke repo oleh `_normalize_tool_path` atau ditolak; output kosong).
+
+### Implementasi Pertahanan Berlapis (Opsi B)
+
+1. **Sanitasi Git Timesafe (`tools/sanitize_git_history.py`):**
+   - Mengadopsi pola `git_clone_timesafe` resmi dari SWE-bench PR #471.
+   - Hapus semua git remote (`git remote remove <remote>`) dari seluruh checkout.
+   - Hapus **HANYA tag masa depan** (`commit date > base_commit date`). Tag masa lalu **tetap dipertahankan** (kritis untuk instance seperti `pytest-5840`).
+   - Hapus branch lokal yang mengarah ke masa depan (misal `pr2148`).
+   - `git reflog expire --expire=now --all` dan `git gc --prune=now`.
+   - **Fail-closed assertion:** `git log --oneline --all --after=@<ts+1>` **wajib 0**.
+   - Hasil eksekusi `--apply`: seluruh 50 checkout aktif kini **100% time-safe, 0 remote, 0 future tags, working tree bersih**.
+
+2. **Blok Jaringan Python-Level (`src/agents/sandbox/sitecustomize.py`):**
+   - Diinjeksi ke setiap perintah `run_tests` lewat `PYTHONPATH`.
+   - Mencegat `socket.socket.connect`, `socket.create_connection`, `http.client`, `urllib.request`.
+   - Menolak koneksi eksternal dengan pesan: `[blocked] network access is disabled in this sandbox (target: ...)`.
+   - Koneksi localhost (`127.0.0.1`, `::1`, `localhost`) tetap diizinkan.
+
+3. **Filter Perintah Proaktif (`src/agents/tools.py:run_tests`):**
+   - Menolak perintah eksternal sebelum dieksekusi: `git fetch/clone/pull/remote add`, `pip install/download`, `curl`, `wget`, `Invoke-WebRequest`, `Invoke-RestMethod`, `certutil -urlcache`, `bitsadmin`, `Start-BitsTransfer`.
+   - Perintah normal (`pytest`, `python -c`, `git log`, `git show`, `git diff`, `dir`, `findstr`, dll.) **tidak terpengaruh**.
+
+4. **Gate Preflight & Verifikasi Otomatis:**
+   - `tools/readiness_report.py` diperluas dari 9 menjadi **11 check** (tambah `git sanitization` via `--check` dan `network block` via `tools/verify_network_block.py`). Verdict: **READY 11/11**.
+   - `tools/probe_sandbox_escape.py`: probe 6 vektor escape nyata, seluruhnya **PASS (BLOCKED)**.
+
+### ⚠️ VALIDASI ORCHESTRATOR: layer-1 TIDAK CUKUP (2026-10-05)
+
+Validasi independen lewat **jalur `run_tests` sesungguhnya** (bukan unit test) menemukan
+**10 bypass jaringan + 7 jalur filesystem** yang masih terbuka. Detail:
+[`VALIDATION_SANDBOX_20261005.md`](VALIDATION_SANDBOX_20261005.md).
+
+**Bypass jaringan terukur (semua lewat `run_tests`):**
+
+| Bypass | Hasil terukur |
+|---|---|
+| `python -E` / `-S` / `-I` + urllib | **HTTP 200** (PYTHONPATH diabaikan) |
+| `powershell (New-Object System.Net.WebClient).DownloadString(...)` | **unduh 36.983 bytes** (file fix Django 3.0) |
+| `cmd /c "curl ..."` · `bash -c "curl ..."` | **HTTP 200** (filter hanya cocok di awal perintah) |
+| `python -c "subprocess.run(['curl',...])"` | **HTTP 200** (nested subprocess) |
+| `git ls-remote --heads https://...` · `git remote show origin` | daftar refs bocor |
+| **rantai** nested `git fetch <URL>` → `git show FETCH_HEAD:...` | **kode masa depan terbaca** — sanitasi tidak mencegah fetch URL baru |
+| `node -e "fetch(...)"` | **HTTP 200** |
+
+**Jalur filesystem terukur (paling merusak validitas RQ1):**
+
+| Yang terbaca | Dampak |
+|---|---|
+| `results/<EXP>/patches/<inst>_direct.txt` | 🔴 **self-leak**: planning/review bisa baca solusi direct di instance yang sama |
+| `results/<EXP>/predictions/direct.jsonl` | 🔴 `model_patch` terbaca |
+| `_hits.txt` (sisa batch-5) | 🔴 berisi `model_patch` sympy-11870 |
+| `.env` | 🟠 API key terbaca |
+| `logs/eval_level100.log` | 🔴 110× `diff --git` |
+| checkout instance lain · 436 predictions lama | 🔴 |
+
+**Akar masalah:** `read_file`/`grep` **sudah** menolak path luar repo (terverifikasi). Yang bocor
+adalah **`run_tests`** — `shell=True`, `cwd`=repo, **tanpa batas path**. Filter berbasis string
+adalah whack-a-mole melawan shell Turing-complete.
+
+**Kesimpulan:** layer-1 (sanitasi git + sitecustomize + filter) **menutup kasus teramati di batch
+1–4**, tapi **bukan sandbox**. Untuk run berikutnya diperlukan **isolasi sejati**.
+
+### Keputusan: Opsi B (Docker) utama, Opsi A (isolasi proses) cadangan (2026-10-05)
+
+**Keputusan user:** isolasi sandbox memakai **Docker** sebagai utama; isolasi proses Windows
+(user + ACL + firewall `-LocalUser`) sebagai cadangan.
+
+**Konsekuensi yang sudah diukur (1.264 panggilan `run_tests` dari 123 run):**
+
+| Strategi | Perintah Windows-specific | Total | Persen |
+|---|---|---|---|
+| direct | 48 | 450 | **10,7%** |
+| planning | 19 | 330 | **5,8%** |
+| review | 43 | 484 | **8,9%** |
+
+Karena rasionya **tidak merata antar strategi** (direct 10,7% vs planning 5,8% ≈ 2×), ganti shell
+ke Linux **membebani strategi secara tidak setara** → kalau tidak seragam, perbandingan RQ1 bias.
+Maka: kalau Docker dipakai, **seluruh 150 run harus dijalankan di Docker** (tidak boleh campur
+dengan batch 1–4 yang Windows).
+
+**Fakta lingkungan:** Windows 11 **Home** (Windows container tidak didukung → Docker hanya Linux);
+daemon Docker **mati** (harus dinyalakan tiap batch); WSL `memory=3GB` di host 7,8 GB (rawan swap).
+Preseden Opsi A sudah ada di mesin: user `CodexSandboxOffline/Online` + firewall rule per-user, dan
+`New-NetFirewallRule` punya `-LocalUser` (terverifikasi).
 
 ---
 
@@ -686,7 +780,7 @@ menyuntikkan test rusak → gate melaporkan **NOT READY**, exit 1.
 
 | Verifikasi | Hasil |
 |---|---|
-| Unit test | **610 lulus** |
+| Unit test | **653 lulus** |
 | Preflight repo | **50/50 pristine** |
 | Fairness budget | **FAIR** — 200/200/200 |
 | Putaran revisi | Setiap act revisi **6+6** (kebutuhan terukur: 6) |
@@ -724,7 +818,7 @@ Sweep **tidak** mengulang dari nol; savepoint per run dibaca dan yang sudah sele
 | **Budget tool-turn** | ✅ Done | `agents/budget.py` — total sama per strategi, sekarang **200** (skala referensi) |
 | **Pre-flight validator** | ✅ Done | `tools/preflight_modal.py` — replikasi kontrak Modal secara lokal |
 | **Rate-limit handling** | ✅ Done | Backoff 429 + circuit breaker |
-| **Test suite** | ✅ Done | **610 lulus** (dari 426). **Lulus di env bersih MAUPUN env kotor** |
+| **Test suite** | ✅ Done | **653 lulus** (dari 426). **Lulus di env bersih MAUPUN env kotor** |
 | **Thinking mode** | ✅ **ON** | `deepseek` thinking + effort `medium`; `*_reasoning.md` ditulis per role |
 | **MAX_TOKENS** | ✅ **65536** | Naik dari 32768; reasoning + jawaban berbagi anggaran ini |
 | **Rate card cbai** | ✅ **FIXED** | Diukur dari key yang BENAR (`…da2fe1`), bukan `…b04880` |
@@ -1728,6 +1822,9 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 | `tools/run_final_sweep.py` | **Entry point run 50 issue** — gate preflight, pass semua config eksplisit |
 | `tools/preflight_repos.py` | Cek 50 repo pristine; sweep **gagal** kalau tidak |
 | `tools/clean_repos.py` | Bersihkan checkout yang kotor |
+| `tools/sanitize_git_history.py` | **Sanitasi git timesafe** SWE-bench PR #471 (`--dry-run`/`--apply`/`--check`) |
+| `tools/verify_network_block.py` | **Verifikasi blok jaringan**: sitecustomize & command filter aktif |
+| `tools/probe_sandbox_escape.py` | **Probe 6 vektor escape nyata** (semua wajib PASS/BLOCKED) |
 | `tools/check_semantic_cache.py` | **Gate integritas**: deteksi response-cache hit (exit 1 bila ada) |
 | `tools/verify_revision_rounds.py` | Apakah reserve membiayai **setiap** putaran revisi? |
 | `tools/audit_revision_rounds.py` | Berapa putaran revisi yang **benar-benar** jalan? |
@@ -1768,26 +1865,30 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 ---
 
-**Last working state:** commit `89c83be` (semantic-cache detection) — **614 test lulus**, gate **READY 9/9**. **Sweep final BERJALAN** di `EXP-20261004-034`: **40/50 issue = 120/150 run (80%)**, biaya CSV **$7,3700**, 0 duplikat, semua patch `VALID`, `INCOMPLETE.json` tidak ada. Batch 1–4 selesai (10 issue per batch; staging `--limit <N naik> --resume`, prefix tumbuh). Semantic cache: **0 hit** (90 baris tercatat + 30 pra-fix "not recorded"). Budget **200/200/200**, revisi **48 (4 putaran × 6+6)**. `--resume` + interrupt + `--only` **terbukti bekerja** di run berbayar nyata (`EXP-20261002-542`) — lihat §"Verifikasi end-to-end".
+**Last working state:** commit `7c5642a` + mitigasi kebocoran layer-1 — **653 test lulus**, gate **READY 11/11**. **Sweep final DIHENTIKAN** di `EXP-20261004-034` (batch 1–4 selesai: **40/50 issue = 120/150 run**, $7,37; batch-5 dihentikan setelah 3 run / $0,15). **Alasan stop: vektor kebocoran solusi** — lihat [`FINDINGS_LEAK_20261005.md`](FINDINGS_LEAK_20261005.md). Layer-1 (sanitasi git + sitecustomize + filter perintah) **SELESAI & TERVERIFIKASI** — tapi **validasi orchestrator membuktikan layer-1 TIDAK CUKUP** (10 bypass jaringan + 7 jalur filesystem; lihat [`VALIDATION_SANDBOX_20261005.md`](VALIDATION_SANDBOX_20261005.md)). **Keputusan: isolasi Docker (utama), isolasi proses (cadangan).**
 
 **Langkah berikutnya (prioritas):**
 
-1. **Sweep final SEDANG BERJALAN — sisa 1 batch (batch-5: 10 issue terakhir).**
-   Eksperimen: `EXP-20261004-034` (jangan buat eksperimen baru). Batch 1–4 selesai
-   (40/50 issue, 120/150 run, $7,37). **Resep batch-5:**
+0. **⏭️ ISOLASI SEJATI (Docker) — blocker sebelum run berbayar apa pun:**
+   - **Keputusan user:** Docker sebagai utama; isolasi proses Windows (user + ACL + firewall `-LocalUser`) sebagai cadangan.
+   - **Wajib:** kalau Docker dipakai, **seluruh 150 run dijalankan di Docker** — tidak boleh dicampur dengan batch 1–4 (Windows), karena 8,7% perintah Windows-specific dan rasionya tidak merata antar strategi (direct 10,7% vs planning 5,8%) → perbandingan RQ1 akan bias.
+   - Bersihkan dulu (gratis, tanpa admin): hapus `_hits.txt` + `_difft.txt` (berisi `model_patch`), dan 51 `.git/FETCH_HEAD` pre-existing (higiene; terverifikasi menunjuk base_commit, bukan bocor).
+   - Perluas probe regresi: setiap bypass di `VALIDATION_SANDBOX_20261005.md` harus jadi test yang bisa MERAH.
+   - Preflight gate: sweep menolak start kalau isolasi tidak aktif (Docker mati / user sandbox tidak ada).
+
+1. **Setelah isolasi terpasang: run ulang sweep dari nol (150 run) di lingkungan Docker** — karena komparabilitas, batch 1–4 (Windows) **tidak bisa dilanjutkan** kalau shell berubah. Estimasi ~$10–15, 20+ jam.
+   Eksperimen: **buat baru** (jangan lanjutkan `EXP-20261004-034` yang Windows). Resep per batch:
    ```
    python tools/clean_repos.py          # WAJIB antar-batch
-   python tools/run_final_sweep.py --limit 50 --resume --exp-id EXP-20261004-034
-   python tools/check_semantic_cache.py --exp EXP-20261004-034   # verdict nyata
+   python tools/run_final_sweep.py --limit <N naik> --resume --exp-id <EXP-id>
+   python tools/check_semantic_cache.py --exp <EXP-id>   # verdict nyata
    ```
    ⚠️ **`--limit` diukur dalam ISSUE dari awal dataset**, jadi tiap batch **naikkan N**
-   (10 → 20 → 30 → 40 → 50). `--limit 10` di batch ke-2 dst = "Nothing to do"
-   (issue 1–10 sudah selesai), uang tidak terbuang tapi batch tidak maju.
+   (10 → 20 → 30 → 40 → 50). `--limit 10` di batch ke-2 dst = "Nothing to do".
    ⚠️ **`--only M` TIDAK BISA menambah issue baru** — hanya menambal run yang belum
    selesai di issue yang sudah terekam. Untuk menambah issue, **naikkan `--limit`**.
-   Kalau terputus: `python tools/run_final_sweep.py --resume --exp-id <EXP-id>`
-   setelah `python tools/clean_repos.py` (runner membersihkan sebelum tiap strategi
-   tapi tidak sesudah).
+   ⚠️ **Re-run issue terdampak TIDAK otomatis** — `--resume` men-skip run yang selesai;
+   perlu hapus baris savepoint mereka dulu, atau eksperimen baru.
 
 2. **Setelah sweep selesai:**
    - `python tools/check_sweep_state.py --exp <EXP-id>` — setiap run hadir?

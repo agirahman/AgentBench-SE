@@ -436,6 +436,48 @@ def _is_outside_repo_path(raw: str) -> bool:
     return False
 
 
+_SANDBOX_DIR = Path(__file__).resolve().parent / "sandbox"
+
+#: Command patterns attempting network access or package/git retrieval outside
+#: the evaluation sandbox. These close the solutions-leak loophole (2026-10-05)
+#: where agents downloaded upstream patches via curl/wget or inspected remote git refs.
+_SECURITY_COMMAND_PATTERNS = (
+    (
+        r"(?:^|[;&|\n\r])\s*(?:[\w\\/.-]*[/\\])?git(?:\.exe)?\s+(?:.*?\s+)?(?:fetch|clone|pull|remote\s+add|remote\s+set-url)\b",
+        "git network commands (fetch/clone/pull/remote add) are disabled in this sandbox",
+    ),
+    (
+        r"(?:^|[;&|\n\r])\s*(?:[\w\\/.-]*[/\\])?(?:python(?:\.exe)?\s+-m\s+)?pip\d*(?:\.exe)?\s+(?:install|download)\b",
+        "pip package installation and download are disabled in this sandbox",
+    ),
+    (
+        r"(?:^|[;&|\n\r])\s*(?:[\w\\/.-]*[/\\])?(?:curl|wget)(?:\.exe)?\b",
+        "external web fetch tools (curl/wget) are disabled in this sandbox",
+    ),
+    (
+        r"\b(?:Invoke-WebRequest|Invoke-RestMethod|Start-BitsTransfer)\b",
+        "network transfer cmdlets are disabled in this sandbox",
+    ),
+    (
+        r"(?:^|[;&|\n\r])\s*(?:[\w\\/.-]*[/\\])?certutil(?:\.exe)?\s+.*-(?:urlcache|f)\b",
+        "certutil network download is disabled in this sandbox",
+    ),
+    (
+        r"(?:^|[;&|\n\r])\s*(?:[\w\\/.-]*[/\\])?bitsadmin(?:\.exe)?\b",
+        "bitsadmin background transfer is disabled in this sandbox",
+    ),
+)
+
+
+def _check_command_security(command: str) -> str | None:
+    """Return an error message if the command tries external network access."""
+    cmd = (command or "").strip()
+    for pattern, reason in _SECURITY_COMMAND_PATTERNS:
+        if re.search(pattern, cmd, re.IGNORECASE):
+            return f"[blocked] {reason}"
+    return None
+
+
 def run_tests(command: str = "", role: str = "") -> str:
     """Run a test command inside the instance repo (sandboxed, capped).
 
@@ -476,6 +518,12 @@ def run_tests(command: str = "", role: str = "") -> str:
     if not command:
         command = _guess_test_command(root)
 
+    # Sandbox security guard: block commands attempting network access or package/repo fetch.
+    blocked_reason = _check_command_security(command)
+    if blocked_reason:
+        _warn(f"[tool-guard] network/security command blocked: {command[:160]!r}")
+        return blocked_reason
+
     # A read-only role must not mutate the repository through the shell. See the
     # docstring: the grant is structural, but this tool is arbitrary shell.
     if role in _READONLY_ROLES:
@@ -502,11 +550,21 @@ def run_tests(command: str = "", role: str = "") -> str:
         )
     _RECENT_TEST_COMMANDS.append(command)
 
+    # Inject sandbox sitecustomize via PYTHONPATH so Python processes have
+    # outbound socket/network calls blocked at runtime.
+    env = os.environ.copy()
+    if _SANDBOX_DIR.exists():
+        cur_py_path = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            str(_SANDBOX_DIR) + (os.pathsep + cur_py_path if cur_py_path else "")
+        )
+
     try:
         proc = subprocess.run(
             command,
             shell=True,
             cwd=str(root),
+            env=env,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -524,7 +582,7 @@ def run_tests(command: str = "", role: str = "") -> str:
     if truncated:
         out = out[-limit:]
 
-    if _looks_like_env_failure(out):
+    if "[blocked]" not in out and _looks_like_env_failure(out):
         return (
             "[tests unavailable] The test environment for this repository is not "
             "installed in this sandbox (its dependencies come from the evaluation "
