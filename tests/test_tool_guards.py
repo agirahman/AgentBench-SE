@@ -154,12 +154,36 @@ class TestGuessTestCommand:
         cmd = tools._guess_test_command(tmp_path)
         assert "-m pytest" in cmd
 
-    def test_uses_project_interpreter_not_bare_python(self, tmp_path):
-        """A bare `python` resolves to the system interpreter, where the venv's
-        packages are absent. The command must name the project interpreter."""
+    def test_uses_project_interpreter_not_bare_python(self, tmp_path, monkeypatch):
+        """LOCAL mode only: the command must name the venv interpreter.
+
+        A bare `python` resolves to the system interpreter, where the venv's
+        packages are absent. This is a property of the HOST shell, so it is pinned
+        in local mode explicitly rather than depending on the ambient
+        SANDBOX_MODE — otherwise the test asserts the wrong thing whenever the
+        suite is run with SANDBOX_MODE=docker.
+        """
+        monkeypatch.setenv("SANDBOX_MODE", "local")
         (tmp_path / "pytest.ini").write_text("", encoding="utf-8")
         cmd = tools._guess_test_command(tmp_path)
         assert sys.executable in cmd
+
+    def test_docker_mode_uses_bare_posix_python(self, tmp_path, monkeypatch):
+        """DOCKER mode: the host's venv path is meaningless inside the container.
+
+        `sys.executable` is a Windows path like ``D:\\...\\.venv\\Scripts\\python.exe``
+        which does not exist in the Linux container (measured: exit 127). The
+        command must therefore call the plain ``python`` on the container's PATH —
+        the exact opposite of the local-mode rule above.
+        """
+        monkeypatch.setenv("SANDBOX_MODE", "docker")
+        (tmp_path / "pytest.ini").write_text("", encoding="utf-8")
+        cmd = tools._guess_test_command(tmp_path)
+        assert sys.executable not in cmd, (
+            "the host interpreter path must not leak into the container command"
+        )
+        assert cmd.startswith("python "), f"expected bare posix python; got: {cmd}"
+        assert "\\" not in cmd, f"a Windows path separator leaked in: {cmd}"
 
 
 class TestWriteFileShrinkGuard:

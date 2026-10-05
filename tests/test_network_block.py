@@ -158,10 +158,46 @@ def test_run_tests_blocks_forbidden_command(tmp_path):
     assert res.startswith("[blocked]")
 
 
+def _active_sandbox_mode() -> str:
+    """The mode run_tests will actually use, read the same way production reads it."""
+    return os.environ.get("SANDBOX_MODE", "local").strip().lower()
+
+
 def test_run_tests_blocks_python_network_probe(tmp_path):
+    """The probe must FAIL under whichever isolation is active.
+
+    The two modes block the network by different mechanisms, so they fail with
+    different messages — asserting only one of them makes this test wrong in the
+    other mode:
+
+    * ``local``  — the injected ``sitecustomize`` raises
+      ``PermissionError("[blocked] network access is disabled in this sandbox")``.
+    * ``docker`` — ``--network=none`` removes the interface, so the socket fails at
+      the OS level: "Temporary failure in name resolution" / "Network is unreachable".
+
+    The assertion is split per mode rather than weakened to a single generic check:
+    a generic "it failed somehow" would still pass if the probe failed for an
+    unrelated reason (a typo, a missing interpreter), and would stop detecting the
+    loss of either isolation layer.
+    """
     set_repo_root(tmp_path)
     res = run_tests(
         'python -c "import socket; socket.create_connection((\'example.com\', 80), timeout=2)"'
     )
-    assert "[blocked] network access is disabled in this sandbox" in res
+
     assert "[tests unavailable]" not in res
+
+    # Mode-independent: the probe must not have reached the network and succeeded.
+    # This is the assertion that goes RED if --network=none (docker) or the
+    # sitecustomize injection (local) is removed — the connection then succeeds.
+    assert "[exit code 0]" not in res, (
+        f"the network probe SUCCEEDED, so isolation is not active: {res}"
+    )
+
+    if _active_sandbox_mode() == "docker":
+        assert (
+            "Temporary failure in name resolution" in res
+            or "Network is unreachable" in res
+        ), f"docker mode must block the network at the OS level; got: {res}"
+    else:
+        assert "[blocked] network access is disabled in this sandbox" in res

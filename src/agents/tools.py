@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import subprocess
 from pathlib import Path
 
@@ -209,6 +210,45 @@ def _safe_path(path: str) -> Path:
     return candidate
 
 
+#: Windows file attribute marking a reparse point (symlink OR junction).
+#: A junction created by a Linux container lands on the host with this bit set,
+#: and `Path.is_symlink()` returns False for it — so the attribute, not the
+#: portable API, is what a detector must read.
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+
+def _is_reparse_point(path: Path) -> bool:
+    """True when `path` is a symlink or junction (do NOT follow it)."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if stat.S_ISLNK(st.st_mode):
+        return True
+    attrs = getattr(st, "st_file_attributes", 0)
+    return bool(attrs & _FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _resolves_inside_root(path: Path) -> bool:
+    """True when `path` still points inside the repo root after resolving links.
+
+    This is the per-FILE guard. `_safe_path` only validates the path the agent
+    named; a directory listing can still contain a link that points anywhere, and
+    reading through it returns content from outside the sandbox. Measured on
+    2026-10-06: a symlink dropped into the checkout by the container (mount was
+    rw, so it landed on the host) let `grep` return the project's `.env`, and
+    `read_file` on the same link was correctly refused — the leak was the walker,
+    not the resolver.
+    """
+    try:
+        root = _repo_root().resolve()
+        resolved = Path(os.path.realpath(path))
+        resolved.relative_to(root)
+    except (ValueError, OSError):
+        return False
+    return True
+
+
 def read_file(path: str, start_line: int = 1, end_line: int = 0) -> str:
     """Read a file's content (optionally a line range)."""
     try:
@@ -246,6 +286,7 @@ def grep(pattern: str, path: str = ".", case_sensitive: bool = False) -> str:
         return f"[error] invalid regex: {e}"
     matches = []
     count = 0
+    skipped_links = 0
     search_root = base if base.is_dir() else base.parent
     for root, _dirs, files in os.walk(search_root):
         if count > 500:
@@ -254,6 +295,13 @@ def grep(pattern: str, path: str = ".", case_sensitive: bool = False) -> str:
             if fname.endswith((".pyc", ".git", ".png", ".jpg", ".pdf")):
                 continue
             fp = Path(root) / fname
+            # Per-FILE guard: a symlink/junction inside the tree can point outside
+            # the repo, and reading through it returns content the agent must not
+            # see (measured: this returned the project's .env). Checked BEFORE the
+            # read, so the target is never opened.
+            if _is_reparse_point(fp) or not _resolves_inside_root(fp):
+                skipped_links += 1
+                continue
             try:
                 text = fp.read_text(encoding="utf-8", errors="ignore")
             except Exception:  # noqa: BLE001
@@ -266,7 +314,13 @@ def grep(pattern: str, path: str = ".", case_sensitive: bool = False) -> str:
                         break
         if count > 500:
             break
-    return "\n".join(matches) if matches else f"[no matches for '{pattern}']"
+    if not matches:
+        note = ""
+        if skipped_links:
+            note = (f" ({skipped_links} symlink(s) skipped: they point outside the "
+                    f"repository, which is not allowed)")
+        return f"[no matches for '{pattern}']{note}"
+    return "\n".join(matches)
 
 
 def list_files(path: str = ".", max_entries: int = 100) -> str:
@@ -285,6 +339,12 @@ def list_files(path: str = ".", max_entries: int = 100) -> str:
             if i >= max_entries:
                 entries.append("... (truncated)")
                 break
+            # A link inside the tree can point outside the repo. Report it as a
+            # link (never as a plain file/dir) so the agent is not invited to read
+            # it, and so a stray link left by a container run is visible.
+            if _is_reparse_point(p) or not _resolves_inside_root(p):
+                entries.append(f"[link->outside] {p.relative_to(_repo_root())}")
+                continue
             kind = "dir" if p.is_dir() else "file"
             entries.append(f"[{kind}] {p.relative_to(_repo_root())}")
     except Exception as e:  # noqa: BLE001
@@ -437,6 +497,32 @@ def _is_outside_repo_path(raw: str) -> bool:
 
 
 _SANDBOX_DIR = Path(__file__).resolve().parent / "sandbox"
+_DOCKER_SANDBOX_IMAGE = os.environ.get("DOCKER_SANDBOX_IMAGE", "agentbench-sandbox:latest")
+_DOCKER_MASK_GIT = os.environ.get("DOCKER_MASK_GIT", "1").strip().lower() in ("1", "true", "yes")
+
+
+def get_sandbox_mode() -> str:
+    """Return the active sandbox mode: 'docker' or 'local' (default)."""
+    return os.environ.get("SANDBOX_MODE", "local").strip().lower()
+
+
+def _translate_paths_to_container(command: str, root: Path) -> str:
+    """Translate absolute host paths pointing inside checkout to /work paths.
+
+    Paths pointing OUTSIDE checkout are deliberately untouched so they fail inside
+    the container (preventing filesystem escape).
+    """
+    root_resolved = root.resolve()
+    roots = {str(root_resolved), root_resolved.as_posix(), str(root), root.as_posix()}
+    for r in sorted(roots, key=len, reverse=True):
+        pattern = re.compile(re.escape(r) + r'((?:[/\\][^\s"\'><;&|]*)?)', re.IGNORECASE)
+
+        def repl(m: re.Match) -> str:
+            subpath = m.group(1).replace("\\", "/")
+            return "/work" + subpath
+
+        command = pattern.sub(repl, command)
+    return command
 
 #: Command patterns attempting network access or package/git retrieval outside
 #: the evaluation sandbox. These close the solutions-leak loophole (2026-10-05)
@@ -550,33 +636,91 @@ def run_tests(command: str = "", role: str = "") -> str:
         )
     _RECENT_TEST_COMMANDS.append(command)
 
-    # Inject sandbox sitecustomize via PYTHONPATH so Python processes have
-    # outbound socket/network calls blocked at runtime.
-    env = os.environ.copy()
-    if _SANDBOX_DIR.exists():
-        cur_py_path = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = (
-            str(_SANDBOX_DIR) + (os.pathsep + cur_py_path if cur_py_path else "")
-        )
+    mode = get_sandbox_mode()
+    if mode == "docker":
+        cmd_for_container = _translate_paths_to_container(command, root)
+        image = _DOCKER_SANDBOX_IMAGE
+        docker_args = [
+            "docker", "run", "--rm",
+            "--network=none",
+            "--memory=2g",
+            "--cpus=2",
+            "--tmpfs", "/tmp",
+            "-v", f"{root.resolve()}:/work",
+        ]
+        if _DOCKER_MASK_GIT:
+            docker_args.extend(["--tmpfs", "/work/.git"])
+        docker_args.extend([
+            "-w", "/work",
+            image,
+            "sh", "-lc", cmd_for_container,
+        ])
 
-    try:
-        proc = subprocess.run(
-            command,
-            shell=True,
-            cwd=str(root),
-            env=env,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=180,
-        )
-    except subprocess.TimeoutExpired:
-        return "[error] command timed out (180s limit)"
-    except Exception as e:  # noqa: BLE001
-        return f"[error] cannot run command: {e}"
+        try:
+            proc = subprocess.run(
+                docker_args,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=180,
+            )
+        except subprocess.TimeoutExpired:
+            return "[error] command timed out (180s limit)"
+        except FileNotFoundError:
+            return "[error] docker CLI executable not found in PATH."
+        except Exception as e:  # noqa: BLE001
+            return f"[error] cannot run docker container: {e}"
 
-    out = (proc.stdout or "") + (proc.stderr or "")
+        out = (proc.stdout or "") + (proc.stderr or "")
+
+        # Detect docker daemon connection failure
+        daemon_markers = (
+            "error during connect",
+            "cannot connect to the docker daemon",
+            "dockerdesktoplinuxengine",
+            "is the docker daemon running",
+        )
+        if proc.returncode != 0 and any(m in out.lower() for m in daemon_markers):
+            return f"[error] Docker daemon is not running or unreachable.\n{out}"
+
+        # Detect missing image failure
+        if proc.returncode != 0 and (
+            f"unable to find image '{image}' locally" in out.lower()
+            or f"repository {image} not found" in out.lower()
+        ):
+            return f"[error] Docker image '{image}' not found locally. Preflight requires image to be pre-built."
+
+    else:
+        # Local execution mode (default / legacy)
+        # Inject sandbox sitecustomize via PYTHONPATH so Python processes have
+        # outbound socket/network calls blocked at runtime.
+        env = os.environ.copy()
+        if _SANDBOX_DIR.exists():
+            cur_py_path = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = (
+                str(_SANDBOX_DIR) + (os.pathsep + cur_py_path if cur_py_path else "")
+            )
+
+        try:
+            proc = subprocess.run(
+                command,
+                shell=True,
+                cwd=str(root),
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=180,
+            )
+        except subprocess.TimeoutExpired:
+            return "[error] command timed out (180s limit)"
+        except Exception as e:  # noqa: BLE001
+            return f"[error] cannot run command: {e}"
+
+        out = (proc.stdout or "") + (proc.stderr or "")
+
     limit = 4000
     truncated = len(out) > limit
     if truncated:
@@ -600,21 +744,28 @@ def run_tests(command: str = "", role: str = "") -> str:
 def _guess_test_command(root: Path) -> str:
     """Pick a plausible test command for this checkout.
 
-    Uses the project interpreter (``sys.executable``) so the venv's packages are
-    visible. Layout is detected rather than assumed: Django and sympy ship a
+    Uses POSIX python when running inside Docker container; otherwise uses the
+    project interpreter (``sys.executable``) so the venv's packages are visible.
+    Layout is detected rather than assumed: Django and sympy ship a
     ``tests/runtests.py`` runner, most other repos use pytest.
     """
-    import sys
+    mode = get_sandbox_mode()
+    if mode == "docker":
+        py = "python"
+        qpy = "python"
+    else:
+        import sys
+        py = sys.executable or "python"
+        qpy = f'"{py}"'
 
-    py = sys.executable or "python"
     if (root / "tests" / "runtests.py").exists():
         # Django-style runner; the repo root must be importable.
-        return f'cd tests && "{py}" runtests.py'
+        return f"cd tests && {qpy} runtests.py"
     if (root / "pytest.ini").exists() or (root / "setup.cfg").exists() or (root / "tox.ini").exists():
-        return f'"{py}" -m pytest -x -q'
+        return f"{qpy} -m pytest -x -q"
     if (root / "tests").is_dir():
-        return f'"{py}" -m pytest tests -x -q'
-    return f'"{py}" -m pytest -x -q'
+        return f"{qpy} -m pytest tests -x -q"
+    return f"{qpy} -m pytest -x -q"
 
 
 def reset_test_guard() -> None:

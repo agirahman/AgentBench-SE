@@ -14,26 +14,43 @@ by accident of import order and broke as soon as a module was imported directly.
 # prompt) and ``providers.tool_loop`` (to pick the wrap-up nudge) need it, and
 # having ``tool_loop`` import ``agents.base`` would recreate the import cycle this
 # module exists to avoid.
+import os
+
 EDITING_ROLES = frozenset({"direct", "executor"})
 
+
+def get_tool_system_prompt(sandbox_mode: str | None = None) -> str:
+    """Return the tool system prompt, optionally tailored to the sandbox environment."""
+    mode = (sandbox_mode or os.environ.get("SANDBOX_MODE", "local")).strip().lower()
+    hint = (
+        "The execution sandbox is POSIX (Linux): use grep/ls/cat, not findstr/dir/type. "
+        "Absolute Windows paths are not valid there. Git is not installed in the sandbox — "
+        "use the git_diff tool (runs on host) to inspect changes.\n"
+        if mode == "docker"
+        else ""
+    )
+    return (
+        "You are a software engineering agent fixing a bug in a real repository.\n"
+        "\n"
+        "Work like this:\n"
+        "1. Explore with read_file / grep / list_files to locate the root cause.\n"
+        "2. Apply the fix with edit_file (or write_file for a new file). "
+        "Read the file first and copy the exact existing text into old_string.\n"
+        "3. Call git_diff to confirm the change is what you intend.\n"
+        "4. Verify with run_tests when a test command is plausible. The sandbox often "
+        "lacks this repo's dependencies, in which case run_tests says so explicitly — "
+        "believe it and stop, rather than trying other command spellings. Verifying by "
+        "reading the code is then the correct fallback.\n"
+        + hint
+        + "5. When the fix is complete, reply with a ONE-LINE summary and no tool call.\n"
+        "\n"
+        "Do NOT print a unified diff as text — the patch is taken from your file "
+        "edits automatically. Do not describe what you are about to do; do it."
+    )
+
+
 # Editing roles (direct, executor): the agent must change real files.
-TOOL_SYSTEM_PROMPT = (
-    "You are a software engineering agent fixing a bug in a real repository.\n"
-    "\n"
-    "Work like this:\n"
-    "1. Explore with read_file / grep / list_files to locate the root cause.\n"
-    "2. Apply the fix with edit_file (or write_file for a new file). "
-    "Read the file first and copy the exact existing text into old_string.\n"
-    "3. Call git_diff to confirm the change is what you intend.\n"
-    "4. Verify with run_tests when a test command is plausible. The sandbox often "
-    "lacks this repo's dependencies, in which case run_tests says so explicitly — "
-    "believe it and stop, rather than trying other command spellings. Verifying by "
-    "reading the code is then the correct fallback.\n"
-    "5. When the fix is complete, reply with a ONE-LINE summary and no tool call.\n"
-    "\n"
-    "Do NOT print a unified diff as text — the patch is taken from your file "
-    "edits automatically. Do not describe what you are about to do; do it."
-)
+TOOL_SYSTEM_PROMPT = get_tool_system_prompt()
 
 # Read-only roles (planner, reviewer) must NOT be told to edit code. Sharing the
 # editing prompt with them produced contradictory instructions: their task prompt

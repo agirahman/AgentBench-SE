@@ -1,10 +1,10 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-10-03 (audit dokumen + verifikasi kesiapan run bertahap)
-**Status:** **SIAP run 50 issue** — bisa **bertahap** dengan `--limit <N naik> --resume` (prefix tumbuh; `--only M` hanya untuk top-up run yang belum selesai). **THINKING ON (medium)**. Budget 200/200/200, revisi **48 (4 putaran × 2 act × 6)**. `--resume` **terbukti bekerja di run berbayar nyata**. Gate **READY 11/11**, preflight **50/50 pristine**. **653 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
-**Active Branch:** `19/toolcall-commandcode`
-**Commit terakhir:** `5462f9b` (guard `--resume --exp-id`: tolak typo, jangan fork eksperimen berbayar), `9c91d6a` (reconcile dokumen dengan pengukuran), `b6abf88` (`--only N` untuk sweep bertahap), `e618b8d` (completeness-on-interrupt + attempts window), `38a1c57` (interrupt exports + preflight scope), `cf19d98` (resume opsi D)
-**Handoff sesi terakhir:** [`HANDOFF_20261002.md`](HANDOFF_20261002.md) · sebelumnya [`HANDOFF_20261001.md`](HANDOFF_20261001.md)
+**Last Updated:** 2026-10-06 (audit isolasi sandbox — 3 kelas cacat ditemukan & diperbaiki)
+**Status:** 🛑 **SWEEP DITAHAN** — mitigasi isolasi sudah diperbaiki & terverifikasi, tapi ada **3 keputusan user** yang tertunda (lihat [`HANDOFF_20261006.md`](HANDOFF_20261006.md)). Gate **READY 13/13**, preflight **50/50 pristine**, **692 test lulus** (mode local MAUPUN `SANDBOX_MODE=docker`). **BLOCKER yang sudah tertutup:** kebocoran solusi lewat symlink+`grep` (dulu bisa ekstrak `.env` + `model_patch`). **BLOCKER yang BELUM:** default `SANDBOX_MODE="local"` — sweep tanpa env var = isolasi TIDAK aktif.
+**Active Branch:** `22/feat/sandbox-isolation`
+**Commit terakhir:** `0399ca3` (Docker sandbox isolation, PR #11), `5462f9b` (guard `--resume --exp-id`), `9c91d6a` (reconcile dokumen), `b6abf88` (`--only N`), `e618b8d` (completeness-on-interrupt), `38a1c57` (interrupt exports), `cf19d98` (resume opsi D)
+**Handoff sesi terakhir:** [`HANDOFF_20261006.md`](HANDOFF_20261006.md) · sebelumnya [`HANDOFF_20261002.md`](HANDOFF_20261002.md)
 **Detail audit:** [`AUDIT_OPS_PARTNER.md`](AUDIT_OPS_PARTNER.md) · [`AUDIT_SCALE_PARTNER.md`](AUDIT_SCALE_PARTNER.md) · [`AUDIT_PROMPTS_PARTNER.md`](AUDIT_PROMPTS_PARTNER.md) · [`AUDIT_RUN_TESTS_PARTNER.md`](AUDIT_RUN_TESTS_PARTNER.md) · [`RESEARCH_BUDGET_20260929.md`](RESEARCH_BUDGET_20260929.md)
 
 ---
@@ -290,7 +290,7 @@ dipakai `--resume`. Kalau diimplementasikan ulang, keduanya bisa berbeda pendapa
 dan ukuran batch jadi tidak bermakna sama dengan yang benar-benar dijalankan.
 
 **Verifikasi:** 10 test (`tests/test_sweep_only_batch.py`), **7 MERAH** saat
-perbaikannya dimatikan. Suite **508 lulus saat itu** (kini **653**), gate **READY 11/11**.
+perbaikannya dimatikan. Suite **508 lulus saat itu** (kini **692**), gate **READY 13/13**.
 
 ---
 
@@ -551,6 +551,105 @@ daemon Docker **mati** (harus dinyalakan tiap batch); WSL `memory=3GB` di host 7
 Preseden Opsi A sudah ada di mesin: user `CodexSandboxOffline/Online` + firewall rule per-user, dan
 `New-NetFirewallRule` punya `-LocalUser` (terverifikasi).
 
+### 🐳 Implementasi Penuh: Docker Sandbox (Layer-2) (2026-10-06)
+
+Mengimplementasikan isolasi kontainer sejati untuk menutup seluruh 10 bypass jaringan dan 7 jalur filesystem:
+
+1. **Image Sandbox (`docker/sandbox.Dockerfile` → `agentbench-sandbox:latest`):**
+   - Base `python:3.9-slim`, ukuran ringkas **211 MB** (build time ~14 detik).
+   - User non-root `sandbox` (`uid=1000`).
+   - Hanya terinstall `pytest 8.4.2`. Paket target repositori (`django`, `sympy`, `requests`, dll.) **tidak diinstall** (mencegah oracle).
+   - **Git binary SENGAJA tidak diinstall** — dan **tidak boleh ditambahkan**: karena `.git` di-mask (lihat #2), git binary pun tidak akan berguna (bukan repo). Ini juga menghapus jalur `git log`/`git show` sebagai vektor kebocoran.
+
+2. **Eksekusi Kontainer di `src/agents/tools.py:run_tests`:**
+   - Parameter isolasi: `--rm --network=none --memory=2g --cpus=2 --tmpfs /tmp`.
+   - **Masking `.git` via `--tmpfs /work/.git`:** Menutup celah pembacaan packfile `.git/objects` dan `packed-refs` via Python zlib murni. Kontainer melihat `.git` sebagai tmpfs kosong, sementara working tree checkout `/work` tetap bisa dibaca/diedit.
+     - **Terukur:** tanpa mask, `packed-refs` **terbaca** dan packfile **4.121.121 byte** bisa dibuka dengan Python murni. Dengan mask: `packed-refs exists: False`, `packfiles found: 0`.
+     - **Git binary tidak membantu:** tanpa mask, `git log` tetap gagal karena binary tidak ada (`git: not found`) — jadi mask adalah penutup yang sebenarnya, bukan ketiadaan binary.
+   - **Ekstraksi patch di host:** Host git tetap memegang `.git` asli; tool `git_diff` dan ekstraksi final berjalan di host. Editan kontainer tembus langsung ke host via mount 9p drvfs.
+   - **Translasi Path Otomatis (`_translate_paths_to_container`):** Path absolut Windows ke dalam checkout diubah menjadi `/work/...`. Path di luar checkout dibiarkan mentah agar otomatis gagal di kontainer (fail-closed).
+   - `_guess_test_command` menggunakan POSIX `python` (bukan path Windows host).
+
+3. **Prompt Penyesuaian Lingkungan (`src/providers/system_prompts.py`):**
+   - Saat `SANDBOX_MODE=docker`, `TOOL_SYSTEM_PROMPT` memuat hint: *"The execution sandbox is POSIX (Linux): use grep/ls/cat, not findstr/dir/type. Absolute Windows paths are not valid there. Git is not installed in the sandbox — use the git_diff tool (runs on host) to inspect changes."*
+   - Kalimat git itu **wajib**: tanpa itu agent membuang turn mencoba `git log`/`git show` yang **pasti** gagal (binary tidak ada + `.git` di-mask), lalu menyimpulkan sandbox-nya rusak.
+
+4. **Gate Preflight & Verifikasi (`tools/readiness_report.py` & `tools/verify_docker_sandbox.py`):**
+   - Gate preflight diperluas menjadi **12 checks** (tambah `docker sandbox`).
+   - Status gate: **READY: all 12 checks pass**.
+
+5. **Uji Regresi Kebocoran (`tools/probe_sandbox_escape.py`):**
+   - **21 probe** escape (B1–B10 jaringan, F1–F7 filesystem, ORA oracle, GIT masking, GITBIN binary, PACK pure-Python read) — **seluruhnya 100% BLOCKED (PASS)** di bawah Docker.
+   - **Terbukti bisa MERAH:** dengan `DOCKER_MASK_GIT=0`, probe `GIT` dan `PACK` **GAGAL** (exit 1) dan melaporkan `found_git_history` / `found_packed_refs`. Jadi probe ini bukan tautologi.
+   - **Uji integrasi Docker nyata** (`tests/test_docker_sandbox.py::TestRealDockerIntegration`, 5 test, bukan mock): memverifikasi git **tidak ada**, **tidak ada paket target** yang importable (7 paket), `.git` ter-mask tapi working tree tetap terbaca, network terblok, dan host FS tidak ter-mount. Kalau daemon mati, test **SKIP** — tidak pernah "lulus palsu".
+
+6. **⚠️ PELAJARAN: test wajib di-scope ke mode yang diuji (2026-10-06).**
+   Dua test lama **GAGAL** saat suite dijalankan dengan `SANDBOX_MODE=docker` (2 failed, 677 passed) — **bukan** karena implementasinya salah, tapi karena test-nya **tidak menyatakan mode yang diuji**:
+   - `test_run_tests_blocks_python_network_probe` hanya menerima pesan `[blocked] ...` dari **sitecustomize** (mode local). Di docker, network diblokir **OS-level** (`Temporary failure in name resolution`) — pesan berbeda, isolasi **lebih kuat**, tapi assertion-nya tunggal.
+   - `test_uses_project_interpreter_not_bare_python` menuntut `sys.executable` ada di command. Itu benar di **local**, tapi di **docker** justru **salah**: path Windows `D:\...\python.exe` tidak ada di kontainer (terukur: exit 127) — `python` POSIX polos yang benar.
+   **Perbaikan:** kedua test dipecah per mode (bukan dilemahkan). Assertion mode-independent yang menangkap kegagalan **kedua** lapisan: `"[exit code 0]" not in res` — kalau isolasi hilang, probe **berhasil** dan test MERAH. Ditambah test docker eksplisit `test_docker_mode_uses_bare_posix_python`.
+   **Bukti tetap bisa MERAH (4/4, di mode yang benar):** hapus `--network=none` → RED (docker); hapus injeksi sitecustomize → RED (local); docker pakai `sys.executable` → RED (docker); local pakai `python` polos → RED (local). Pemulihan byte-for-byte terverifikasi SHA256.
+   **Aturan:** suite harus lulus di **kedua** mode; kalau menyentuh sandbox, jalankan **dua kali** (default + `SANDBOX_MODE=docker`).
+
+7. **🔴 BLOCKER: kebocoran lewat SYMLINK + `grep` (2026-10-06) — DIPERBAIKI.**
+
+   **Rantai serangan (terbukti, bukan teoretis):**
+   1. Agen menjalankan `ln -sf ../../../../../.env /work/zz_v_env` **di dalam container**.
+   2. Karena `/work` di-bind-mount **rw**, symlink itu **mendarat di checkout HOST**
+      (terukur: 2 junction nyata — `pw -> /etc/passwd`, `rootlink -> /`).
+   3. Agen memanggil tool HOST `grep(pattern="API_KEY", path=".")`.
+   4. `grep()` membaca tiap file hasil `os.walk` **tanpa `_safe_path` per-file** →
+      symlink diikuti → isi file di **luar repo** dikembalikan.
+
+   **Bukti terukur (dengan kunci PALSU di temp dir, bukan kunci asli):**
+   ```
+   read_file('zz_v_env')  -> [error] Path ... is outside the allowed repo directory   (BENAR)
+   grep('FAKE_KEY...', '.') -> zz_v_env:1: GEMINI_API_KEY=FAKE_KEY_FOR_TESTING_NOT_REAL_12345   (BOCOR)
+   ```
+   Jadi `_safe_path` **sudah benar**; yang bocor adalah **walker**-nya (`grep`, dan
+   `list_files` yang menampilkan link seolah file biasa).
+
+   **Perbaikan (BLOCKER 1):** guard **per-file** di `grep()` —
+   `_is_reparse_point(fp) or not _resolves_inside_root(fp)` — dievaluasi **sebelum**
+   file dibuka. `list_files()` menandai link sebagai `[link->outside]`. Jumlah link
+   yang dilewati dilaporkan ke agen (tidak diam-diam kosong).
+
+   **⚠️ Jebakan API yang mahal:** untuk junction (yang dibuat container di host Windows),
+   `Path.is_symlink()` → **False** dan `Path.exists()` → **OSError WinError 1920**.
+   Detektor yang benar = `os.lstat().st_file_attributes & 0x400`
+   (terukur: junction 1056 = 0x420, file biasa 32 = 0x20).
+
+   **Gate bisa dilewati (BLOCKER 2):** `preflight_repos.py` mengandalkan
+   `git status --porcelain`, tapi symlink bernama `*.pyc` (atau di `build/`) cocok
+   `.gitignore` checkout → **tak terlihat git**, padahal link-nya ada dan bisa dibaca.
+   Terukur: `zz_hidden.pyc` → `git status` **buta**, scanner **melihat**.
+   **Perbaikan:** `tools/repo_link_scan.py` + `tools/scan_repo_links.py` (check gate
+   baru, independen git), diintegrasikan ke `preflight_repos.py` dan
+   `readiness_report.py` (**13 check**). Pesan kegagalan memuat perintah pembersihan,
+   karena `git clean` **tidak** menghapus junction.
+
+   **Bukti test bisa MERAH (4/4, pulih byte-for-byte via SHA256):** hapus guard
+   per-file `grep` → RED; hapus penandaan `list_files` → RED; buat scanner buta pada
+   cabang reparse-attribute → RED; matikan **kedua** guard `grep` → RED.
+   Catatan penting: mematikan **satu** guard saja **tidak** terdeteksi, karena
+   guard-nya **berlapis** (`_resolves_inside_root` menangkap junction walau cabang
+   reparse dimatikan) — itu defense-in-depth yang bekerja, bukan test yang lemah.
+
+   **BLOCKER 3 (belum diputuskan — butuh keputusan user):** mencegah symlink mendarat
+   di host. Terukur: `-v ...:/work:ro` **menutup vektor ini total**
+   (`ln: failed to create symbolic link: Read-only file system`), dan **tool edit
+   tetap berfungsi** karena `edit_file`/`write_file`/`git_diff`/`capture_diff`
+   semuanya **host-side** (container hanya untuk menjalankan tes). Biayanya:
+   **6,1%** panggilan `run_tests` (102/1674, dari 329 file `tool_calls.jsonl`)
+   melakukan tulis ke checkout (kebanyakan file scratch) → akan gagal di bawah `:ro`.
+   Alternatif: mount rw + **sapu reparse point setelah setiap `run_tests`** (murah,
+   tapi ada jendela waktu antar panggilan).
+
+   **BLOCKER 4 (lapor saja, keputusan user):** `.env` berada 5 level di atas checkout,
+   sehingga jadi target mudah bagi symlink relatif. Rekomendasi: pindahkan kredensial
+   **keluar pohon proyek** (mis. `%USERPROFILE%\.agentbench\env`), supaya `../../../..`
+   tidak pernah mencapainya.
+
 ---
 
 ## ✅ VERIFIKASI END-TO-END DI RUN BERBAYAR NYATA (2026-10-03) — `EXP-20261002-542`
@@ -773,14 +872,14 @@ tapi bisa dikutip ke tesis):
 
 ---
 
-**Satu perintah memverifikasi semuanya:** `python tools/readiness_report.py` → **READY, 9/9**.
+**Satu perintah memverifikasi semuanya:** `python tools/readiness_report.py` → **READY, 12/12**.
 Ia **menjalankan unit test suite juga** (versi pertamanya tidak, dan itu blocker: gate bisa
 hijau sementara suite merah). Terbukti **bisa gagal**: `tools/_prove_gate_fails.py`
 menyuntikkan test rusak → gate melaporkan **NOT READY**, exit 1.
 
 | Verifikasi | Hasil |
 |---|---|
-| Unit test | **653 lulus** |
+| Unit test | **692 lulus** (mode local **dan** `SANDBOX_MODE=docker`) |
 | Preflight repo | **50/50 pristine** |
 | Fairness budget | **FAIR** — 200/200/200 |
 | Putaran revisi | Setiap act revisi **6+6** (kebutuhan terukur: 6) |
@@ -818,7 +917,7 @@ Sweep **tidak** mengulang dari nol; savepoint per run dibaca dan yang sudah sele
 | **Budget tool-turn** | ✅ Done | `agents/budget.py` — total sama per strategi, sekarang **200** (skala referensi) |
 | **Pre-flight validator** | ✅ Done | `tools/preflight_modal.py` — replikasi kontrak Modal secara lokal |
 | **Rate-limit handling** | ✅ Done | Backoff 429 + circuit breaker |
-| **Test suite** | ✅ Done | **653 lulus** (dari 426). **Lulus di env bersih MAUPUN env kotor** |
+| **Test suite** | ✅ Done | **692 lulus** (dari 426). **Lulus di env bersih MAUPUN env kotor**, dan di **mode local MAUPUN `SANDBOX_MODE=docker`** |
 | **Thinking mode** | ✅ **ON** | `deepseek` thinking + effort `medium`; `*_reasoning.md` ditulis per role |
 | **MAX_TOKENS** | ✅ **65536** | Naik dari 32768; reasoning + jawaban berbagi anggaran ini |
 | **Rate card cbai** | ✅ **FIXED** | Diukur dari key yang BENAR (`…da2fe1`), bukan `…b04880` |
@@ -1824,7 +1923,10 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 | `tools/clean_repos.py` | Bersihkan checkout yang kotor |
 | `tools/sanitize_git_history.py` | **Sanitasi git timesafe** SWE-bench PR #471 (`--dry-run`/`--apply`/`--check`) |
 | `tools/verify_network_block.py` | **Verifikasi blok jaringan**: sitecustomize & command filter aktif |
-| `tools/probe_sandbox_escape.py` | **Probe 6 vektor escape nyata** (semua wajib PASS/BLOCKED) |
+| `tools/verify_docker_sandbox.py` | **Verifikasi sandbox Docker**: daemon, image, network block, git masking |
+| `tools/scan_repo_links.py` | **Gate anti-symlink**: deteksi reparse point di checkout (git status BUTA untuk ini) |
+| `tools/repo_link_scan.py` | Helper deteksi symlink/junction via `st_file_attributes` (bukan `Path.is_symlink`) |
+| `tools/probe_sandbox_escape.py` | **Probe 19 vektor escape nyata** (jaringan, filesystem, oracle, git history) |
 | `tools/check_semantic_cache.py` | **Gate integritas**: deteksi response-cache hit (exit 1 bila ada) |
 | `tools/verify_revision_rounds.py` | Apakah reserve membiayai **setiap** putaran revisi? |
 | `tools/audit_revision_rounds.py` | Berapa putaran revisi yang **benar-benar** jalan? |

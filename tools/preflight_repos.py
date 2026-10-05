@@ -22,6 +22,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
+# The repo_link_scan helper lives next to this file, so `tools/` must be importable
+# when this script is run directly (as the sweep and the readiness gate both do).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 def run_git(args: list[str], cwd: Path) -> tuple[int, str]:
@@ -125,6 +128,19 @@ def check_instance(row: dict) -> dict:
         changed = len([l for l in status.strip().splitlines() if l.strip()])
         problems.append(f"working tree dirty ({changed} path(s))")
 
+    # Reparse-point scan, INDEPENDENT of git. A link named `x.pyc` (or placed in
+    # `build/`) is hidden by .gitignore, so git status reports a clean tree while
+    # the link is present and `grep` can read through it. Measured 2026-10-06.
+    from repo_link_scan import describe, find_reparse_points
+
+    links = find_reparse_points(path)
+    if links:
+        detail = "; ".join(describe(p, path) for p in links[:5])
+        more = f" (+{len(links) - 5} more)" if len(links) > 5 else ""
+        problems.append(
+            f"symlink/junction inside checkout ({len(links)}): {detail}{more}"
+        )
+
     return {
         "instance_id": instance_id,
         "repo": repo,
@@ -183,6 +199,23 @@ def main() -> None:
         print("  WRONG tree, and the failure only shows up at evaluation time, looking")
         print("  like the model's fault. Fix these before running:")
         print("    python tools/clean_repos.py")
+
+        # A junction is NOT removed by `git clean`: git does not track it and, when
+        # its name matches .gitignore, does not even report it. Print the exact
+        # removal commands instead of leaving the reader to guess.
+        link_problems = [p for r in bad for p in r["problems"]
+                         if p.startswith("symlink/junction")]
+        if link_problems:
+            print()
+            print("  !! symlink/junction(s) found. `git clean` does NOT remove these, and")
+            print("     `git status` cannot see them when their name matches .gitignore.")
+            print("     Remove them explicitly, then re-run this preflight:")
+            for r in bad:
+                if any(p.startswith("symlink/junction") for p in r["problems"]):
+                    print(f"       powershell -Command \"Get-ChildItem -LiteralPath "
+                          f"'{r['path']}' -Recurse -Force | "
+                          f"Where-Object {{ $_.Attributes -band "
+                          f"[IO.FileAttributes]::ReparsePoint }} | Remove-Item -Force\"")
         print("=" * 78)
     else:
         print("  Every repo is pristine at its base_commit -- safe to run.")
