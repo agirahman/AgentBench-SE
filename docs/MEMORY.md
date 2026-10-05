@@ -1768,17 +1768,26 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 ---
 
-**Last working state:** commit M3 (`--only`) — **610 test lulus**, gate **READY 9/9**, preflight **50/50 pristine**. Pipeline **SIAP run 50 issue**, bisa **bertahap** dengan `--limit <N naik> --resume` (prefix tumbuh; `--only M` hanya untuk top-up). Budget **200/200/200**, revisi **48 (4 putaran × 6+6)**. `--resume` + interrupt + `--only` **terbukti bekerja** di run berbayar nyata (`EXP-20261002-542`) — lihat §"Verifikasi end-to-end".
+**Last working state:** commit `89c83be` (semantic-cache detection) — **614 test lulus**, gate **READY 9/9**. **Sweep final BERJALAN** di `EXP-20261004-034`: **40/50 issue = 120/150 run (80%)**, biaya CSV **$7,3700**, 0 duplikat, semua patch `VALID`, `INCOMPLETE.json` tidak ada. Batch 1–4 selesai (10 issue per batch; staging `--limit <N naik> --resume`, prefix tumbuh). Semantic cache: **0 hit** (90 baris tercatat + 30 pra-fix "not recorded"). Budget **200/200/200**, revisi **48 (4 putaran × 6+6)**. `--resume` + interrupt + `--only` **terbukti bekerja** di run berbayar nyata (`EXP-20261002-542`) — lihat §"Verifikasi end-to-end".
 
 **Langkah berikutnya (prioritas):**
 
-1. **KEPUTUSAN USER — jalankan sweep 50 issue?** ~**$10,8**, ~**21 jam** (thinking ON). Semua verifikasi sudah lulus (lihat tabel "KESIAPAN RUN 50" di atas). **Gate: butuh izin eksplisit user.**
+1. **Sweep final SEDANG BERJALAN — sisa 1 batch (batch-5: 10 issue terakhir).**
+   Eksperimen: `EXP-20261004-034` (jangan buat eksperimen baru). Batch 1–4 selesai
+   (40/50 issue, 120/150 run, $7,37). **Resep batch-5:**
    ```
-   python tools/run_final_sweep.py
+   python tools/clean_repos.py          # WAJIB antar-batch
+   python tools/run_final_sweep.py --limit 50 --resume --exp-id EXP-20261004-034
+   python tools/check_semantic_cache.py --exp EXP-20261004-034   # verdict nyata
    ```
-   Kalau terputus: `python tools/run_final_sweep.py --resume --exp-id <EXP-id>`.
-   **Setelah interrupt, jalankan `python tools/clean_repos.py`** sebelum resume —
-   runner membersihkan sebelum tiap strategi tapi tidak sesudah.
+   ⚠️ **`--limit` diukur dalam ISSUE dari awal dataset**, jadi tiap batch **naikkan N**
+   (10 → 20 → 30 → 40 → 50). `--limit 10` di batch ke-2 dst = "Nothing to do"
+   (issue 1–10 sudah selesai), uang tidak terbuang tapi batch tidak maju.
+   ⚠️ **`--only M` TIDAK BISA menambah issue baru** — hanya menambal run yang belum
+   selesai di issue yang sudah terekam. Untuk menambah issue, **naikkan `--limit`**.
+   Kalau terputus: `python tools/run_final_sweep.py --resume --exp-id <EXP-id>`
+   setelah `python tools/clean_repos.py` (runner membersihkan sebelum tiap strategi
+   tapi tidak sesudah).
 
 2. **Setelah sweep selesai:**
    - `python tools/check_sweep_state.py --exp <EXP-id>` — setiap run hadir?
