@@ -20,8 +20,14 @@ EDITING_ROLES = frozenset({"direct", "executor"})
 
 
 def get_tool_system_prompt(sandbox_mode: str | None = None) -> str:
-    """Return the tool system prompt, optionally tailored to the sandbox environment."""
-    mode = (sandbox_mode or os.environ.get("SANDBOX_MODE", "local")).strip().lower()
+    """Return the tool system prompt, optionally tailored to the sandbox environment.
+
+    The default mode is ``docker`` to match ``agents.tools.get_sandbox_mode``: if
+    these two disagreed, an unconfigured run would EXECUTE in docker while being
+    PROMPTED as if it were local (telling the agent to use ``dir``/``type`` and
+    that git works), which is worse than either default alone.
+    """
+    mode = (sandbox_mode or os.environ.get("SANDBOX_MODE", "docker")).strip().lower()
     hint = (
         "The execution sandbox is POSIX (Linux): use grep/ls/cat, not findstr/dir/type. "
         "Absolute Windows paths are not valid there. Git is not installed in the sandbox — "

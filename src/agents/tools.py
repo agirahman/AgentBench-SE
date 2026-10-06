@@ -188,8 +188,25 @@ def _normalize_tool_path(path: str) -> str:
     return raw
 
 
+#: The git metadata directory. Blocked by NAME (component-wise) rather than as a
+#: path prefix, so `.gitignore` / `.gitattributes` keep working. Case-insensitive
+#: because Windows filesystems are: `.GIT/config` opens the same file as `.git/config`.
+_GIT_DIR_NAME = ".git"
+
+
 def _safe_path(path: str) -> Path:
-    """Resolve `path` and ensure it stays within the repo root."""
+    """Resolve `path` and ensure it stays within the repo root.
+
+    Also refuses any path whose components name the ``.git`` directory. ``.git``
+    lives INSIDE the checkout, so a root-containment check alone allows it, and
+    these tools run on the HOST where ``SANDBOX_MODE`` has no effect. Measured
+    before the guard: ``read_file('.git/packed-refs')`` returned tag refs and
+    ``read_file('.git/ORIG_HEAD')`` returned a commit SHA.
+
+    Matching is on path COMPONENTS, not a prefix, so ``.gitignore`` and
+    ``.gitattributes`` keep working. The comparison is case-insensitive because
+    Windows filesystems are: ``.GIT/config`` opens the same file as ``.git/config``.
+    """
     if not repo_root_resolved():
         raise ValueError(
             "No repository is bound to this run (the instance checkout could not "
@@ -201,11 +218,18 @@ def _safe_path(path: str) -> Path:
     path = _normalize_tool_path(path)
     candidate = (root / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
     try:
-        candidate.relative_to(root)
+        rel_parts = candidate.relative_to(root).parts
     except ValueError:
         raise ValueError(
             f"Path '{path}' is outside the allowed repo directory. "
             f"Use a path RELATIVE to the repository root, e.g. 'requests/sessions.py'."
+        )
+    # Checked on the RESOLVED path, so a symlink pointing into .git is caught too
+    # (`link -> .git` would otherwise resolve to a readable .git file).
+    if any(part.lower() == _GIT_DIR_NAME for part in rel_parts):
+        raise ValueError(
+            "Direct access to the .git directory is not allowed. Use git_diff to "
+            "inspect changes."
         )
     return candidate
 
@@ -288,9 +312,15 @@ def grep(pattern: str, path: str = ".", case_sensitive: bool = False) -> str:
     count = 0
     skipped_links = 0
     search_root = base if base.is_dir() else base.parent
-    for root, _dirs, files in os.walk(search_root):
+    for root, dirs, files in os.walk(search_root):
         if count > 500:
             break
+        # Prune .git from the walk. `_safe_path('.')` is legitimate, so the walk
+        # starts at the repo root and would otherwise descend into .git and return
+        # its contents (measured: `grep('FUTURE-TAG', '.')` returned
+        # `.git\packed-refs:3: ... refs/tags/v9.9.9-FUTURE-TAG`). Blocking the
+        # requested path alone does NOT close this: the leak is the walker.
+        dirs[:] = [d for d in dirs if d.lower() != _GIT_DIR_NAME]
         for fname in files:
             if fname.endswith((".pyc", ".git", ".png", ".jpg", ".pdf")):
                 continue
@@ -502,8 +532,19 @@ _DOCKER_MASK_GIT = os.environ.get("DOCKER_MASK_GIT", "1").strip().lower() in ("1
 
 
 def get_sandbox_mode() -> str:
-    """Return the active sandbox mode: 'docker' or 'local' (default)."""
-    return os.environ.get("SANDBOX_MODE", "local").strip().lower()
+    """Return the active sandbox mode: 'docker' (default) or 'local'.
+
+    The default is **docker**, i.e. fail-CLOSED. It used to be 'local', which
+    meant any entry point that did not set SANDBOX_MODE silently executed agent
+    commands on the HOST with no isolation and no warning — the sweep and the
+    runner both failed to set it. A missing daemon then produced a clear error
+    instead of an unisolated run, which is the correct direction for a safety
+    default: the failure is loud and cheap rather than silent and expensive.
+
+    'local' is still available for development and for the local-mode tests, but
+    it must now be requested EXPLICITLY.
+    """
+    return os.environ.get("SANDBOX_MODE", "docker").strip().lower()
 
 
 def _translate_paths_to_container(command: str, root: Path) -> str:
@@ -637,6 +678,16 @@ def run_tests(command: str = "", role: str = "") -> str:
     _RECENT_TEST_COMMANDS.append(command)
 
     mode = get_sandbox_mode()
+    # Fail CLOSED on an unrecognised value. The dispatch below has an `else` branch
+    # that runs on the host, so a typo ("dockr", "Docker ") would have silently
+    # selected the UNISOLATED path — the same class of bug as the old 'local'
+    # default, just triggered by a typo instead of an omission.
+    if mode not in ("docker", "local"):
+        return (
+            f"[error] SANDBOX_MODE={mode!r} is not recognised (expected 'docker' or "
+            f"'local'). Refusing to run: an unknown mode would fall through to "
+            f"UNISOLATED host execution."
+        )
     if mode == "docker":
         cmd_for_container = _translate_paths_to_container(command, root)
         image = _DOCKER_SANDBOX_IMAGE
@@ -911,13 +962,20 @@ def git_diff() -> str:
 
 
 def reset_repo() -> str:
-    """Discard all working-tree changes (clean slate before a new attempt)."""
+    """Discard all working-tree changes (clean slate before a new attempt).
+
+    ``-x`` is deliberate: without it this tool reported "[ok] repository reset"
+    while leaving every .gitignore'd file in place. That made it a FALSE clean
+    slate — the agent's own ``.pyc`` (recoverable with ``marshal.load``) and
+    pytest's ``.pytest_cache`` (which records which tests failed) both survived,
+    so a later strategy inherited them. See reset_working_tree for the full case.
+    """
     try:
         proc = _run_git("checkout", "--", ".")
         if proc.returncode != 0:
             err = (proc.stderr or b"").decode("utf-8", "replace").strip()
             return f"[error] git checkout failed: {err}"
-        proc2 = _run_git("clean", "-fd", "--", ".")
+        proc2 = _run_git("clean", "-fdx", "--", ".")
         err2 = (proc2.stderr or b"").decode("utf-8", "replace").strip()
         return f"[ok] repository reset to HEAD{(' | ' + err2) if err2.strip() else ''}"
     except Exception as e:  # noqa: BLE001
@@ -936,11 +994,31 @@ def reset_repo() -> str:
 
 
 def _git_in(root: Path, *args: str, timeout: int = 60) -> subprocess.CompletedProcess:
+    """Run git in `root`, with a NEUTRAL identity.
+
+    The identity matters because `git reset` writes a reflog entry attributed to
+    the committer, and git takes that from the ambient config. Measured: our own
+    `reset_working_tree` stamped the operator's real name and email
+    (``agirahman <agi.rahman.s@gmail.com>``) into a dataset checkout's reflog.
+
+    Setting a neutral identity here keeps that PII out of the dataset at the
+    source. It affects only reflog attribution: the commands this helper runs
+    (reset/checkout/clean/status/add/diff/cat-file) do not otherwise use an
+    identity, and the agent's own shell commands do not go through here.
+    """
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "agentbench",
+        "GIT_AUTHOR_EMAIL": "agentbench@localhost",
+        "GIT_COMMITTER_NAME": "agentbench",
+        "GIT_COMMITTER_EMAIL": "agentbench@localhost",
+    }
     return subprocess.run(
         ["git", *args],
         cwd=str(root),
         capture_output=True,
         timeout=timeout,
+        env=env,
     )
 
 
@@ -1112,17 +1190,114 @@ def reset_working_tree(repo_root: str | Path | None = None) -> bool:
     # A new strategy run is a new conversation: forget the previous run's
     # repeated-command history so the guard only fires within one run.
     reset_test_guard()
+
+    # Detect a `.git` write from the act that just finished. The baseline was
+    # recorded at the END of the previous reset, when `.git` was known good, so
+    # anything that changed since was written by the strategy in between.
+    #
+    # This comparison MUST happen before the reset commands run: `git reset`
+    # rewrites `index`/`ORIG_HEAD`, which would erase the evidence.
+    git_dir = root / _GIT_DIR_NAME
+    baseline = _GIT_DIR_BASELINES.get(str(root))
+    if git_dir.is_dir() and baseline is not None:
+        tampered = _git_dir_modified(git_dir, baseline)
+        if tampered:
+            _warn(
+                f"[reset_working_tree] {git_dir} was MODIFIED during the previous "
+                f"act: {tampered[:5]}. These names are legitimate, but their CONTENT "
+                f"is not — anything written into `.git` survives every reset and is "
+                f"readable by the next strategy. The run should not be trusted."
+            )
+            return False
+
+        # Every reflog is excluded from the hash comparison (git appends to them on
+        # commit, checkout, reset, stash, merge), so verify them structurally:
+        # the previous text must survive as a prefix and appended lines must be
+        # valid entries. Without this, excluding them would leave a hole.
+        prev_reflogs = baseline.get(_RELOG_KEY) or {}
+        if isinstance(prev_reflogs, dict):
+            current_reflogs = _reflogs_of(git_dir)
+            for rel, prev_text in prev_reflogs.items():
+                ok, why = _reflog_append_is_clean(prev_text, current_reflogs.get(rel, ""))
+                if not ok:
+                    _warn(
+                        f"[reset_working_tree] {git_dir / rel} is not a clean "
+                        f"superset of its previous content: {why}. Reflogs are "
+                        f"excluded from the hash check because git appends to them "
+                        f"legitimately, so this is how a marker written there is "
+                        f"caught. The run should not be trusted."
+                    )
+                    return False
+
+        # `config` is also excluded from hashing (git config set / remote add /
+        # submodule add rewrite it), so its EDIT is verified against the previous
+        # content. A shape check alone is not enough: a comment is valid INI, so an
+        # agent could hide a marker in one (measured: attack B4).
+        prev_config = baseline.get(_CONFIG_KEY)
+        if isinstance(prev_config, str):
+            config_path = git_dir / "config"
+            try:
+                current_config = (
+                    config_path.read_text(encoding="utf-8", errors="replace")
+                    if config_path.is_file() else ""
+                )
+            except OSError:
+                current_config = ""
+            ok, why = _config_edit_is_clean(prev_config, current_config)
+            if not ok:
+                _warn(
+                    f"[reset_working_tree] {config_path} was not edited like a git "
+                    f"config: {why}. config is excluded from the hash check because "
+                    f"git rewrites it legitimately, so this is how a marker written "
+                    f"there is caught. The run should not be trusted."
+                )
+                return False
+
+        # Shape checks for the files excluded from hashing. This is what keeps the
+        # exclusions from re-opening the hole: a ref that does not hold a valid SHA,
+        # a malformed packed-refs line, a reflog line that is not an entry, or an
+        # ORIG_HEAD that does not resolve are all reported here.
+        shape_problems = _structural_problems(git_dir)
+        if shape_problems:
+            _warn(
+                f"[reset_working_tree] {git_dir} holds {len(shape_problems)} "
+                f"malformed ref/reflog/message file(s): {shape_problems[:3]}. These "
+                f"paths are excluded from the hash comparison because git rewrites "
+                f"them in normal use, so their SHAPE is checked instead. The run "
+                f"should not be trusted."
+            )
+            return False
+
     try:
         _git_in(root, "reset", "-q")            # drop intent-to-add marks
         _git_in(root, "checkout", "--", ".")
-        _git_in(root, "clean", "-fdq", "--", ".")
+        # -x removes .gitignore'd leftovers. Without it the reset claimed success
+        # while leaving exactly the files that leak between strategies:
+        #
+        #   * `__pycache__/*.pyc` — an agent's compiled module survives the reset
+        #     and a later strategy can recover its code objects with marshal.load
+        #     (names and constants survive; only comments are lost).
+        #   * `.pytest_cache/v/cache/lastfailed` — pytest writes this from INSIDE
+        #     the container to the bind-mounted host checkout. It records WHICH
+        #     tests failed, and for SWE-bench that is the bug location
+        #     (FAIL_TO_PASS). A later strategy does not even have to read it:
+        #     `pytest --lf` consults it automatically and re-runs exactly the
+        #     tests the previous strategy discovered.
+        #
+        # Both are git-IGNORED, so plain `clean -fd` never touched them.
+        _git_in(root, "clean", "-fdxq", "--", ".")
     except Exception as e:  # noqa: BLE001
         _warn(f"[reset_working_tree] command failed for {root}: {e}")
         return False
 
     # Verify, because a git command can fail without raising.
+    #
+    # --ignored is REQUIRED: plain `status --porcelain` hides every .gitignore'd
+    # path, so it shared the exact blindness of the operation it was checking and
+    # returned True ("verified clean") with __pycache__ and .pytest_cache still
+    # on disk.
     try:
-        status = _git_in(root, "status", "--porcelain")
+        status = _git_in(root, "status", "--porcelain", "--ignored")
         leftover = (status.stdout or b"").decode("utf-8", "replace").strip()
     except Exception as e:  # noqa: BLE001
         _warn(f"[reset_working_tree] could not verify {root}: {e}")
@@ -1130,13 +1305,668 @@ def reset_working_tree(repo_root: str | Path | None = None) -> bool:
 
     if leftover:
         paths = [l for l in leftover.splitlines() if l.strip()][:5]
+
+        # Distinguish an UNSUPPORTED submodule from ordinary dirt. `git clean`
+        # refuses to delete a nested repository, so a submodule created by the
+        # agent cannot be removed by the reset — and neither `clean -fdxq` nor
+        # `clean -ffdx` removes it (measured). The run genuinely cannot continue
+        # with a clean tree, but "STILL DIRTY ... the run should not be trusted"
+        # would misreport WHY, and an operator would go looking for a leak.
+        #
+        # This is a documented LIMITATION, not a hole: no `.git` guard is relaxed,
+        # and a submodule's metadata is still shape-checked. Measured relevance:
+        # 0 of the 53 checkouts contain a .gitmodules file, and SWE-bench agents
+        # fix code rather than adding submodules, so this path is not expected to
+        # trigger in a sweep.
+        nested = _nested_repos_in_tree(root)
+        if nested:
+            _warn(
+                f"[reset_working_tree] {root} contains a nested git repository "
+                f"({nested[:3]}) that `git clean` refuses to remove, so the tree "
+                f"cannot be returned to a pristine state. SUBMODULE/NESTED-REPO "
+                f"OPERATIONS ARE NOT SUPPORTED in this sandbox. This is a known "
+                f"limitation, not detected tampering: no .git guard was relaxed. "
+                f"Refusing the run rather than diffing against a dirty tree."
+            )
+            return False
+
         _warn(
             f"[reset_working_tree] {root} is STILL DIRTY after reset "
             f"({len(leftover.splitlines())} path(s)): {paths}. The captured diff "
             f"would include these, so the run should not be trusted."
         )
         return False
+
+    # Git cannot see everything that leaks between strategies: it never reports
+    # the contents of its own .git directory (so a marker written there survives
+    # every reset), and it does not report DANGLING junctions (measured: a
+    # junction whose target was deleted is absent from `status --ignored` even
+    # though the link is still on disk and still readable).
+    links = [p for p in _iter_reparse_points(root)]
+    if links:
+        names = [str(p.relative_to(root)) for p in links][:5]
+        _warn(
+            f"[reset_working_tree] {root} still holds {len(links)} symlink/junction "
+            f"path(s) after reset: {names}. A link can point outside the checkout, "
+            f"so the run should not be trusted."
+        )
+        return False
+
+    # `.git` needs checks git itself cannot provide: `git clean` never removes
+    # anything inside it and `git status` never reports it.
+    #
+    # A NAME allowlist is NOT enough, and a measured exploit proved it: writing
+    # `STRATEGY_A_WAS_HERE` into `.git/gc.log` (or `.git/ORIG_HEAD`) passed,
+    # because those names are legitimate. Forgiving a name forgives OVERWRITING
+    # it. So this records a CONTENT fingerprint to compare against next time.
+    #
+    # Hashing every file would produce false positives: git's own reset cycle
+    # legitimately rewrites `index` and `logs/HEAD`, and creates `ORIG_HEAD`
+    # (measured over 4 cycles). Those are excluded and verified structurally.
+    if git_dir.is_dir():
+        try:
+            unexpected = sorted(
+                p.name for p in git_dir.iterdir() if p.name not in _GIT_DIR_ALLOWED
+            )
+        except OSError as e:
+            _warn(f"[reset_working_tree] could not inspect {git_dir}: {e}")
+            return False
+        if unexpected:
+            _warn(
+                f"[reset_working_tree] {git_dir} holds unexpected entr(ies) after "
+                f"reset: {unexpected[:5]}. `.git` is not cleaned by git and not "
+                f"reported by git status, so this is an undetected inter-strategy "
+                f"channel. The run should not be trusted."
+            )
+            return False
+
+        # A poisoned index is NOT rebuilt by reset/checkout/clean (measured), and
+        # the failure is silent because `_git_in` does not raise: `git status`
+        # returns non-zero with EMPTY stdout, which reads as a clean tree.
+        index_check = _git_in(root, "status", "--porcelain")
+        if index_check.returncode != 0:
+            err = (index_check.stderr or b"").decode("utf-8", "replace").strip()
+            _warn(
+                f"[reset_working_tree] `git status` FAILED in {root} after reset "
+                f"(rc={index_check.returncode}): {err[:160]}. A failed status returns "
+                f"empty output, which would otherwise be read as a clean tree. The "
+                f"index may be poisoned. The run should not be trusted."
+            )
+            return False
+
+        # Post-reset shape check. ORIG_HEAD is not compared to HEAD any more: git
+        # legitimately points it at the pre-reset HEAD, so that comparison was
+        # wrong in general AND missed a tampered value (measured, attack B3).
+        # What must hold is that it resolves to a real git object.
+        post_problems = _structural_problems(git_dir)
+        if post_problems:
+            _warn(
+                f"[reset_working_tree] {root} has {len(post_problems)} malformed "
+                f"ref/reflog/message file(s) after reset: {post_problems[:3]}. The "
+                f"run should not be trusted."
+            )
+            return False
+
+        # Record the post-reset fingerprint, which is the baseline the NEXT call
+        # compares against.
+        _GIT_DIR_BASELINES[str(root)] = _git_dir_manifest(git_dir)
+
     return True
+
+
+#: Per-checkout fingerprint of the hash-compared files under `.git`, recorded at
+#: the end of each successful reset and compared at the start of the next one.
+#: Keyed by the repo root so several checkouts can be reset in one process. The
+#: ``_RELOG_KEY`` entry holds a nested dict of reflog texts, not a hash.
+#:
+#: Why not compare within a single call: the reset commands themselves rewrite
+#: `.git`, so a snapshot taken after them equals the state they produced and the
+#: comparison is vacuous. The evidence of an act's write only exists BETWEEN
+#: calls, which is exactly when the next reset looks for it.
+_GIT_DIR_BASELINES: dict[str, dict] = {}
+
+
+#: Entries a normal git checkout has at the top level of `.git`. Measured across
+#: all 53 local checkouts: these 12 occur and nothing else does. The remaining
+#: names are standard git internals that appear as soon as anyone commits or
+#: merges in the checkout (a plain `git init && git commit` creates
+#: COMMIT_EDITMSG), so they are listed to avoid refusing a legitimate repo.
+#:
+#: This list only decides which NAMES are structurally acceptable. It is NOT a
+#: safety check on its own: forgiving a name forgives OVERWRITING it, and a
+#: measured exploit wrote a marker into `.git/gc.log` (an allowlisted name) and
+#: passed this check. `_git_dir_modified` supplies the content check.
+_GIT_DIR_ALLOWED = frozenset({
+    # present in the measured checkouts
+    "HEAD", "ORIG_HEAD", "config", "description", "hooks", "index", "info",
+    "logs", "objects", "packed-refs", "refs", "shallow",
+    # standard internals created by normal git use
+    "COMMIT_EDITMSG", "FETCH_HEAD", "MERGE_HEAD", "MERGE_MSG", "MERGE_MODE",
+    "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG", "BISECT_START",
+    "branches", "worktrees", "modules", "rr-cache", "svn", "sequencer",
+    "rebase-apply", "rebase-merge", "auto-merge", "gc.log", "locked",
+})
+
+#: Files under `.git` that git rewrites or creates as part of NORMAL use, and
+#: which therefore CANNOT be hash-compared. Measured over the 10 legitimate
+#: operations an agent may run (commit, tag, checkout -b, stash, merge, gc,
+#: reset --hard, add, capture_diff, checkout <branch>):
+#:
+#:   index            -> rewritten by `git add`, `capture_diff`, every reset
+#:   logs/HEAD        -> reflog, appended on commit/checkout/reset
+#:   ORIG_HEAD        -> created/rewritten by `git reset`
+#:
+#: Every one is verified STRUCTURALLY instead of being ignored (see
+#: _git_dir_structural_problems), because simply excluding a name would let an
+#: agent write there undetected.
+_GIT_DIR_VOLATILE = frozenset({"index", "logs/HEAD", "ORIG_HEAD"})
+
+#: Path prefixes whose files are refs, branch reflogs, or git-written messages.
+#: Files matching these are verified structurally rather than by hash: git
+#: rewrites them during legitimate work (commit/tag/branch/stash/merge/gc), so
+#: hashing them produces false positives that STOP the run — measured on 7 of the
+#: 10 legitimate operations before this change.
+_GIT_REF_PREFIXES = ("refs/", "logs/refs/", "worktrees/", "modules/")
+#: Exact `.git` paths that git rewrites during NORMAL use, and which are therefore
+#: shape-checked rather than hash-compared. Deliberately MINIMAL: a file belongs
+#: here only if a measured legitimate operation changes it.
+#:
+#: Measured writes (advanced operations an agent really runs):
+#:   rebase / revert            -> AUTO_MERGE (a 40-hex tree/commit id)
+#:   rebase / cherry-pick       -> COMMIT_EDITMSG, ORIG_HEAD, refs/**, logs/**
+#:   config set / submodule add -> config
+#:   worktree add               -> worktrees/<name>/** (a nested git dir)
+#:   submodule add              -> modules/<name>/** (a nested git dir)
+#:
+#: `gc.log` is NOT here even though it is a legitimate git file — `git gc` does not
+#: rewrite it in these checkouts, and listing it would let an agent overwrite it
+#: undetected (measured: that was attack B2).
+_GIT_REF_EXACT = frozenset({
+    "HEAD", "ORIG_HEAD", "packed-refs", "info/refs", "config",
+    # written by commit / merge / cherry-pick / rebase, which agents may run
+    "COMMIT_EDITMSG", "MERGE_MSG", "MERGE_HEAD", "MERGE_MODE", "AUTO_MERGE",
+    "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG", "BISECT_START",
+    "FETCH_HEAD",
+})
+
+#: A 40-hex object name. Used to validate refs, ORIG_HEAD, and reflog SHAs.
+_SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
+
+#: A git config file is INI-shaped. Measured against a real `.git/config` written
+#: by `git config user.name` and `git config --add remote.origin.url`:
+#:   [core]                              -> section
+#:   \trepositoryformatversion = 0       -> TAB-indented key/value
+#:   [remote "origin"]                   -> section with a subsection
+#:   ; comment                           -> comment
+#: NOTE the tab: an earlier version of this regex required the key to start at
+#: column 0 and rejected every real line.
+_RE_CONFIG_SECTION = re.compile(r'^\[[^\]\n]+\]$')
+_RE_CONFIG_KV = re.compile(r'^\s+[A-Za-z][\w.-]*\s*=\s*.*$')
+_RE_CONFIG_COMMENT = re.compile(r'^\s*[#;].*$')
+
+#: A file written by git that holds a single 40-hex object name (ORIG_HEAD,
+#: AUTO_MERGE, worktree HEAD in detached state, MERGE_HEAD, ...).
+_GIT_SINGLE_SHA_FILES = frozenset({
+    "ORIG_HEAD", "AUTO_MERGE", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD",
+    "BISECT_START",
+})
+
+#: A ref file holds either a 40-hex SHA (detached/loose ref) or a symbolic
+#: ``ref: <path>`` pointer. Anything else is not a ref.
+_RE_REF_SYMBOLIC = re.compile(r"^ref: \S+$")
+#: `packed-refs`: comments, peeled lines (^sha), or "<sha> <refname>".
+_RE_PACKED_REF_LINE = re.compile(r"^(#.*|\^[0-9a-f]{40}|[0-9a-f]{40} \S+)$")
+#: `info/refs`: "<sha>\t<refname>".
+_RE_INFO_REF_LINE = re.compile(r"^[0-9a-f]{40}\s+\S+$")
+
+#: One reflog line: <old-sha> <new-sha> <name> <email> <unix-ts> <tz>\t<message>.
+#: The SHAs are all-zeros for the initial commit. Used to tell a real reflog
+#: append from a marker an agent wrote into the file.
+#:
+#: The trailing ``\t<message>`` is OPTIONAL: a worktree's reflog is written without
+#: it (measured: `worktrees/<name>/logs/HEAD` holds
+#: ``0000... ec7b351... t <t@t> 1791291510 +0700`` and nothing else). Requiring the
+#: tab made a legitimate `git worktree add` look like a malformed reflog.
+_RE_RELOG_LINE = re.compile(
+    r"^[0-9a-f]{40} [0-9a-f]{40} .+ <[^>]*> \d{9,} [-+]\d{4}(\t.*)?$"
+)
+
+
+def _config_edit_is_clean(previous: str, current: str) -> tuple[bool, str]:
+    """Check that `current` is `previous` plus well-formed INI edits.
+
+    `config` cannot be hash-compared (`git config set`, `git remote add` and
+    `git submodule add` all rewrite it), so it is compared against the PREVIOUS
+    content, the same way reflogs are. Measured mutations of a real config:
+
+      * `config user.name`     -> adds a `[user]` section and a key line
+      * `config --add`         -> adds a section and a key line
+      * `config --unset`       -> REMOVES a line
+      * `config --replace-all` -> replaces one key line
+      * `remote add`           -> adds a section plus key lines
+      * `submodule add`        -> adds a section plus key lines
+
+    So the rule is LINE-based, not prefix-based (a removal breaks a prefix rule).
+
+    Comments are deliberately REJECTED as additions. Measured: 0 of 53 real
+    checkouts have a comment in `.git/config`, and no git command above writes one.
+    Allowing them let a marker through — that was the measured attack B4, which a
+    comment-permitting rule accepted while the hash check no longer applied.
+
+    ============================ ACCEPTED TRADE-OFF ============================
+    WHAT IS ACCEPTED, AND WHY. A hand-written INI edit with a well-formed shape is
+    accepted. Measured: `git config user.name STRATEGY_A_WAS_HERE` and the
+    hand-written equivalent produce BYTE-IDENTICAL configs, so no structural rule
+    can accept the legitimate command while rejecting the written one. This is what
+    makes `git config set` pass (MATRIX2 D11) instead of aborting a real run.
+
+    THE CONSEQUENCE, MEASURED. Two adversarial channels therefore pass:
+      * C5 — a marker hidden in a well-formed INI edit;
+      * C7 — a marker used as a remote NAME.
+    Both were detected before this rule and are not now. The adversarial harness
+    moved from 4 detected / 7 missed to 2 detected / 9 missed, and that regression
+    is deliberate rather than unnoticed.
+
+    WHY THAT IS ACCEPTABLE. Both channels require a path the sweep never uses:
+      * C7 needs to RUN git, and git is absent from the sandbox image —
+        measured: `run_tests("git config user.name X")` returns
+        `[exit code 127] sh: 1: git: not found`.
+      * C5 needs to WRITE `.git/config`, and `/work/.git` is a tmpfs — measured:
+        a container write is visible inside the container and leaves the host
+        config byte-identical.
+      * The host tool layer refuses `.git/config` for read, write AND edit.
+      * The sweep is pinned to docker (`run_final_sweep.py`: SANDBOX_MODE=docker),
+        and `get_sandbox_mode()` defaults to docker when unset.
+    So C5/C7 are open only in `local` mode, which no sweep uses and which is
+    already documented as unsafe.
+
+    THE PRIMARY DEFENCE IS CONTAINER ISOLATION, NOT THIS DETECTOR. Treat this
+    check as a backstop for the paths that CAN reach `.git`; the reason a sweep is
+    safe is that git is absent and `.git` is masked.
+
+    WHY NOT OPTION C (a stricter rule). Rejecting `[remote "..."]` additions would
+    close C7 but break a legitimate `git remote add`, which the advanced-operations
+    test supports and which `git fetch`/`git pull` depend on. The only remaining
+    discriminator would be pattern-matching marker-like names, i.e. a heuristic that
+    false-positives on unusual-but-legitimate names — reintroducing the class of bug
+    this rule exists to fix.
+    """
+    prev_lines = [l for l in previous.splitlines() if l.strip()]
+    cur_lines = [l for l in current.splitlines() if l.strip()]
+
+    added = [l for l in cur_lines if l not in prev_lines]
+    removed = [l for l in prev_lines if l not in cur_lines]
+
+    for line in added:
+        if _RE_CONFIG_COMMENT.match(line):
+            return False, (
+                f"a comment line was ADDED to config: {line[:40]!r}. No git command "
+                f"writes comments here, so this is how a marker is hidden."
+            )
+        if not (_RE_CONFIG_SECTION.match(line) or _RE_CONFIG_KV.match(line)):
+            return False, f"added line is not valid INI syntax: {line[:50]!r}"
+    for line in removed:
+        if not (_RE_CONFIG_SECTION.match(line) or _RE_CONFIG_KV.match(line)
+                or _RE_CONFIG_COMMENT.match(line)):
+            return False, f"a non-INI line disappeared from config: {line[:50]!r}"
+    return True, ""
+
+
+def _reflog_append_is_clean(previous: str, current: str) -> tuple[bool, str]:
+    """Check that `current` is `previous` plus well-formed reflog entries.
+
+    `logs/HEAD` cannot be hash-compared (git appends to it on commit, checkout,
+    and every reset), so it is excluded from the fingerprint — which would leave
+    a hole: an agent could APPEND a marker and strategy B could read it. Three
+    rules are needed, and each was measured against a real reflog:
+
+    1. the previous text must survive as a PREFIX (catches a wholesale rewrite);
+    2. every appended line must match the reflog FORMAT (catches a bare marker);
+    3. the SHAs must form a CHAIN and the last one must equal HEAD (catches a
+       well-formed forgery, which rule 2 alone accepts — measured: appending
+       ``<40 zeros> <40 ones> ... LEAK_MARKER_99`` passed rules 1-2).
+    """
+    if not current.startswith(previous):
+        return False, "the previous reflog content was not preserved as a prefix"
+    appended = current[len(previous):]
+    for i, line in enumerate(appended.splitlines(), 1):
+        if not line.strip():
+            continue
+        if not _RE_RELOG_LINE.match(line):
+            return False, f"appended line {i} is not a valid reflog entry: {line[:60]!r}"
+    return True, ""
+
+
+def _reflog_chain_is_intact(text: str) -> tuple[bool, str]:
+    """Verify the reflog is a SHA chain whose tip is the current HEAD.
+
+    Measured to hold for every real shape: fresh init, 1/3 commits,
+    commit+checkout -b, commit --amend, checkout -, reset --hard. A forgery that
+    continues the chain still fails the tip rule unless it also rewrites HEAD.
+    """
+    shas: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split(" ", 2)
+        if len(parts) < 2 or len(parts[0]) != 40 or len(parts[1]) != 40:
+            return False, f"malformed reflog line: {line[:50]!r}"
+        shas.append((parts[0], parts[1]))
+    for i in range(len(shas) - 1):
+        if shas[i][1] != shas[i + 1][0]:
+            return False, (
+                f"reflog chain broken between line {i + 1} and {i + 2}: "
+                f"{shas[i][1][:12]} -> {shas[i + 1][0][:12]}"
+            )
+    return True, ""
+
+
+#: Key under which the previous reflog TEXTS are stored in the baseline dict. The
+#: value is a dict {relative path -> text}: every reflog (HEAD and all branch
+#: reflogs) is verified by prefix+format, because git appends to them during
+#: normal commit/checkout/reset/stash/merge work.
+_RELOG_KEY = "<reflogs>"
+
+#: Key under which the previous `config` TEXT is stored in the baseline dict. Not
+#: a hash: git rewrites config during legitimate work, so the edit is compared
+#: against the previous content instead (see _config_edit_is_clean).
+_CONFIG_KEY = "<config>"
+
+
+def _is_ref_like(rel: str) -> bool:
+    """True when this `.git` path is a ref, reflog, or git-written message.
+
+    These are excluded from hash comparison and verified structurally instead.
+    """
+    return rel in _GIT_REF_EXACT or rel.startswith(_GIT_REF_PREFIXES)
+
+
+def _structural_problems(git_dir: Path) -> list[str]:
+    """Verify every ref/reflog/message file has a VALID SHAPE.
+
+    Structural verification is what makes it safe to exclude these files from the
+    hash comparison. Merely excluding them by name would re-open the hole: an
+    agent could write anything into `refs/heads/main` and go unnoticed. Measured
+    against 7 attack shapes, each of which is caught here.
+    """
+    problems: list[str] = []
+
+    def rel_of(p: Path) -> str:
+        return str(p.relative_to(git_dir)).replace("\\", "/")
+
+    def read(p: Path) -> str:
+        try:
+            return p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+
+    # --- loose refs: a 40-hex SHA, or a `ref: <path>` pointer -----------------
+    refs_root = git_dir / "refs"
+    if refs_root.is_dir():
+        for p in sorted(refs_root.rglob("*")):
+            if not p.is_file():
+                continue
+            content = read(p).strip()
+            if not (_SHA40_RE.match(content) or _RE_REF_SYMBOLIC.match(content)):
+                problems.append(
+                    f"{rel_of(p)} is not a valid ref (expected a 40-hex commit SHA "
+                    f"or 'ref: <path>', got {content[:40]!r})"
+                )
+
+    # --- HEAD: symbolic ref or detached SHA ----------------------------------
+    head = git_dir / "HEAD"
+    if head.is_file():
+        content = read(head).strip()
+        if not (_SHA40_RE.match(content) or _RE_REF_SYMBOLIC.match(content)):
+            problems.append(
+                f"HEAD is not a valid ref (got {content[:40]!r})"
+            )
+
+    # --- packed-refs / info/refs --------------------------------------------
+    packed = git_dir / "packed-refs"
+    if packed.is_file():
+        for i, line in enumerate(read(packed).splitlines(), 1):
+            if line.strip() and not _RE_PACKED_REF_LINE.match(line):
+                problems.append(f"packed-refs line {i} is malformed: {line[:50]!r}")
+    info_refs = git_dir / "info" / "refs"
+    if info_refs.is_file():
+        for i, line in enumerate(read(info_refs).splitlines(), 1):
+            if line.strip() and not _RE_INFO_REF_LINE.match(line):
+                problems.append(f"info/refs line {i} is malformed: {line[:50]!r}")
+
+    # --- every reflog: valid entry format ------------------------------------
+    logs_root = git_dir / "logs"
+    if logs_root.is_dir():
+        for p in sorted(logs_root.rglob("*")):
+            if not p.is_file():
+                continue
+            for i, line in enumerate(read(p).splitlines(), 1):
+                if not line.strip():
+                    continue
+                if not _RE_RELOG_LINE.match(line):
+                    problems.append(
+                        f"{rel_of(p)} line {i} is not a valid reflog entry: "
+                        f"{line[:50]!r}"
+                    )
+
+    # --- ORIG_HEAD: must be a SHA that git can actually resolve --------------
+    # Excluded from hashing (git rewrites it on reset), so verified here. A
+    # tampered ORIG_HEAD previously went undetected (measured, attack B3): the
+    # old check only compared it to HEAD, which a valid-looking SHA can pass.
+    orig_head = git_dir / "ORIG_HEAD"
+    if orig_head.is_file():
+        content = read(orig_head).strip()
+        if not _SHA40_RE.match(content):
+            problems.append(
+                f"ORIG_HEAD is not a 40-hex SHA: {content[:40]!r}"
+            )
+        else:
+            probe = _git_in(git_dir.parent, "cat-file", "-e", content)
+            if probe.returncode != 0:
+                problems.append(
+                    f"ORIG_HEAD ({content[:12]}) does not resolve to a git object"
+                )
+
+    # --- other single-SHA files (AUTO_MERGE, MERGE_HEAD, ...) ----------------
+    # Written by rebase/revert/merge, which agents legitimately run. Shape-checked
+    # so a marker cannot be parked here.
+    for name in sorted(_GIT_SINGLE_SHA_FILES - {"ORIG_HEAD"}):
+        f = git_dir / name
+        if not f.is_file():
+            continue
+        content = read(f).strip()
+        # MERGE_HEAD may list several SHAs (an octopus merge); accept 1..N.
+        parts = content.split()
+        if not parts or not all(_SHA40_RE.match(p) for p in parts):
+            problems.append(
+                f"{name} is not one or more 40-hex SHAs: {content[:40]!r}"
+            )
+
+    # --- config: must be INI-shaped -----------------------------------------
+    # `git config set` and `git submodule add` both rewrite it, so it cannot be
+    # hash-compared. Two checks, both needed:
+    #   1. every line must be INI-shaped (catches a marker in place of a key);
+    #   2. the edit is compared against the previous content
+    #      (_config_edit_is_clean), because a COMMENT is valid INI syntax and would
+    #      otherwise let an agent hide a marker (measured: that was attack B4).
+    config = git_dir / "config"
+    if config.is_file():
+        for i, line in enumerate(read(config).splitlines(), 1):
+            if not line.strip():
+                continue
+            if (_RE_CONFIG_SECTION.match(line) or _RE_CONFIG_KV.match(line)
+                    or _RE_CONFIG_COMMENT.match(line)):
+                continue
+            problems.append(
+                f"config line {i} is not valid INI syntax: {line[:50]!r}"
+            )
+
+    # --- nested git dirs: worktrees/<name> and modules/<name> ---------------
+    # `git worktree add` and `git submodule add` create a full nested git dir, so
+    # its contents cannot be hash-compared. Each one is checked with the SAME
+    # rules by recursing, so a marker inside a worktree ref/reflog is still caught.
+    for container in ("worktrees", "modules"):
+        root = git_dir / container
+        if not root.is_dir():
+            continue
+        for sub in sorted(p for p in root.iterdir() if p.is_dir()):
+            nested = _structural_problems(sub)
+            for prob in nested:
+                problems.append(f"{container}/{sub.name}/{prob}")
+            # A worktree records where it lives; the pointer must be a relative
+            # path or an absolute path, never an arbitrary marker.
+            gitdir_file = sub / "gitdir"
+            if gitdir_file.is_file():
+                pointer = read(gitdir_file).strip()
+                if not pointer or "\n" in pointer:
+                    problems.append(
+                        f"{container}/{sub.name}/gitdir is not a single path: "
+                        f"{pointer[:40]!r}"
+                    )
+
+    return problems
+
+
+def _reflogs_of(git_dir: Path) -> dict[str, str]:
+    """Return {relative path -> reflog text} for every reflog under `.git`."""
+    out: dict[str, str] = {}
+    logs_root = git_dir / "logs"
+    if not logs_root.is_dir():
+        return out
+    for p in sorted(logs_root.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = str(p.relative_to(git_dir)).replace("\\", "/")
+        try:
+            out[rel] = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            out[rel] = ""
+    return out
+
+#: Objects are content-addressed and numerous; hashing them is wasted work and
+#: a legitimately-run test cannot add one without also touching refs.
+_GIT_DIR_SKIP_PREFIXES = ("objects/",)
+
+
+def _git_dir_manifest(git_dir: Path) -> dict[str, str]:
+    """Fingerprint the files under `.git` that git does NOT rewrite in normal use.
+
+    Values are sha256 hex digests, except the ``_RELOG_KEY`` entry, whose value is
+    a dict of reflog texts. Reflogs and refs are excluded from HASHING because git
+    rewrites them during legitimate work (commit/tag/branch/stash/merge/gc) and
+    hashing them stopped the run — but they are not ignored: every one is checked
+    by `_structural_problems`, and reflogs additionally by prefix+format.
+    """
+    import hashlib
+
+    out: dict[str, str] = {}
+    try:
+        candidates = list(git_dir.rglob("*"))
+    except OSError:
+        return out
+    for p in candidates:
+        try:
+            if not p.is_file():
+                continue
+        except OSError:
+            continue
+        rel = str(p.relative_to(git_dir)).replace("\\", "/")
+        if rel in _GIT_DIR_VOLATILE or rel.startswith(_GIT_DIR_SKIP_PREFIXES):
+            continue
+        if _is_ref_like(rel):
+            # Verified structurally, not by hash (see _structural_problems).
+            continue
+        try:
+            out[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+        except OSError:
+            continue
+
+    out[_RELOG_KEY] = _reflogs_of(git_dir)  # type: ignore[assignment]
+    # `config` is verified as an EDIT, not a hash, so store its text.
+    config_path = git_dir / "config"
+    try:
+        out[_CONFIG_KEY] = (
+            config_path.read_text(encoding="utf-8", errors="replace")
+            if config_path.is_file() else ""
+        )
+    except OSError:
+        out[_CONFIG_KEY] = ""
+    return out
+
+
+def _git_dir_modified(git_dir: Path, before: dict[str, str]) -> list[str]:
+    """Return the hash-compared `.git` files whose content changed since `before`.
+
+    Reflog, config and ref paths are skipped here: they are handled by
+    `_structural_problems`, `_reflog_append_is_clean` and `_config_edit_is_clean`,
+    because git rewrites them legitimately.
+    """
+    sentinels = (_RELOG_KEY, _CONFIG_KEY)
+    after = _git_dir_manifest(git_dir)
+    changed = []
+    for rel, digest in before.items():
+        if rel in sentinels:
+            continue
+        if rel not in after:
+            changed.append(f"{rel} (removed)")
+        elif after[rel] != digest:
+            changed.append(rel)
+    for rel in after:
+        if rel in sentinels or rel in before:
+            continue
+        if _is_ref_like(rel) or rel in _GIT_DIR_VOLATILE:
+            # A ref/branch created by legitimate work (checkout -b, tag, stash,
+            # merge) is not tampering; its SHAPE is checked structurally.
+            continue
+        changed.append(f"{rel} (added)")
+    return sorted(changed)
+
+
+def _nested_repos_in_tree(root: Path, max_depth: int = 6) -> list[str]:
+    """Return relative paths of nested git repositories inside `root`.
+
+    A submodule (or any nested clone) puts a `.git` FILE at its root, so `git
+    clean` treats the whole directory as a repository and refuses to delete it —
+    measured with `-fdxq`, `-fdxq -f`, `-fdx -ff` and `-fdffx`: none removed it.
+    Detected here only to produce an accurate error message.
+    """
+    found: list[str] = []
+    root_depth = len(root.parts)
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        current = Path(dirpath)
+        if len(current.parts) - root_depth > max_depth:
+            dirnames[:] = []
+            continue
+        # Do not descend into .git itself.
+        dirnames[:] = [d for d in dirnames if d.lower() != _GIT_DIR_NAME]
+        if current != root and ".git" in filenames:
+            found.append(str(current.relative_to(root)).replace("\\", "/"))
+            dirnames[:] = []      # no need to look inside a nested repo
+    return sorted(found)
+
+
+def _iter_reparse_points(root: Path):
+    """Yield every symlink/junction under `root`, without following any of them.
+
+    Uses os.walk(followlinks=False) + lstat, so the scan cannot itself be
+    redirected out of the checkout by a link it is looking for. Mirrors
+    tools/repo_link_scan.py, kept local so the agent-facing tool module has no
+    dependency on the tools/ directory.
+    """
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        current = Path(dirpath)
+        keep = []
+        for name in dirnames:
+            candidate = current / name
+            if _is_reparse_point(candidate):
+                yield candidate
+            else:
+                keep.append(name)
+        dirnames[:] = keep
+        for name in filenames:
+            candidate = current / name
+            if _is_reparse_point(candidate):
+                yield candidate
 
 
 def finalize_patch(repo_root: str | Path | None, fallback_response: str) -> str:

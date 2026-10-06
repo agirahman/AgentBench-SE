@@ -28,13 +28,39 @@ import tools.verify_docker_sandbox as vrf_docker
 
 
 class TestSandboxModeAndConfig:
-    def test_default_mode_is_local(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_default_mode_is_docker_fail_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An UNSET mode must mean ISOLATED, not unisolated.
+
+        The default used to be 'local', so any entry point that forgot to set
+        SANDBOX_MODE (the sweep and the runner both did) executed agent commands on
+        the host with no isolation and no warning. Fail-closed is the correct
+        direction: a missing daemon then produces a loud error instead of a silent
+        unisolated run.
+        """
         monkeypatch.delenv("SANDBOX_MODE", raising=False)
-        assert get_sandbox_mode() == "local"
+        assert get_sandbox_mode() == "docker"
 
     def test_mode_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("SANDBOX_MODE", "docker")
         assert get_sandbox_mode() == "docker"
+
+    def test_local_mode_still_available_but_explicit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Development convenience is kept, but it must now be requested."""
+        monkeypatch.setenv("SANDBOX_MODE", "local")
+        assert get_sandbox_mode() == "local"
+
+    def test_prompt_default_matches_execution_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The prompt and the executor must agree when SANDBOX_MODE is unset.
+
+        If they disagreed, a run would EXECUTE in one mode while being PROMPTED as
+        if it were the other — telling the agent to use `dir`/`type` in a POSIX
+        container, or that git works when it does not.
+        """
+        from providers.system_prompts import get_tool_system_prompt
+
+        monkeypatch.delenv("SANDBOX_MODE", raising=False)
+        assert get_sandbox_mode() == "docker"
+        assert "POSIX (Linux)" in get_tool_system_prompt()
 
 
 class TestPathTranslation:
@@ -295,7 +321,17 @@ class TestRealDockerIntegration:
         )
 
     def test_git_binary_is_absent_by_design(self) -> None:
-        """git is NOT installed: the agent must use the host-side git_diff tool."""
+        """git is NOT installed: the agent must use the host-side git_diff tool.
+
+        Also load-bearing for the FAIRNESS analysis, so this test guards more than
+        history leakage: the residual `.git` channels that reset_working_tree does
+        not detect (a marker hidden in a commit message, a tag name, a branch name,
+        a stash message, a blob in objects/) all require RUNNING git. With git
+        absent they are unreachable from the container, which is why they are
+        accepted as low risk rather than chased with more aggressive hashing that
+        would re-introduce false positives on legitimate commits. If this test ever
+        fails, those channels become reachable again.
+        """
         proc = self._run(self.IMAGE, "sh", "-c", "command -v git || echo GIT_ABSENT")
         assert "GIT_ABSENT" in proc.stdout, (
             "git was found in the sandbox image; the design assumes it is absent "
@@ -351,6 +387,35 @@ class TestRealDockerIntegration:
         )
         assert proc.returncode != 0, "outbound request SUCCEEDED under --network=none"
         assert "URLError" in proc.stderr or "Network is unreachable" in proc.stderr
+
+    def test_container_write_to_git_does_not_reach_the_host(self, tmp_path: Path) -> None:
+        """A write to `.git` inside the container must NOT land on the host.
+
+        `/work/.git` is masked with --tmpfs, so the container gets a throwaway
+        directory. Verified end-to-end with a real marker: the host file must be
+        unchanged. Without the mask a container run could persist anything into the
+        host checkout's git metadata.
+        """
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        sentinel = git_dir / "COMMIT_EDITMSG"
+        sentinel.write_text("HOST_ORIGINAL\n", encoding="utf-8")
+        (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
+
+        proc = self._run(
+            "-v", f"{tmp_path.resolve()}:/work", "--tmpfs", "/work/.git",
+            "-w", "/work", self.IMAGE, "sh", "-lc",
+            "echo CONTAINER_WROTE_THIS > .git/COMMIT_EDITMSG; "
+            "cat .git/COMMIT_EDITMSG",
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "CONTAINER_WROTE_THIS" in proc.stdout, (
+            "precondition: the container should be able to write to its own .git"
+        )
+        assert sentinel.read_text(encoding="utf-8") == "HOST_ORIGINAL\n", (
+            "a container write to .git LANDED on the host checkout, so the tmpfs "
+            "mask is not working"
+        )
 
     def test_host_filesystem_is_not_mounted_without_v(self) -> None:
         proc = self._run(self.IMAGE, "sh", "-c", "ls /host_mnt 2>&1; ls /mnt 2>&1")

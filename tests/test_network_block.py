@@ -159,8 +159,16 @@ def test_run_tests_blocks_forbidden_command(tmp_path):
 
 
 def _active_sandbox_mode() -> str:
-    """The mode run_tests will actually use, read the same way production reads it."""
-    return os.environ.get("SANDBOX_MODE", "local").strip().lower()
+    """The mode run_tests will actually use, read the same way production reads it.
+
+    Delegates to the production function rather than re-reading the environment
+    with its own default: an earlier copy of this helper hard-coded 'local', so
+    once the production default became 'docker' the helper reported the WRONG mode
+    and the test asserted the local-mode message while running in a container.
+    """
+    from agents.tools import get_sandbox_mode
+
+    return get_sandbox_mode()
 
 
 def test_run_tests_blocks_python_network_probe(tmp_path):

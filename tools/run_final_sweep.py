@@ -393,6 +393,12 @@ def build_cmd(
         # reveal a silent fallback to .env.
         "--set", f"DEEPSEEK_THINKING={THINKING}",
         "--set", f"DEEPSEEK_REASONING_EFFORT={REASONING_EFFORT}",
+        # Isolation mode. MUST be explicit: the default used to be 'local', so a
+        # sweep that did not set this executed agent commands on the HOST with no
+        # isolation and no warning. Pinned to docker so the mode cannot depend on
+        # an ambient variable, and so a missing daemon fails loudly at the first
+        # run_tests instead of silently running unisolated.
+        "--set", "SANDBOX_MODE=docker",
         # Reasoning and the answer SHARE this budget, and a measured thinking turn
         # reached 99.1% of 32768. See the constant's note.
         "--set", f"MAX_TOKENS={MAX_TOKENS}",
