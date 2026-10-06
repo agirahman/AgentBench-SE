@@ -42,23 +42,38 @@ class ExecutionResult:
         return self.run.inferences
 
 
-@dataclass
+@dataclass(kw_only=True)
 class CostSummary:
-    """Agregasi biaya (USD + IDR) untuk satu eksekusi."""
+    """Agregasi biaya (USD) untuk satu eksekusi.
+
+    USD ONLY — no IDR field. The exchange rate is a PRESENTATION choice, not
+    research data: if the pipeline converted, a sweep run in 5 batches at
+    different times would convert each batch at a different rate and the batches
+    would stop being comparable. Costs stay in USD here, and the reporting step
+    converts with the rate the operator picks at that moment
+    (see ``tools/convert_to_idr.py``).
+
+    ``kw_only=True`` IS LOAD-BEARING — do not remove it. This class lost three
+    fields (``total_cost_idr``, ``peak_total_cost_idr``, ``actual_cost_idr``) when
+    IDR moved to reporting time, which shifted every later field up. A caller that
+    passed arguments POSITIONALLY — ``CostSummary(0.0, 0.0, 0.0, 0.0, "")`` in
+    runner.py — then put ``""`` into ``cached_input_tokens`` (an int), and
+    csv_exporter raised ``TypeError: can only concatenate str (not "int") to str``
+    on the RUN-FAILURE path, which is exactly the path a 150-run sweep hits
+    (rate limits, provider errors). Making the class keyword-only turns that class
+    of silent misassignment into an immediate TypeError at the call site.
+    """
 
     input_cost_usd: float
     output_cost_usd: float
     total_cost_usd: float
-    total_cost_idr: float
     pricing_version: str = ""
     cached_input_tokens: int = 0
     regular_input_tokens: int = 0
     cached_input_cost_usd: float = 0.0
     regular_input_cost_usd: float = 0.0
     peak_total_cost_usd: float = 0.0
-    peak_total_cost_idr: float = 0.0
     actual_cost_usd: float = 0.0
-    actual_cost_idr: float = 0.0
     # True when ANY request of this run was served from the provider's semantic
     # (response) cache instead of being generated. Such a run did not measure the
     # strategy, so it must be excluded from cross-strategy comparison rather than

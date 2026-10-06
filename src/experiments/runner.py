@@ -473,11 +473,8 @@ def _rows_from_savepoints(pred_dir: Path, strategies) -> list[dict]:
                 "input_tokens_regular": None,
                 "output_tokens": None,
                 "cost_usd_offpeak": None,
-                "cost_idr_offpeak": None,
                 "cost_usd_peak_total": None,
-                "cost_idr_peak_total": None,
                 "cost_usd_actual": None,
-                "cost_idr_actual": None,
                 "input_cost_usd_total": None,
                 "output_cost_usd": None,
                 "input_cost_usd_cached": None,
@@ -854,9 +851,9 @@ def _export_interrupted_run(exp_dir, all_results, pred_dir, strategies, issues,
 
     try:
         export_statistics_json(df, f"{exp_dir}/generation_statistics.json",
-                               pricing=pricing, usd_idr_rate=Config.USD_IDR_RATE)
+                               pricing=pricing)
         generate_summary_md(df, f"{exp_dir}/generation_report.md",
-                            pricing=pricing, usd_idr_rate=Config.USD_IDR_RATE)
+                            pricing=pricing)
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"Could not export the statistics/report after the interrupt: {exc}")
 
@@ -958,16 +955,13 @@ def _results_from_flat_rows(rows: list[dict]) -> list[ExperimentResult]:
             input_cost_usd=_num(row.get("input_cost_usd_total")),
             output_cost_usd=_num(row.get("output_cost_usd")),
             total_cost_usd=_num(row.get("cost_usd_offpeak")),
-            total_cost_idr=_num(row.get("cost_idr_offpeak")),
             pricing_version=_text(row.get("pricing_version")),
             cached_input_tokens=int(_num(row.get("input_tokens_cached"))),
             regular_input_tokens=int(_num(row.get("input_tokens_regular"))),
             cached_input_cost_usd=_num(row.get("input_cost_usd_cached")),
             regular_input_cost_usd=_num(row.get("input_cost_usd_regular")),
             peak_total_cost_usd=_num(row.get("cost_usd_peak_total")),
-            peak_total_cost_idr=_num(row.get("cost_idr_peak_total")),
             actual_cost_usd=_num(row.get("cost_usd_actual")),
-            actual_cost_idr=_num(row.get("cost_idr_actual")),
             # Rebuilt from the CSV so a resumed experiment keeps the integrity
             # flag. _truthy, not bool(): a blank cell arrives as NaN and bool(NaN)
             # is True, which would invent a hit on every recovered row.
@@ -1354,7 +1348,22 @@ def run_experiments(
 
                 empty_run = InferenceRun(patch="", inferences=[])
                 empty_exec = ExecutionResult(run=empty_run)
-                empty_cost = CostSummary(0.0, 0.0, 0.0, 0.0, "")
+                # KEYWORD args, never positional. This was positional
+                # (`CostSummary(0.0, 0.0, 0.0, 0.0, "")`) until removing the IDR
+                # fields shifted every later parameter by one, so `""` landed in
+                # `cached_input_tokens` (an int field) and the exporter raised
+                # `TypeError: can only concatenate str (not "int") to str`.
+                #
+                # That only fired on the FAILURE path, so it looked harmless in
+                # normal runs — but a 150-run sweep hits rate limits and provider
+                # errors, and every one of those runs goes through here. A field
+                # reorder must never be able to silently reinterpret a value.
+                empty_cost = CostSummary(
+                    input_cost_usd=0.0,
+                    output_cost_usd=0.0,
+                    total_cost_usd=0.0,
+                    pricing_version="",
+                )
                 empty_eval = EvaluationResult(success=False, error=str(e))
                 all_results.append(ExperimentResult(
                     instance_id=issue.instance_id,
@@ -1466,14 +1475,14 @@ def run_experiments(
     stats_path = f"{exp_dir}/generation_statistics.json"
     model_name = df["model"].iloc[0] if len(df) else provider_name
     pricing = PricingTable.get(model_name) if model_name else None
-    export_statistics_json(df, stats_path, pricing=pricing, usd_idr_rate=Config.USD_IDR_RATE)
+    export_statistics_json(df, stats_path, pricing=pricing)
     logger.success(f"Statistics exported: {stats_path}")
 
     # NOTE: this is the PRE-EVAL generation report (patch generation only),
     # NOT the resolved rate. The authoritative resolved rate is eval/summary.md
     # produced by report_generator from Modal results. See PLAN.md Item 5.
     summary_path = f"{exp_dir}/generation_report.md"
-    generate_summary_md(df, summary_path, pricing=pricing, usd_idr_rate=Config.USD_IDR_RATE)
+    generate_summary_md(df, summary_path, pricing=pricing)
     logger.success(f"Generation report (PRE-EVAL) exported: {summary_path}")
 
     manifest = build_experiment_manifest(

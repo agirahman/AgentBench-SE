@@ -110,8 +110,9 @@ def build_experiment_manifest(
                 ),
                 "semantic_cache_hit_turns": r.cost.semantic_cache_hit_turns,
                 "cost": {
+                    # USD only: the exchange rate is a presentation choice, so the
+                    # pipeline does not carry one (see tools/convert_to_idr.py).
                     "total_usd": round(r.cost.total_cost_usd, 6),
-                    "total_idr": round(r.cost.total_cost_idr, 2),
                     "total_usd_off_peak": round(r.cost.total_cost_usd, 6),
                     "total_usd_peak": round(r.cost.peak_total_cost_usd, 6),
                 },

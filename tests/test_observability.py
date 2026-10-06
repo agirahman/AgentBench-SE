@@ -15,7 +15,10 @@ from models.result import (
 def _make_result(instance_id, strategy, patch, status="VALID"):
     run = InferenceRun(patch=patch, inferences=[])
     exec_res = ExecutionResult(run=run)
-    cost = CostSummary(0.001, 0.002, 0.003, 53.5, "test")
+    # All keyword: CostSummary is kw_only so that a field removal can never shift
+    # a positional argument into the wrong slot (that bug killed the failure path).
+    cost = CostSummary(input_cost_usd=0.001, output_cost_usd=0.002,
+                       total_cost_usd=0.003, pricing_version="test")
     eval_res = EvaluationResult(success=True, error="")
     return ExperimentResult(
         instance_id=instance_id,
@@ -94,13 +97,15 @@ def test_manifest_records_cached_tokens_and_peak_cost(tmp_path):
     run = InferenceRun(patch="--- a/x\n+++ b/x\n", inferences=[])
     exec_res = ExecutionResult(run=run)
     cost = CostSummary(
-        0.001, 0.002, 0.003, 53.5, "test",
+        input_cost_usd=0.001,
+        output_cost_usd=0.002,
+        total_cost_usd=0.003,
+        pricing_version="test",
         cached_input_tokens=700,
         regular_input_tokens=300,
         cached_input_cost_usd=0.0001,
         regular_input_cost_usd=0.0009,
         peak_total_cost_usd=0.006,
-        peak_total_cost_idr=107.0,
     )
     result = ExperimentResult(
         instance_id="django__django-1",

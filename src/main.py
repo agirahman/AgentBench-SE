@@ -209,12 +209,9 @@ def _save_experiment_config(
                 "input_cache_hit": peak["cached_input_per_million"],
                 "output": peak["output_per_million"],
             },
-            "exchange_rate": {
-                "from": "USD",
-                "to": "IDR",
-                "rate": Config.USD_IDR_RATE,
-                "source": "https://www.google.com/finance/beta/quote/USD-IDR",
-            },
+            # No exchange_rate block: the pipeline reports USD only, and the rate is
+            # chosen at reporting time (tools/convert_to_idr.py --rate ...). Carrying
+            # a rate here would make batches run at different times incomparable.
         },
         "rate_limiting": {
             "enabled": True,

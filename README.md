@@ -126,11 +126,30 @@ OPENROUTER_MODEL=tencent/hy3:free
 
 TEMPERATURE=0.2
 MAX_RETRIES=3
-USD_IDR_RATE=16500.0
 ```
 
 > [!NOTE]
 > Untuk konsistensi riset, eksperimen utama memakai OpenRouter (`tencent/hy3`).
+
+> [!IMPORTANT]
+> **Biaya dilaporkan dalam USD.** Kurs `USD_IDR_RATE` tidak lagi dibaca pipeline,
+> karena kurs adalah pilihan *penyajian*, bukan data penelitian: kalau pipeline
+> mengonversi, tiap batch sweep terpaku pada kurs yang ada di `.env` saat batch itu
+> jalan, sehingga batch yang dijalankan di waktu berbeda tidak bisa dibandingkan.
+> Konversi dilakukan di tahap pelaporan dengan **satu** kurs untuk semua batch:
+>
+> ```bash
+> python tools/convert_to_idr.py --all --rate 17828.10 --out bab4_biaya.md
+> ```
+>
+> `--rate` **wajib** (tanpa default) dan kurs + tanggalnya dicatat di output sebagai
+> jejak audit untuk Bab IV.
+>
+> ⚠️ **Jangan percaya kolom `*_idr*` pada artefak lama.** Pipeline dulu mengonversi
+> sendiri, dan nilai kursnya berbeda-beda antar tempat (`.env` 17828.10, default
+> `Config` 16500.0, default `report_generator` 16500) — jadi kolom IDR di CSV lama
+> tidak dapat dibandingkan antar batch. Pakai kolom USD-nya, lalu konversi ulang
+> dengan tool di atas.
 
 ## Penggunaan
 

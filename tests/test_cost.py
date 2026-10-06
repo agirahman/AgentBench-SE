@@ -1,6 +1,5 @@
 import pytest
 
-from config import Config
 from models.inference import InferenceResult
 from evaluation.cost import CostCalculator, CostResult, PricingTable
 
@@ -72,9 +71,10 @@ def test_calculator_peak_off_peak_both_recorded():
         (300 / 1_000_000 * 0.44) + (700 / 1_000_000 * 0.014) + (500 / 1_000_000 * 1.32)
     )
     assert result.peak_total_cost_usd > result.total_cost_usd
-    assert result.peak_total_cost_idr == pytest.approx(
-        result.peak_total_cost_usd * Config.USD_IDR_RATE
-    )
+    # No peak_total_cost_idr: the pipeline reports USD only, so a rate change
+    # between batches cannot make their costs incomparable. IDR is produced at
+    # reporting time by tools/convert_to_idr.py --rate.
+    assert not hasattr(result, "peak_total_cost_idr")
 
 
 def test_calculator_accuracy():
@@ -192,10 +192,109 @@ def test_cbai_cost_reproduces_a_recorded_row():
     )
 
 
-def test_cost_idr_conversion():
+def test_cost_result_carries_no_idr():
+    """The pipeline must not carry an exchange rate at all.
+
+    The rate is a presentation choice, not research data. While the pipeline
+    converted, each batch was frozen to whatever USD_IDR_RATE was in .env when it
+    ran, so a sweep split across 5 batches produced costs that could not be
+    compared. Conversion now happens at reporting time
+    (tools/convert_to_idr.py --rate), where one rate is applied to every batch.
+    """
     result = CostCalculator().calculate(_inference())
-    assert result.total_cost_idr == pytest.approx(
-        result.total_cost_usd * Config.USD_IDR_RATE
+    for field in ("total_cost_idr", "peak_total_cost_idr", "actual_cost_idr"):
+        assert not hasattr(result, field), (
+            f"CostResult still carries {field}, so a rate change between batches "
+            f"would make their costs incomparable"
+        )
+
+
+def test_cost_summary_carries_no_idr():
+    """Same contract for the aggregate, which is what reaches the CSV."""
+    from models.result import CostSummary
+    summary = CostCalculator().aggregate([_inference(), _inference()])
+    assert isinstance(summary, CostSummary)
+    for field in ("total_cost_idr", "peak_total_cost_idr", "actual_cost_idr"):
+        assert not hasattr(summary, field), (
+            f"CostSummary still carries {field}; the CSV would then hold a rate "
+            f"frozen at sweep time"
+        )
+
+
+def test_config_rate_is_not_read_by_the_cost_pipeline():
+    """Config may still DEFINE USD_IDR_RATE, but nothing may read it.
+
+    The setting is kept only so an existing .env does not break on load. If the
+    pipeline read it again, batch costs would silently depend on .env again — the
+    exact defect this refactor removed.
+
+    Checked via AST (real attribute access), not a source-text scan: the docstrings
+    deliberately name the setting to explain why it is gone.
+    """
+    import ast
+    import inspect
+
+    from evaluation import cost as cost_module
+    from experiments import csv_exporter
+
+    for module in (cost_module, csv_exporter):
+        tree = ast.parse(inspect.getsource(module))
+        accessed = [
+            node.attr for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute) and node.attr == "USD_IDR_RATE"
+        ]
+        assert accessed == [], (
+            f"{module.__name__} reads USD_IDR_RATE in code; the rate must be "
+            f"applied only at reporting time"
+        )
+
+
+def test_pipeline_does_not_compute_idr():
+    """The pipeline must not carry an exchange rate: it is a presentation choice,
+    not research data. Batch 2-5 must be comparable in USD.
+
+    The concrete failure this prevents: the sweep runs as 5 batches at different
+    times. With conversion inside the pipeline, each batch used whatever rate .env
+    held when it ran, so the same USD spend appeared as different Rp figures and the
+    batches could not be added up or compared. It also meant a rate correction
+    forced a re-run of the sweep.
+
+    Checks BOTH objects the pipeline produces: the per-inference CostResult and the
+    per-run CostSummary (the latter is what reaches the CSV).
+    """
+    result = CostCalculator().calculate(_inference())
+    summary = CostCalculator().aggregate([_inference()])
+
+    for obj, label in ((result, "CostResult"), (summary, "CostSummary")):
+        idr_fields = [f for f in vars(obj) if "idr" in f.lower()]
+        assert idr_fields == [], (
+            f"{label} still carries {idr_fields}; a rate change between batches "
+            f"would make their costs incomparable"
+        )
+
+
+def test_a_rate_change_between_batches_does_not_change_usd():
+    """The point of the refactor, stated as a property.
+
+    Two "batches" priced with two different .env rates must produce the SAME USD
+    cost. Before the refactor, USD was unaffected but the IDR field differed, which
+    is why the batches could not be compared; now there is no rate to differ.
+    """
+    import os
+
+    def cost_with_rate(rate: str) -> float:
+        os.environ["USD_IDR_RATE"] = rate
+        try:
+            return CostCalculator().calculate(_inference()).total_cost_usd
+        finally:
+            os.environ.pop("USD_IDR_RATE", None)
+
+    batch_1 = cost_with_rate("16500.0")
+    batch_2 = cost_with_rate("17828.10")
+
+    assert batch_1 == pytest.approx(batch_2), (
+        "the USD cost changed with the exchange rate, so a rate change between "
+        "batches would make them incomparable"
     )
 
 

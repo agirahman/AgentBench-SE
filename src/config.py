@@ -263,6 +263,16 @@ class Config:
     SOURCE_CONTEXT_MAX_FILE_LINES = _get_int_env("SOURCE_CONTEXT_MAX_FILE_LINES", 600)
     REPO_CACHE_DIR = _get_env("REPO_CACHE_DIR", "datasets/repos")
 
+    # NOT READ BY THE PIPELINE. The pipeline reports cost in USD only, because the
+    # exchange rate is a presentation choice rather than research data: if the
+    # pipeline converted, each sweep batch would be frozen to whatever rate `.env`
+    # held when it ran, and costs across batches would stop being comparable. IDR
+    # is produced at REPORTING time instead, with an explicit operator-supplied
+    # rate: `python tools/convert_to_idr.py --all --rate <kurs>`.
+    #
+    # Kept only so an existing `.env` does not break on load, and so the old value
+    # is visible if someone compares an old artefact against a new one. Do not
+    # reintroduce a reader for this.
     USD_IDR_RATE = _get_float_env("USD_IDR_RATE", 16500.0)
 
 
