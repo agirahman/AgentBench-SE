@@ -217,6 +217,12 @@ class Config:
     # because the backoff happens inside the tool loop and never surfaces as a
     # failure to the runner. 0 = unbounded (the previous behaviour).
     ACT_TIMEOUT_SECONDS = _get_int_env("ACT_TIMEOUT_SECONDS", 1800)
+    # NOTE on the default: 1800 is kept for INTERACTIVE use (a single agent run
+    # from the REPL/CLI), where a hung loop is a local problem. THE SWEEP DOES NOT
+    # USE THIS DEFAULT -- tools/run_final_sweep.py pins ACT_TIMEOUT_SECONDS=0
+    # explicitly via --set (see the build_cmd function), so sweep behavior never
+    # depends on .env. This mirrors how SANDBOX_MODE is pinned: default for local
+    # use, explicit for the measured experiment. 0 = unbounded in tool_loop.
     # Price every run with this model's rate card, whatever model actually served
     # it. Needed because the budget-curve runs use a free testing model whose real
     # rate is $0: without this, all 21 cost columns read 0.00, a dollar cap can

@@ -1853,7 +1853,7 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 | `REVISION_TOOL_TURNS` | `48` | = 4 putaran × 2 act × 6 turn (kebutuhan terukur: 6) |
 | `MAX_REVISION_TURNS` | `4` | batas ronde revisi; **sweep mem-pass ini eksplisit** |
 | `COST_LIMIT_USD` | `3.0` | pengaman dolar per task (referensi SWE-agent $3) |
-| `ACT_TIMEOUT_SECONDS` | `3600` | **per act**. Dulu tidak ada di `.env` → default 1800, padahal sweep pass 3600 |
+| `ACT_TIMEOUT_SECONDS` | `3600` → **0** (2026-10-06, DIHAPUS) | **per act**. Bound wall-clock dihapus setelah batch 1 run 11 menghasilkan NO_DIFF (executor dibunuh 3600 s saat sehat). Sweep mem-pass 0 eksplisit; default interaktif tetap 1800. Run berhenti oleh budget turn/COST_LIMIT_USD/retry/agen selesai. |
 | `TOOL_OUTPUT_MAX_CHARS` | `2000` | cap per hasil tool, head+tail |
 | `API_TIMEOUT` | `600` | dinaikkan dari 180 |
 | `PROMPT_CACHE_LAYOUT` | `true` | prefix caching terbukti nyata (~90% hit) |

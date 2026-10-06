@@ -1245,6 +1245,127 @@ class TestSweepPinsTheSandboxMode:
         )
 
 
+class TestSweepHasNoWallClockBound:
+    """2026-10-06: the wall-clock bound was removed (run 11 produced NO_DIFF)."""
+
+    def _load_sweep_module(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "sweep_under_test", ROOT / "tools" / "run_final_sweep.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_zero_act_timeout_means_unbounded(self, monkeypatch):
+        """Config.ACT_TIMEOUT_SECONDS=0 must resolve to max_wall_seconds=None.
+
+        tool_loop.run_tool_loop reads the bound from Config when the caller passes
+        max_wall_seconds=None. 0 means "disabled", which maps to None. If someone
+        changes 0 from None to a real bound, this run dies on a healthy long act.
+        """
+        from providers import tool_loop
+
+        from test_tool_loop_wall_clock import (
+            _FakeClient, _SlowCompletions,
+        )
+
+        monkeypatch.setattr(tool_loop.Config, "ACT_TIMEOUT_SECONDS", 0)
+        monkeypatch.setattr(tool_loop.Config, "TOOL_OUTPUT_MAX_CHARS", 2000)
+        monkeypatch.setattr(
+            tool_loop, "execute_tool", lambda n, a, role="": "TOOL_OUT")
+
+        # Three real turns at 0.01 s each = 0.03 s. A zero-second bound would kill
+        # this immediately; None (unbounded) must let it finish.
+        completions = _SlowCompletions(
+            per_call_seconds=0.01, calls_before_final=3)
+        client = _FakeClient(completions)
+        result = tool_loop.run_tool_loop(
+            client, model="fake", prompt="fix", role="direct",
+            tools=[{"type": "function",
+                    "function": {"name": "read_file", "parameters": {}}}],
+            repo_root=None, max_tool_turns=10,  # max_wall_seconds=None default
+        )
+        assert result.truncated is False, (
+            "ACT_TIMEOUT_SECONDS=0 did not map to an unbounded loop; the loop "
+            f"stopped early (truncated={result.truncated})"
+        )
+        assert result.response == "done"
+
+    def test_long_act_is_not_killed_by_wall_clock(self, monkeypatch):
+        """A slow but healthy act must NOT be truncated when the bound is off.
+
+        Drives the real loop with max_wall_seconds=None and a client that burns a
+        real 0.05 s per call. The loop must run to the turn cap.
+        """
+        from providers import tool_loop
+
+        from test_tool_loop_wall_clock import (
+            _FakeClient, _SlowCompletions,
+        )
+
+        monkeypatch.setattr(tool_loop.Config, "TOOL_OUTPUT_MAX_CHARS", 2000)
+        monkeypatch.setattr(
+            tool_loop, "execute_tool", lambda n, a, role="": "TOOL_OUT")
+
+        completions = _SlowCompletions(
+            per_call_seconds=0.05, calls_before_final=5)
+        client = _FakeClient(completions)
+
+        result = tool_loop.run_tool_loop(
+            client, model="fake", prompt="fix", role="direct",
+            tools=[{"type": "function",
+                    "function": {"name": "read_file", "parameters": {}}}],
+            repo_root=None, max_tool_turns=10, max_wall_seconds=None,
+        )
+
+        assert result.truncated is False, (
+            "max_wall_seconds=None truncated a healthy long act; the unbounded "
+            "path is broken"
+        )
+        assert result.response == "done"
+
+    def test_sweep_pins_act_timeout_explicitly(self):
+        """run_final_sweep.py must pass ACT_TIMEOUT_SECONDS=0, not rely on .env."""
+        mod = self._load_sweep_module()
+        cmd = mod.build_cmd(["inst-1"], ["direct"], dry_run=True)
+        joined = " ".join(cmd)
+        assert "ACT_TIMEOUT_SECONDS=0" in joined, (
+            "the sweep does not pin ACT_TIMEOUT_SECONDS=0; it would silently take "
+            f".env's value instead. command: {joined}"
+        )
+
+    def test_sweep_banner_says_unbounded(self, capsys):
+        """The banner must NOT print '0s' -- an operator could read it as 0 seconds."""
+        mod = self._load_sweep_module()
+        # The banner reads the module-level constant, so with 0 it must say unbounded.
+        assert mod.ACT_TIMEOUT_SECONDS == 0, (
+            f"sweep must run unbounded; got {mod.ACT_TIMEOUT_SECONDS}"
+        )
+        # Render the label the banner uses.
+        label = (
+            f"{mod.ACT_TIMEOUT_SECONDS}s per act (bounds retry backoff)"
+            if mod.ACT_TIMEOUT_SECONDS > 0
+            else "unbounded (no wall-clock bound)"
+        )
+        assert "unbounded" in label, f"banner would mislead the operator: {label}"
+        assert "0s" not in label, (
+            f"banner must not read '0s' (looks like zero seconds): {label}"
+        )
+
+    def test_no_3600_wall_clock_bound_remains_in_sweep_cmd(self):
+        """Anti-regression: build_cmd must not carry a 3600s wall-clock bound."""
+        mod = self._load_sweep_module()
+        cmd = mod.build_cmd(["inst-1"], ["direct"], dry_run=True)
+        joined = " ".join(cmd)
+        assert "ACT_TIMEOUT_SECONDS=3600" not in joined, (
+            f"the sweep still pins 3600s; command: {joined}"
+        )
+        assert mod.ACT_TIMEOUT_SECONDS == 0, (
+            f"sweep constant is {mod.ACT_TIMEOUT_SECONDS}, expected 0"
+        )
+
+
 class TestSandboxModeFailsClosed:
     """CACAT 3: an unset SANDBOX_MODE silently ran agent commands on the host."""
 

@@ -27,6 +27,7 @@
 | **B1** | `run_final_sweep.py` **tidak** meneruskan `--resume`/`--exp-id`; restart = direktori EXP baru + 150 run diulang | **150 run** (seluruh sweep dijalankan ulang; kerja lama tidak pernah disambung) | Ya — `build_cmd` diperiksa, lihat §3 |
 | **B2** | `sweep_started.json` ditimpa tanpa syarat pada restart | **Jendela tagihan attempt pertama hilang** → tidak bisa rekonsiliasi biaya run yang sudah dibayar | Ya — `run_final_sweep.py:249`, §3/§5 |
 | **B3** | Tidak ada budget waktu keseluruhan; `ACT_TIMEOUT_SECONDS` hanya per-act, dan satu run review punya 5 act | **1 run bisa 5 jam**, dan tidak ada yang menghentikan sweep secara keseluruhan | Ya — `run_final_sweep.py:109`, §2 |
+| | | **[CATATAN 2026-10-06]** Bound per-act sekarang DIHAPUS (ACT_TIMEOUT_SECONDS=0). Satu run review bisa lebih lama dari 5 jam bila sehat; run dihentikan hanya oleh budget turn, COST_LIMIT_USD, retry cap, atau agen selesai. Riwayat analisis ini dipertahankan untuk audit. | |
 | **B4** | `read_actual_bill.py --compare` tidak menemukan field biaya di artefak kita | **RQ3 tidak bisa divalidasi otomatis** terhadap tagihan nyata | Ya — diuji pada 8 eksperimen, §5 |
 
 ---
@@ -130,7 +131,9 @@ Pembanding dari pilot sebelumnya, `results/EXP-20260930-215/artifacts/*/*/summar
 
 ### 2b. Worst case per run dan apakah ada budget keseluruhan
 
-`run_final_sweep.py:109` menetapkan `ACT_TIMEOUT_SECONDS = 3600`. Diverifikasi bahwa nilai ini benar-benar berlaku: `--set ACT_TIMEOUT_SECONDS=3600` (`run_final_sweep.py:162`) diterapkan `run_with_env.py:88-89` setelah membersihkan variabel `.env`, dan `config.py:219` membacanya — saya jalankan `Config.ACT_TIMEOUT_SECONDS` dengan env di-set dan mendapat **3600** (bukan default 1800).
+`run_final_sweep.py:109` menetapkan `ACT_TIMEOUT_SECONDS = 3600` (nilai saat audit ini ditulis). Diverifikasi bahwa nilai ini benar-benar berlaku: `--set ACT_TIMEOUT_SECONDS=3600` (`run_final_sweep.py:162`) diterapkan `run_with_env.py:88-89` setelah membersihkan variabel `.env`, dan `config.py:219` membacanya — saya jalankan `Config.ACT_TIMEOUT_SECONDS` dengan env di-set dan mendapat **3600** (bukan default 1800).
+
+**[CATATAN 2026-10-06]** Bound ini SEJAK ITU DIHAPUS: `ACT_TIMEOUT_SECONDS = 0` (unbounded). Alasan: batch 1 run 11 (planning on django__django-11019) menghasilkan `NO_DIFF` karena executor dibunuh pada 3600 s wall clock padahal sehat. Teks di atas dipertahankan sebagai riwayat audit; perilaku saat ini = 0.
 
 Jumlah act per strategi (dari `review_strategy.py`):
 - `direct`: 1 act → 1 × 3600 = 1,0 jam
@@ -142,6 +145,8 @@ Kalau `MAX_REVISION_TURNS` dinaikkan ke 4 (sesuai ukuran reserve 32 = 4×8): 11 
 **Apakah ada budget waktu keseluruhan? TIDAK.** Diverifikasi dengan grep pada `src/` untuk `time_budget|max_seconds|overall|deadline|signal|alarm|KeyboardInterrupt|atexit` → tidak ada. Satu-satunya bound adalah per-act.
 
 **Konsekuensi:** satu instance patologis (mis. provider hang berulang) bisa menahan sweep hingga 5 jam tanpa ada yang menghentikannya. Karena setiap act dibatasi 3600 s dan ada 5 act di review, satu run bisa 5 jam; tiga strategi pada satu instance bisa sampai ~8 jam.
+
+**[CATATAN 2026-10-06]** Dengan bound per-act dihapus, konsekuensi di atas berubah: tidak ada lagi batas teoretis 5 jam/run. Run dihentikan hanya oleh budget turn, COST_LIMIT_USD, retry cap, atau agen selesai. Teks di atas = riwayat saat bound masih 3600.
 
 Yang **menyelamatkan** dari bencana: savepoint per-run (`_append_jsonl`, `runner.py:332-335`) dan `write_issue_run_summary` dipanggil **per run** (`runner.py:916`, `1014`) — jadi kerja yang sudah selesai tetap tercatat meski sweep dihentikan. Tapi tidak ada yang menghentikannya secara otomatis.
 

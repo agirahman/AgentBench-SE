@@ -27,18 +27,17 @@ What is deliberately different from the earlier 3-issue runs
    cannot spend without bound on a paid route. The 3-issue RQ3 run used $1.00,
    which was also non-binding; $3 matches the reference.
 
-3. ACT_TIMEOUT_SECONDS=3600 per act.
+3. ACT_TIMEOUT_SECONDS=0 (unbounded; no wall-clock bound per act).
 
-   A turn budget does not bound duration: with the rate-limit backoff schedule one
-   request can sleep 180s before failing, and a 200-turn act is 201 requests. A
-   single review run was measured at 5,992 s (100 minutes, a 502). This bounds the
-   pathological case while leaving room for an honest long act -- at pool 100 the
-   worst healthy act ran long enough that a 1800s bound would have truncated it.
+   The wall-clock bound was REMOVED on 2026-10-06. Run 11 (planning on
+   django__django-11019) produced NO_DIFF — an empty patch — because the
+   executor was killed at the 3600s wall clock after 38 healthy turns. That
+   truncated patch is not a measurement of the strategy; it is corrupted data.
 
-   NOTE: this is PER ACT, and a review run has up to 3 + 2 x MAX_REVISION_ROUNDS
-   acts (11 with 4 rounds), so a single pathological review run can occupy hours.
-   There is no overall time budget; the savepoint per run means an interrupted sweep
-   can be continued with --resume instead of being restarted.
+   A run now ends only when the turn budget (fairness) or the agent itself
+   finishes. What still bounds a run: the 200-turn budget per strategy,
+   COST_LIMIT_USD per task, retry max_attempts=3, and API_TIMEOUT (per HTTP
+   request). See the comment above the constant for the measured worst case.
 
 Cost and time
 -------------
@@ -119,14 +118,30 @@ MAX_REVISION_ROUNDS = 4
 FLOOR = 10
 #: Dollar backstop per task -- the reference implementations' value ($3).
 COST_LIMIT_USD = 3.00
-#: Wall-clock bound per act, so retry backoff cannot hang a run for hours.
+#: Wall-clock bound per act. 0 = unbounded (no wall-clock bound). The operator
+#: removed it on 2026-10-06 after batch 1 was stopped.
 #:
-#: Raised from 1800: at a 200-turn allowance an act legitimately runs longer, and
-#: a bound that fires on a HEALTHY act converts a good run into a truncated one.
-#: Measured worst case at pool 100 was 5,992 s for a single review run (a 502,
-#: not a slow success), so 3600 still bounds the pathological case while leaving
-#: room for an honest long act.
-ACT_TIMEOUT_SECONDS = 3600
+#: WHY IT WAS REMOVED (run 11 is the evidence):
+#:   planning on django__django-11019 produced `NO_DIFF` -- an EMPTY patch --
+#:   because the executor was killed at max_wall_seconds=3600 after 38 turns
+#:   (3626s elapsed) while it was still making healthy progress. That is not a
+#: measurement of the strategy; it is wall-clock truncation of a healthy run,
+#: which corrupts the research data. A run must end because the turn budget
+#: (fairness) or the agent stops on its own -- not because a stopwatch fires.
+#:
+#: WHAT STILL BOUNDS A RUN NOW (explicit, in this file and src/config.py):
+#:   * turn budget (200 per strategy, src/config.py) -- the FAIRNESS control;
+#:   * COST_LIMIT_USD (3.00 per task) -- a MONEY bound, not a time bound;
+#:   * retry max_attempts=3 -- caps retry backoff;
+#:   * API_TIMEOUT (180s) -- timeout on ONE HTTP request, not on work; without
+#:     it a hung connection would block forever.
+#:
+#: MEASURED WORST CASE (honest, no stopwatch now): at pool 100 a single review
+#:   run can take 5,992 s (100 min, a 502) per act, and a review run has up to
+#:   3 + 2 x MAX_REVISION_ROUNDS acts, so one pathological review run can hold
+#:   a worker for many hours. That is ACCEPTED -- an unbounded run is honest
+#:   data, a truncated run is corrupt data.
+ACT_TIMEOUT_SECONDS = 0
 #: Thinking mode for the sweep. MUST be passed explicitly, for the same class of
 #: reason MAX_REVISION_ROUNDS is: `.env` is not the only input, and a sweep that
 #: silently ran a different regime than the one measured would be undetectable
@@ -698,7 +713,12 @@ def main() -> int:
     print(f"  reference  : SWE-bench Pro 200 / mini-SWE-agent 250 / OpenHands 500")
     print(f"               (per task; ours was 40 = 5-12x tighter than all of them)")
     print(f"  cost cap   : ${COST_LIMIT_USD:.2f} per task (backstop, reference value)")
-    print(f"  act timeout: {ACT_TIMEOUT_SECONDS}s per act (bounds retry backoff)")
+    _act_timeout_label = (
+        f"{ACT_TIMEOUT_SECONDS}s per act (bounds retry backoff)"
+        if ACT_TIMEOUT_SECONDS > 0
+        else "unbounded (no wall-clock bound)"
+    )
+    print(f"  act timeout: {_act_timeout_label}")
     print(f"  thinking   : {'ON' if THINKING == 'true' else 'OFF'}, "
           f"reasoning_effort={REASONING_EFFORT} (measured: +3 resolved, 3.5x cost)")
     print(f"  max tokens : {MAX_TOKENS:,} per request (reasoning + answer share it)")
@@ -768,6 +788,8 @@ def main() -> int:
         "budget_floor_per_act": FLOOR,
         "cost_limit_usd": COST_LIMIT_USD,
         "act_timeout_seconds": ACT_TIMEOUT_SECONDS,
+        # Redundant but unambiguous: 0 is easy to misread in a manifest.
+        "act_timeout": "unbounded" if ACT_TIMEOUT_SECONDS <= 0 else f"{ACT_TIMEOUT_SECONDS}s",
         "thinking": THINKING == "true",
         "reasoning_effort": REASONING_EFFORT,
         "max_tokens": MAX_TOKENS,
