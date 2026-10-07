@@ -1919,7 +1919,7 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 | `src/agents/tools.py` | Definisi tool + guard (termasuk `[tests unavailable]`) |
 | `tools/run_with_env.py` | **Wrapper wajib** — membuat `.env` menang |
 | `tools/run_final_sweep.py` | **Entry point run 50 issue** — gate preflight, pass semua config eksplisit |
-| `tools/preflight_repos.py` | Cek 50 repo pristine; sweep **gagal** kalau tidak |
+| `tools/preflight_repos.py` | Gate preflight: **Docker dulu** (daemon + image + container uji, GAGAL-KERAS), lalu 50 repo pristine; sweep **gagal** kalau tidak |
 | `tools/clean_repos.py` | Bersihkan checkout yang kotor |
 | `tools/sanitize_git_history.py` | **Sanitasi git timesafe** SWE-bench PR #471 (`--dry-run`/`--apply`/`--check`) |
 | `tools/verify_network_block.py` | **Verifikasi blok jaringan**: sitecustomize & command filter aktif |

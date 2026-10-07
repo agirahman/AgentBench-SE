@@ -530,6 +530,56 @@ _SANDBOX_DIR = Path(__file__).resolve().parent / "sandbox"
 _DOCKER_SANDBOX_IMAGE = os.environ.get("DOCKER_SANDBOX_IMAGE", "agentbench-sandbox:latest")
 _DOCKER_MASK_GIT = os.environ.get("DOCKER_MASK_GIT", "1").strip().lower() in ("1", "true", "yes")
 
+#: Distinctive phrases from the messages `run_tests` returns when the SANDBOX
+#: itself is unavailable. Kept at module level, next to those messages, so the
+#: detector cannot drift from the text it matches.
+#:
+#: Deliberately NARROW: no generic words like "error" or "not found". An ordinary
+#: test failure must not read as a dead sandbox, or a healthy run is marked
+#: SANDBOX_DOWN -- which would discard good data, the opposite of the intent.
+_SANDBOX_INFRA_MARKERS = (
+    "docker daemon is not running",              # daemon down (the main message)
+    "dockerdesktoplinuxengine",                  # the Windows named pipe
+    "error during connect",                      # docker CLI's own connect error
+    "cannot connect to the docker daemon",       # docker CLI's own message
+    "is the docker daemon running",              # docker CLI's own message
+    "cannot run docker container",               # run_tests' wrapper message
+    "docker cli executable not found",           # docker not installed at all
+)
+
+#: A missing image is matched as a PAIR -- the word "docker image" alone could
+#: appear in an ordinary test's output, so it only counts together with docker's
+#: own phrasing for an absent local image.
+_SANDBOX_IMAGE_MARKERS = ("docker image", "not found locally")
+
+
+def is_sandbox_infrastructure_error(result: str) -> bool:
+    """True when a ``run_tests`` result says the SANDBOX was unavailable.
+
+    Distinguishes "the sandbox could not run the tests" from "the tests ran and
+    failed". Only the first invalidates a run: an agent that never had a working
+    sandbox did not get the same conditions as one that did, so its patch says
+    nothing about the strategy.
+
+    This exists because of EXP-20261007-003: the daemon was down for the whole
+    session, all 9 runs returned "[error] Docker daemon is not running or
+    unreachable." on every call, and every one of them was still recorded VALID.
+    The contamination was invisible in the results and had to be found by hand.
+
+    Matched on the returned STRING, not an exception: ``run_tests`` deliberately
+    returns errors as text so the agent can read and react to them, which is what
+    let the failure pass silently in the first place.
+
+    Deliberately narrow: an ``[error]`` for a bad command, a refused write by a
+    read-only role, or a test failure are all NOT sandbox problems, and counting
+    them here would mark healthy runs SANDBOX_DOWN.
+    """
+    text = (result or "").lower()
+    if any(marker in text for marker in _SANDBOX_INFRA_MARKERS):
+        return True
+    # The missing-image message is matched as a PAIR (see _SANDBOX_IMAGE_MARKERS).
+    return all(marker in text for marker in _SANDBOX_IMAGE_MARKERS)
+
 
 def get_sandbox_mode() -> str:
     """Return the active sandbox mode: 'docker' (default) or 'local'.

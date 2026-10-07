@@ -21,6 +21,7 @@ stays a real bound.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -180,6 +181,75 @@ def _is_context_overflow(exc: Exception) -> bool:
     )
 
 
+class StalledError(Exception):
+    """An act produced nothing for longer than STALL_TIMEOUT_SECONDS.
+
+    Raised when a single HTTP request exceeds the no-progress bound. The runner
+    maps it to ``patch_status="STALLED"`` -- a status distinct from TIMEOUT,
+    because the remedy differs: a timeout is a budget problem, a stall is a
+    wedged connection that no amount of extra turns would fix.
+
+    Why this exists at all: ``API_TIMEOUT`` bounds each socket READ, not the
+    request. A server that keeps dribbling bytes resets that timer forever, which
+    is what held EXP-20261007-003 for ~3 hours (CPU 0, no log line) while every
+    guard in the system sat inside one blocked read and could not fire.
+    """
+
+
+def _call_with_stall_guard(func, stall_seconds, label: str):
+    """Run ``func`` on a daemon thread; raise StalledError if it outlives the bound.
+
+    Why a thread rather than a deadline passed to the HTTP client: the bound has
+    to apply to the WHOLE call including the SDK's own retries and any read that
+    keeps being reset by dribbled bytes. Passing a smaller ``timeout`` cannot do
+    that -- it is per-read, which is the exact hole being closed.
+
+    The thread is a daemon so an abandoned request cannot keep the process alive
+    at exit. It is deliberately NOT joined on timeout: a thread wedged in a
+    socket read cannot be interrupted, so waiting for it would reintroduce the
+    hang. It is left to die with the connection, and the caller moves on.
+
+    ``stall_seconds <= 0`` disables the guard and runs ``func`` inline, so the
+    disabled path is byte-for-byte the previous behaviour (no thread, no
+    overhead).
+    """
+    if not stall_seconds or stall_seconds <= 0:
+        return func()
+
+    box: dict = {}
+
+    def _runner():
+        try:
+            box["result"] = func()
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+            box["error"] = exc
+
+    worker = threading.Thread(
+        target=_runner,
+        name=f"stall-guard:{label}",
+        daemon=True,
+    )
+    worker.start()
+    worker.join(stall_seconds)
+
+    if worker.is_alive():
+        # The worker may still be running and may yet touch shared state. It is
+        # abandoned here rather than cancelled (it cannot be), which is safe
+        # because the only shared object it can still write is the response it
+        # would have returned -- and that is now discarded. See the usage-safety
+        # note where the guard is applied.
+        raise StalledError(
+            f"{label} produced no response within {stall_seconds:.0f}s "
+            f"(STALL_TIMEOUT_SECONDS); abandoning the request. The connection is "
+            f"wedged -- the per-read API_TIMEOUT cannot bound a server that keeps "
+            f"sending bytes."
+        )
+
+    if "error" in box:
+        raise box["error"]
+    return box.get("result")
+
+
 def run_tool_loop(
     client,
     *,
@@ -236,6 +306,10 @@ def run_tool_loop(
     if max_wall_seconds is None:
         configured = getattr(Config, "ACT_TIMEOUT_SECONDS", 0) or 0
         max_wall_seconds = configured if configured > 0 else None
+    # No-progress bound, independent of the wall-clock bound above. Read here so
+    # all three providers inherit it without threading a new parameter through.
+    # 0 (or a missing attribute, e.g. in a test double) disables the guard.
+    stall_seconds = getattr(Config, "STALL_TIMEOUT_SECONDS", 0) or 0
     temperature = Config.TEMPERATURE if temperature is None else temperature
     timeout = Config.API_TIMEOUT if timeout is None else timeout
     max_tokens = Config.MAX_TOKENS if max_tokens is None else max_tokens
@@ -368,7 +442,21 @@ def run_tool_loop(
             # the response-cache signal) are attached to the parsed object. A
             # plain create() returns a model with no header field at all, so the
             # signal would be unreadable no matter what this loop did with it.
-            resp = create_completion_with_headers(client, **kwargs)
+            #
+            # The STALL GUARD wraps ONLY the HTTP call, deliberately. It cannot
+            # wrap `_record_usage` too: a stalled attempt is abandoned on a live
+            # thread, and if that thread later woke up and ran _record_usage it
+            # would mutate `usage_totals` concurrently with the retry that
+            # replaced it -- double-counting tokens and racing on the dict. By
+            # keeping every shared-state write on THIS thread, an abandoned
+            # thread's only remaining effect is the response object it returns,
+            # which is discarded. Token accounting therefore stays exact even
+            # when a request is abandoned.
+            resp = _call_with_stall_guard(
+                lambda: create_completion_with_headers(client, **kwargs),
+                stall_seconds,
+                label,
+            )
             _record_usage(resp)
             return resp
 
@@ -379,7 +467,12 @@ def run_tool_loop(
             # only grows. Retrying it burns the backoff schedule AND pays for the
             # same oversized prompt again, and it hides the error from the caller's
             # own handler until the final attempt.
-            fatal_on=_is_context_overflow,
+            #
+            # A STALL is fatal for the same reason: the connection is wedged, so
+            # an immediate resend would block for another full STALL_TIMEOUT and
+            # burn ~15 more minutes of a 150-run sweep. Both stop the act at once
+            # and let the runner record why.
+            fatal_on=lambda exc: _is_context_overflow(exc) or isinstance(exc, StalledError),
             label=label,
         )
 

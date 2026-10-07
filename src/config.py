@@ -223,6 +223,24 @@ class Config:
     # explicitly via --set (see the build_cmd function), so sweep behavior never
     # depends on .env. This mirrors how SANDBOX_MODE is pinned: default for local
     # use, explicit for the measured experiment. 0 = unbounded in tool_loop.
+    #
+    # No-progress bound for ONE act, in seconds. This is NOT a wall-clock cap on
+    # the act and must not be confused with ACT_TIMEOUT_SECONDS above: it bounds
+    # how long an act may go without producing anything, so a healthy run that
+    # makes progress every few minutes runs as long as it needs to.
+    #
+    # Why it exists: httpx's timeout is PER READ, so a server that dribbles bytes
+    # can hold a connection open indefinitely. Measured with a real socket: a 1 s
+    # timeout let a 1-byte-per-0.8 s drip run for 9.6 s, and that same shape held
+    # the 2026-10-07 sweep (EXP-20261007-003) for ~3 hours with CPU at 0 and no
+    # log line. ACT_TIMEOUT_SECONDS=0 removes the only other backstop, so without
+    # this nothing can interrupt a wedged read.
+    #
+    # Why 900: the bound must exceed API_TIMEOUT (600), or it would fire on
+    # requests the read timeout still permits. Measured across 767 requests in
+    # three experiments, the longest single request was 598 s, so 900 s has 1.5x
+    # headroom and never touched a healthy run. 0 = disabled.
+    STALL_TIMEOUT_SECONDS = _get_int_env("STALL_TIMEOUT_SECONDS", 900)
     # Price every run with this model's rate card, whatever model actually served
     # it. Needed because the budget-curve runs use a free testing model whose real
     # rate is $0: without this, all 21 cost columns read 0.00, a dollar cap can

@@ -61,6 +61,7 @@ tools/read_actual_bill.py can be pointed at it afterwards.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -142,6 +143,21 @@ COST_LIMIT_USD = 3.00
 #:   a worker for many hours. That is ACCEPTED -- an unbounded run is honest
 #:   data, a truncated run is corrupt data.
 ACT_TIMEOUT_SECONDS = 0
+#: No-progress bound for one act, in seconds. NOT a wall-clock cap: it bounds how
+#: long an act may go WITHOUT PRODUCING ANYTHING, so a healthy run that keeps
+#: working runs as long as it needs to. This is what makes the removal of
+#: ACT_TIMEOUT_SECONDS above safe.
+#:
+#: Why it is needed at all (2026-10-07, EXP-20261007-003): httpx's timeout is PER
+#: READ, so a server that dribbles bytes resets it forever. With the wall-clock
+#: bound at 0, nothing could interrupt a wedged connection and the sweep sat
+#: silent for ~3 hours at CPU 0, discovered only by reading the log by hand.
+#:
+#: Why 900: it must exceed API_TIMEOUT (600) or it would fire on requests the read
+#: timeout still permits. Measured across 767 requests in three experiments, the
+#: longest single request was 598 s -- so 900 s has headroom and touched nothing
+#: healthy. 0 would disable it; that is deliberately not what is pinned here.
+STALL_TIMEOUT_SECONDS = 900
 #: Thinking mode for the sweep. MUST be passed explicitly, for the same class of
 #: reason MAX_REVISION_ROUNDS is: `.env` is not the only input, and a sweep that
 #: silently ran a different regime than the one measured would be undetectable
@@ -403,6 +419,10 @@ def build_cmd(
         "--set", f"MAX_REVISION_TURNS={MAX_REVISION_ROUNDS}",
         "--set", f"COST_LIMIT_USD={COST_LIMIT_USD}",
         "--set", f"ACT_TIMEOUT_SECONDS={ACT_TIMEOUT_SECONDS}",
+        # Explicit for the same reason as ACT_TIMEOUT_SECONDS: left to .env, a
+        # stale value could silently disable the only guard against a wedged
+        # connection, and nothing in the results would reveal it.
+        "--set", f"STALL_TIMEOUT_SECONDS={STALL_TIMEOUT_SECONDS}",
         # Thinking mode. Explicit for the same reason as the knobs above: a sweep
         # must run the regime that was measured, and nothing in its results would
         # reveal a silent fallback to .env.
@@ -439,6 +459,93 @@ def build_cmd(
     if dry_run:
         cmd.append("--dry-run")
     return cmd
+
+
+#: Marks a state file as a RECONSTRUCTION rather than a live sweep window. Set by
+#: tools/... (see logs/sweep_started.RECONSTRUCTED.*.json) when a real window was
+#: destroyed and had to be rebuilt from logs. Such a file is EVIDENCE, not a
+#: window the sweep may archive as its own predecessor.
+_RECONSTRUCTED_KEY = "_RECONSTRUCTED"
+
+
+def _is_reconstructed(state_path: Path) -> bool:
+    """True when the existing state file is a reconstruction, not a live window.
+
+    Why this needs its own check: the sweep archives the previous state file
+    before writing its own, so the reconstruction would be filed under a
+    timestamp that belongs to a LATER sweep -- corrupting its provenance and
+    losing the note that it is reconstructed. The file itself says
+    "Do NOT let a real sweep archive this as if it were a live window"
+    (``_NOT_A_LIVE_STATE_FILE``); this is that warning made executable.
+
+    A file that cannot be read is NOT treated as reconstructed: the archival path
+    is byte-for-byte and already tolerates corruption, and refusing to archive a
+    real window because of a transient read error would be worse than the
+    provenance problem this guards.
+    """
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return False
+    return isinstance(data, dict) and bool(data.get(_RECONSTRUCTED_KEY))
+
+
+def archive_previous_window(state_path: Path) -> str:
+    """Preserve the existing bill window under a NON-COLLIDING name.
+
+    Returns the archive filename, or "" when there was nothing to archive.
+
+    Two protections, both from measured failures:
+
+    1. **Reconstructions are not filed as live windows.** A reconstructed state
+       file is evidence; filing it under a sweep timestamp would both misdate it
+       and drop the marker saying it is reconstructed (K-1/K-2, 2026-10-07).
+
+    2. **The name cannot collide.** The old name was
+       ``sweep_started.{now:%Y%m%dT%H%M%SZ}.json`` -- SECOND resolution. Two
+       ``main()`` calls inside one second produced the same name, so the second
+       write silently destroyed the first. That is exactly how the 10-issue
+       window of EXP-20261007-003 was lost: the archive step DID run, and its
+       slot was then reused. The fix appends a short content hash, so two
+       different windows can never share a filename, however close together they
+       are written. Same-second collisions now produce two files, not one.
+    """
+    if not state_path.exists():
+        return ""
+
+    data = state_path.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()[:8]
+    if _is_reconstructed(state_path):
+        # Evidence, not a live window: keep it, but never as a dated live window.
+        #
+        # The content hash is in the name for the same reason as the live branch
+        # (K-2R): a FIXED name is last-write-wins, so archiving two different
+        # reconstructions silently kept only the second. The live branch got this
+        # protection in K-2; this branch was left inconsistent with it.
+        dest = state_path.with_name(
+            f"{state_path.stem}.reconstructed_archived.{digest}"
+            f"{state_path.suffix}"
+        )
+        try:
+            dest.write_bytes(data)
+            print(f"  previous state file is a RECONSTRUCTION -- preserved as "
+                  f"{dest.name} (not filed as a live bill window)")
+            return dest.name
+        except OSError as exc:
+            print(f"  WARNING: could not preserve the reconstructed window: {exc}")
+            return ""
+
+    backup = state_path.with_name(
+        f"sweep_started.{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        f".{digest}.json"
+    )
+    try:
+        backup.write_bytes(data)
+        print(f"  previous bill window archived: {backup.name}")
+        return backup.name
+    except OSError as exc:
+        print(f"  WARNING: could not archive the previous window: {exc}")
+        return ""
 
 
 def main() -> int:
@@ -804,6 +911,27 @@ def main() -> int:
     # window stays readable. Found by a partner audit
     # (docs/AUDIT_OPS_PARTNER.md, blocker B2): the write was unconditional.
     state_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # K-1R: a RECONSTRUCTED state file is EVIDENCE and must be preserved BEFORE
+    # either branch below can rewrite the file.
+    #
+    # The --resume branch was the hole. It folds the previous window into
+    # `attempts` and then overwrites the file, so on that path the marker and the
+    # provenance fields (_SOURCES, _FIELD_CONFIDENCE) were dropped and NO marked
+    # copy was written -- the archival call only ran on the fresh-sweep branch.
+    # Measured 2026-10-07 with a real main() call: `--resume` turned
+    # _RECONSTRUCTED=True into None, replaced the 11:41:13Z..13:11:56Z window with
+    # the new one, and created zero archives. This is not a corner case: --resume
+    # is the normal way to continue EXP-20261007-003, so it is the path the
+    # operator would have taken.
+    #
+    # Ordering matters: this runs BEFORE the resume branch, and archiving does not
+    # modify the original file, so the fold-in below still sees the same bytes.
+    # The hash in the archive name makes it idempotent -- resuming twice rewrites
+    # the same file with identical content rather than accumulating copies.
+    if state_path.exists() and _is_reconstructed(state_path):
+        archive_previous_window(state_path)
+
     if state_path.exists() and args.resume:
         # Best-effort read of the previous bill window: it is a bookkeeping file, so
         # a corrupt one must never stop the sweep from starting. Before this wrap the
@@ -836,17 +964,16 @@ def main() -> int:
         state["attempts"] = history
     elif state_path.exists():
         # A fresh (non-resume) sweep still must not silently destroy the record of a
-        # previous one; keep it under a dated backup. The read is byte-for-byte
-        # archival, so it must tolerate the same corrupt shapes as above (invalid
-        # UTF-8 raises UnicodeDecodeError, which is NOT an OSError).
-        backup = state_path.with_name(
-            f"sweep_started.{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
-        )
-        try:
-            backup.write_bytes(state_path.read_bytes())
-            print(f"  previous bill window archived: {backup.name}")
-        except OSError as exc:
-            print(f"  WARNING: could not archive the previous window: {exc}")
+        # previous one; keep it under a NON-COLLIDING dated backup. The read is
+        # byte-for-byte archival, so it must tolerate the same corrupt shapes as
+        # above (invalid UTF-8 raises UnicodeDecodeError, which is NOT an OSError).
+        #
+        # Extracted into archive_previous_window() for two measured reasons:
+        #   * the old second-resolution name let two main() calls in one second
+        #     overwrite each other -- how the EXP-20261007-003 window was lost;
+        #   * a RECONSTRUCTED state file must not be filed as a live window.
+        # See that function for both.
+        archive_previous_window(state_path)
 
     state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 

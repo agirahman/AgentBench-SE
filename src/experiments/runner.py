@@ -26,10 +26,11 @@ from experiments.swebench_adapter import (
     strip_test_files,
     validate_applicability,
 )
-from agents.tools import ensure_repo_root
+from agents.tools import ensure_repo_root, is_sandbox_infrastructure_error
 from evaluation.statistics import export_statistics_json, generate_summary_md
 from evaluation.cost import PricingTable
 from evaluation.retry import is_provider_error, is_rate_limit_error
+from providers.tool_loop import StalledError
 from config import Config
 from experiment_id import generate_experiment_id, create_experiment_dir
 from experiments.observability import build_experiment_manifest, write_issue_run_summary
@@ -253,6 +254,16 @@ _PATCH_STATUS_FAILED = {
     # is a BaseException and was previously NOT caught at all, so the instance
     # vanished with no row -- see the ``except KeyboardInterrupt`` branch below.
     "INTERRUPTED",
+    # Written when every run_tests call in the run failed at the sandbox
+    # (daemon down / image missing). An INFRASTRUCTURE death, not an outcome:
+    # the agent had no test feedback, so the run must be retried once the
+    # sandbox is fixed rather than accepted as the strategy's answer. Without
+    # this, --resume would skip the contaminated runs and keep them as data.
+    "SANDBOX_DOWN",
+    # Written when an act made no progress for STALL_TIMEOUT_SECONDS and the
+    # tool loop abandoned a wedged connection. Retryable: a stall says nothing
+    # about the strategy, and a fresh connection usually succeeds.
+    "STALLED",
 }
 
 #: How many times a "no diff" outcome is retried before it is accepted as final.
@@ -310,6 +321,48 @@ def _is_completed_entry(entry: dict) -> bool:
     question from "should --resume retry it?" -- see ``_load_existing_ids``.
     """
     return not _is_infrastructure_failure(entry)
+
+
+def sandbox_down_reason(inferences) -> str:
+    """Return a reason string when EVERY run_tests call failed at the sandbox.
+
+    Returns "" when the run is fine, so the caller can use it as a boolean.
+
+    The rule, and why each part is there:
+
+    * **At least one call.** An agent that never ran a test is NOT sandbox-down.
+      Plenty of legitimate runs answer from reading the code; marking them would
+      be the "control that cries wolf" failure this repo already has a name for.
+    * **Every call failed at the sandbox.** One infra error among successful runs
+      is a blip, not contamination -- the agent still had test feedback, so its
+      patch still reflects the strategy.
+    * **No successful call at all.** The moment one test executes, the sandbox
+      demonstrably worked, and the run is valid.
+
+    Measured on EXP-20261007-003: the daemon was down for the whole session, so
+    every run_tests call in all 9 runs returned the daemon error and each run was
+    still recorded VALID. Detecting it here makes the contamination automatic --
+    previously it was found only by reading the tool-call trail by hand.
+    """
+    calls = 0
+    infra_errors = 0
+    for inf in inferences or []:
+        for call in getattr(inf, "tool_calls", []) or []:
+            if call.get("name") != "run_tests":
+                continue
+            calls += 1
+            if is_sandbox_infrastructure_error(call.get("result") or ""):
+                infra_errors += 1
+
+    if calls == 0:
+        return ""
+    if infra_errors < calls:
+        return ""
+    return (
+        f"all {calls} run_tests call(s) failed at the sandbox "
+        f"(docker daemon down or image missing); the agent never had a working "
+        f"test environment, so this run does not measure the strategy"
+    )
 
 
 def _no_patch_attempts(entries: list[dict]) -> int:
@@ -1216,6 +1269,26 @@ def run_experiments(
                             )
                             result.apply_status = "UNKNOWN"
 
+                # --- Sandbox-down detection (2026-10-07 incident) ---
+                # MUST come AFTER the patch-status re-derivation above, so it can
+                # override a status that would otherwise read VALID. A run whose
+                # every run_tests call hit a dead daemon did not measure the
+                # strategy: the agent worked without any test feedback. Recording
+                # it VALID is what made 9 contaminated runs look usable and cost a
+                # whole session of data.
+                #
+                # The patch is still kept (it is real work, and an evaluator can
+                # still score it); only the STATUS changes, so the run is excluded
+                # from strategy comparison instead of silently counted.
+                sandbox_reason = sandbox_down_reason(result.execution.inferences)
+                if sandbox_reason:
+                    logger.warning(
+                        f"  ⚠ SANDBOX_DOWN: {issue.instance_id} ({name}) — "
+                        f"{sandbox_reason}"
+                    )
+                    patch_status = "SANDBOX_DOWN"
+                    result.patch_status = "SANDBOX_DOWN"
+
                 pred_entry = {
                     "instance_id": issue.instance_id,
                     "model_patch": model_patch,
@@ -1322,6 +1395,13 @@ def run_experiments(
                 # as a strategy that ran out of time.
                 if is_rate_limit_error(e):
                     failure_status = "RATE_LIMIT"
+                elif isinstance(e, StalledError):
+                    # A wedged connection, not a budget problem. Given its own
+                    # status because the remedy differs: more turns or more time
+                    # would not help, only a retry on a fresh connection. The
+                    # tool loop raises this after STALL_TIMEOUT_SECONDS of no
+                    # progress, so the sweep cannot sit silent for hours.
+                    failure_status = "STALLED"
                 elif is_provider_error(e):
                     failure_status = "PROVIDER_ERROR"
                 else:

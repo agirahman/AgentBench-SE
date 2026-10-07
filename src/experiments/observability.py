@@ -17,6 +17,15 @@ _FAILURE_STATUSES = (
     "PROVIDER_ERROR",
     "ERROR",
     "FAILED",
+    # Every run_tests call failed at the sandbox (daemon down / image missing).
+    # The agent had no way to run a test, so this run does not measure the
+    # strategy and must not be reported as an ordinary empty patch. Measured on
+    # EXP-20261007-003, where 9 such runs were all reported VALID.
+    "SANDBOX_DOWN",
+    # An act made no progress for STALL_TIMEOUT_SECONDS; the tool loop abandoned
+    # a wedged connection. Its own bucket because it is neither a budget problem
+    # (TIMEOUT) nor a provider error -- it is a connection that stopped moving.
+    "STALLED",
 )
 
 

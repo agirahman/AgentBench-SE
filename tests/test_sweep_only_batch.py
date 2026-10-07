@@ -881,18 +881,24 @@ def test_only_rounds_up_to_whole_issues(sweep, capsys):
     assert "issues     : 2" in out, f"issue count must be shown: {out}"
 
 
-def test_only_help_does_not_claim_a_hard_cap():
+def test_only_help_does_not_claim_a_hard_cap(tmp_path, monkeypatch):
     """The help text must not promise "at most N" -- the code cannot honour it.
 
     Kept as a test because the wrong wording survived review once already: a claim
     in --help is documentation that users act on, and this one was off by up to
     len(strategies) - 1 runs.
+
+    ``ROOT`` is redirected even though ``--help`` makes argparse exit before the
+    state write. Relying on that ordering is a fragile margin: if the help path
+    ever moved past the write, this test would overwrite the real bill window.
+    The redirect costs nothing and removes the dependency.
     """
     import contextlib
     import io
     import sys
 
     mod = _load_sweep_module()
+    monkeypatch.setattr(mod, "ROOT", tmp_path)
     old = sys.argv
     sys.argv = ["run_final_sweep.py", "--help"]
     buf = io.StringIO()
