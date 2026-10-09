@@ -5,6 +5,19 @@ left to .env -- a stray shell variable silently changing the budget is the exact
 class of problem that made earlier results non-comparable (see MEMORY, config
 drift). Every knob is passed explicitly through tools/run_with_env.py.
 
+The model
+---------
+`oc/muse-spark-1.3-contributor-free` (Meta's muse-spark, contributor tier),
+served over the RESPONSES API by the `meta` provider. This route is NOT
+Chat-Completions compatible: measured directly against 9router (2026-10-09),
+chat.completions.create returns HTTP 200 with finish_reason="in_progress",
+empty content and total_tokens=0 -- an empty answer with no error -- while
+responses.create completes with working tool calling. Running the sweep on the
+Chat Completions path would have produced 150 silent empty runs.
+
+The model id also does NOT appear in GET /v1/models (9router lists only part of
+its catalogue), so the listing is not used as an availability check anywhere.
+
 What is deliberately different from the earlier 3-issue runs
 -----------------------------------------------------------
 
@@ -71,7 +84,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-MODEL = "cbai/deepseek-v4.1-flash"
+#: The sweep model: Meta's muse-spark on the 9router proxy.
+#:
+#: Served over the RESPONSES API, not Chat Completions: measured against
+#: 9router (2026-10-09), chat.completions.create for this model returns HTTP
+#: 200 with finish_reason="in_progress", empty content and total_tokens=0 -- a
+#: silent empty failure -- while responses.create completes with working tool
+#: calling. The `meta` provider (src/providers/meta_provider.py) is therefore
+#: selected via --provider, and the model via META_MODEL.
+#:
+#: This id also does NOT appear in GET /v1/models (9router lists only part of
+#: its catalogue); calls to it succeed regardless, so the listing is not used
+#: as an availability check anywhere.
+MODEL = "oc/muse-spark-1.3-contributor-free"
 
 #: The whole task's turn allowance, identical for all three strategies.
 #:
@@ -406,7 +431,10 @@ def build_cmd(
     cmd = [
         sys.executable,
         str(ROOT / "tools" / "run_with_env.py"),
-        "--set", f"OPENCODE_MODEL={MODEL}",
+        # META_MODEL, not OPENCODE_MODEL: the meta provider reads META_MODEL,
+        # so an override of the opencode variable would be silently ignored --
+        # the sweep would run .env's model while every other check passed.
+        "--set", f"META_MODEL={MODEL}",
         "--set", f"TOTAL_TOOL_TURNS={TOTAL_TURNS}",
         "--set", "BUDGET_MODE=per_task",
         "--set", f"BUDGET_FLOOR_PER_ACT={FLOOR}",
@@ -418,6 +446,15 @@ def build_cmd(
         # nobody could tell from the turn totals. See MAX_REVISION_ROUNDS above.
         "--set", f"MAX_REVISION_TURNS={MAX_REVISION_ROUNDS}",
         "--set", f"COST_LIMIT_USD={COST_LIMIT_USD}",
+        # The runaway guard must price the rate the upstream ACTUALLY bills.
+        # Left to .env this was the previous route's measured card
+        # (cbai/deepseek-v4.1-flash-billed: output $0.51345/M), which for the
+        # muse route over-prices output ~2.6x -- a $3.00 cap would then bind
+        # after ~$1.17 of real spend and replace the turn-budget fairness
+        # invariant with a dollar bound, exactly the class of silent drift the
+        # pins above exist to prevent. The muse card is the contributor tier
+        # this route is billed at ($0.10 / $0.002 / $0.20).
+        "--set", f"COST_GUARD_MODEL={MODEL}",
         "--set", f"ACT_TIMEOUT_SECONDS={ACT_TIMEOUT_SECONDS}",
         # Explicit for the same reason as ACT_TIMEOUT_SECONDS: left to .env, a
         # stale value could silently disable the only guard against a wedged
@@ -437,7 +474,9 @@ def build_cmd(
         # Reasoning and the answer SHARE this budget, and a measured thinking turn
         # reached 99.1% of 32768. See the constant's note.
         "--set", f"MAX_TOKENS={MAX_TOKENS}",
-        "--provider", "opencode",
+        # The meta provider (Responses API). Its model comes from META_MODEL,
+        # set above.
+        "--provider", "meta",
         "--strategies", *strategies,
         "--instance-ids", *issues,
         "--rate-limit", "2.0",

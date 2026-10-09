@@ -125,6 +125,18 @@ class Config:
     # model prefix selects the upstream (oc/... vs cmd/...).
     OPENCODE_BASE_URL = _get_env("OPENCODE_BASE_URL", "http://localhost:20128/v1")
 
+    # Meta (muse-spark) models, routed through the SAME 9router proxy (same key
+    # and base URL as opencode). Different DIALECT, though: this route only
+    # answers the Responses API. Measured directly against 9router --
+    # chat.completions.create returns HTTP 200 with finish_reason="in_progress",
+    # content="" and total_tokens=0 (an EMPTY answer, no error: a silent
+    # failure), while responses.create completes and its tool calling works.
+    #
+    # The model is deliberately absent from GET /v1/models (9router lists only
+    # part of its catalogue), so the listing must never be used as an
+    # availability check.
+    META_MODEL = _get_env("META_MODEL", "oc/muse-spark-1.3-contributor-free")
+
     OPENROUTER_API_KEY = _get_env("OPENROUTER_API_KEY")
     OPENROUTER_MODEL = _get_env(
         "OPENROUTER_MODEL",

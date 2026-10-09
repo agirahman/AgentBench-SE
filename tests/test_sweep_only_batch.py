@@ -78,6 +78,14 @@ def sweep(tmp_path, monkeypatch):
 
     mod = _load_sweep_module()
     monkeypatch.setattr(mod, "ROOT", tmp_path)
+    # Pin the sweep's MODEL to the string the savepoints below are written
+    # with. The resume key is `instance|model|thinking`, so these two MUST
+    # agree or a "done" row looks outstanding. These tests verify the
+    # batch-SELECTION mechanics, which do not depend on WHICH model the sweep
+    # uses -- pinning keeps them green when the production route changes
+    # (measured: flipping MODEL to oc/muse-spark-1.3-contributor-free broke 7
+    # of them on the key alone).
+    monkeypatch.setattr(mod, "MODEL", "cbai/deepseek-v4.1-flash")
     captured: list[list[str]] = []
 
     def fake_call(cmd, **kw):

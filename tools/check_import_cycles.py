@@ -23,6 +23,11 @@ MODULES = [
     "providers.openrouter_provider",
     "providers.opencode_provider",
     "providers.commandcode_provider",
+    # The Responses-API dialect (Meta/muse-spark). Imported FIRST here so a
+    # cycle through the shared tool_loop helpers cannot hide behind the
+    # favourable import order of the test suite.
+    "providers.tool_loop_responses",
+    "providers.meta_provider",
 ]
 
 lines = []

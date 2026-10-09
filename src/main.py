@@ -8,6 +8,7 @@ from pathlib import Path
 from providers.gemini_provider import GeminiProvider
 from providers.groq_provider import GroqProvider
 from providers.opencode_provider import OpenCodeProvider
+from providers.meta_provider import MetaProvider
 from providers.openrouter_provider import OpenRouterProvider
 from providers.deepseek_provider import DeepSeekProvider
 from providers.commandcode_provider import CommandCodeProvider
@@ -30,6 +31,7 @@ _PROVIDER_MODEL_MAP = {
     "groq": Config.GROQ_MODEL,
     "openrouter": Config.OPENROUTER_MODEL,
     "opencode": Config.OPENCODE_MODEL,
+    "meta": Config.META_MODEL,
     "deepseek": Config.DEEPSEEK_MODEL,
     "commandcode": Config.COMMANDCODE_MODEL,
 }
@@ -45,7 +47,7 @@ def parse_args():
     parser.add_argument(
         "--provider",
         default="gemini",
-        choices=["gemini", "groq", "opencode", "openrouter", "deepseek", "commandcode"],
+        choices=["gemini", "groq", "opencode", "meta", "openrouter", "deepseek", "commandcode"],
         help="Provider AI (default: gemini)",
     )
     parser.add_argument(
@@ -288,6 +290,8 @@ def main():
         Provider = DeepSeekProvider
     elif args.provider == "commandcode":
         Provider = CommandCodeProvider
+    elif args.provider == "meta":
+        Provider = MetaProvider
     else:
         Provider = OpenCodeProvider
 

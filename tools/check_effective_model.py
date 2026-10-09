@@ -1,14 +1,18 @@
 """Which model will the sweep actually use?
 
-`.env` holds the free testing model (`oc/space-bunny-free`); the sweep overrides it
-to the paid one (`cbai/deepseek-v4.1-flash`) via `--set`. That override is applied
-LAST in run_with_env.py, so it should win -- but "should" is what this checks, by
-running the same env layering the sweep uses and printing what Config ends up with.
+The sweep overrides the model via `--set` (tools/run_final_sweep.py:build_cmd).
+That override is applied LAST in run_with_env.py, so it should win over .env --
+but "should" is what this checks, by running the same env layering the sweep
+uses and printing what Config ends up with.
 
-This matters more than it looks: RQ3 needs the PAID route to reconcile against the
-9router bill. If the override silently lost to .env, the sweep would run on a free
-model, cost $0, and the cost analysis would be measuring nothing -- while every
-other check passed.
+This matters more than it looks. The sweep route changed on 2026-10-09 to the
+Meta muse-spark model over the RESPONSES API (`--provider meta`), whose model
+variable is META_MODEL -- not OPENCODE_MODEL, which the previous paid route
+used. If the override key and the provider's variable disagree, the sweep runs
+.env's model while every other check passes: for the paid route that meant RQ3
+measured a free model and every cost figure was $0. The check must therefore
+name the SAME variable the provider reads (Config.META_MODEL), or it is
+verifying nothing.
 
 Usage:
     python tools/check_effective_model.py
@@ -23,15 +27,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-# Mirrors the sweep's own --set for the model.
-SWEEP_MODEL = "cbai/deepseek-v4.1-flash"
+# Mirrors the sweep's own --set for the model (run_final_sweep.MODEL) and the
+# provider it selects.
+SWEEP_MODEL = "oc/muse-spark-1.3-contributor-free"
+SWEEP_PROVIDER = "meta"
 
 
 def read_model(env_overrides: dict[str, str]) -> str:
-    """Resolve Config.OPENCODE_MODEL in a fresh process, like the sweep does."""
+    """Resolve Config.META_MODEL in a fresh process, like the sweep does."""
     code = (
         "import sys; sys.path.insert(0, 'src');"
-        "from config import Config; print(Config.OPENCODE_MODEL)"
+        "from config import Config; print(Config.META_MODEL)"
     )
     env = os.environ.copy()
     # run_with_env.py clears anything that also exists in .env first, so a stale
@@ -55,13 +61,14 @@ def main() -> int:
 
     from dotenv import dotenv_values
 
-    dotenv_model = dotenv_values(ROOT / ".env").get("OPENCODE_MODEL", "")
+    dotenv_model = dotenv_values(ROOT / ".env").get("META_MODEL", "")
 
-    print(f"\n  .env OPENCODE_MODEL            : {dotenv_model}")
-    print(f"  sweep --set OPENCODE_MODEL     : {SWEEP_MODEL}")
+    print(f"\n  .env META_MODEL                : {dotenv_model or '(not set; Config default)'}")
+    print(f"  sweep --provider               : {SWEEP_PROVIDER}")
+    print(f"  sweep --set META_MODEL         : {SWEEP_MODEL}")
 
     from_env_alone = read_model({})
-    from_sweep = read_model({"OPENCODE_MODEL": SWEEP_MODEL})
+    from_sweep = read_model({"META_MODEL": SWEEP_MODEL})
 
     print(f"\n  resolved WITHOUT the override  : {from_env_alone}")
     print(f"  resolved WITH the sweep's --set: {from_sweep}")
@@ -71,17 +78,18 @@ def main() -> int:
     if ok:
         print(f"  OK -- the sweep calls {SWEEP_MODEL}.")
         print("  The override beats .env, so a run started via")
-        print("  tools/run_final_sweep.py uses the PAID route that RQ3 needs.")
+        print("  tools/run_final_sweep.py uses the model the manifest records.")
     else:
         print(f"  PROBLEM -- the sweep would call {from_sweep!r}, not {SWEEP_MODEL!r}.")
-        print("  The override is losing to .env. RQ3 would measure a FREE model and")
-        print("  every cost figure would be $0 while all other checks still passed.")
+        print("  The override is losing to .env, or it sets the WRONG variable for")
+        print("  the selected provider -- the run would use a different model than")
+        print("  every other check assumes.")
 
     # A direct main.py run is a different, legitimate configuration.
     print()
     print("  NOTE: running src/main.py directly (not via the sweep) uses "
           f"{from_env_alone!r}.")
-    print("  That is the free testing route -- correct for smoke tests, wrong for RQ3.")
+    print("  That is the .env default -- correct for smoke tests, wrong for the sweep.")
     print("=" * 78)
     return 0 if ok else 1
 
