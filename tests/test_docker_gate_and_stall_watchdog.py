@@ -307,7 +307,12 @@ class TestSandboxDownDetection:
         "[blocked] network transfer cmdlets are disabled in this sandbox",
         "[error] role 'reviewer' is read-only and may not modify the repository",
         "[error] cannot run command: FileNotFoundError",
-        "[tests unavailable] The test environment for this repository is not installed",
+        # An environment failure is NOT a sandbox failure: the sandbox worked, the
+        # repo's deps are just missing. Text matches tools.py after the 2026-10-08
+        # change (it now offers the offline wheelhouse install instead of telling
+        # the agent to stop).
+        "[tests unavailable] A required module is missing, so the test could not run",
+        "pip install --no-index --find-links=/opt/wheelhouse <package>",
         "[error] fatal: not a git repository",
         "[error] command timed out (180s limit)",
         "",

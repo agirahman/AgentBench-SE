@@ -67,10 +67,57 @@ class TestEnvFailureDetection:
     def test_passing_tests_are_not_env_failure(self):
         assert _looks_like_env_failure("5 passed in 0.2s") is False
 
+    @pytest.mark.parametrize(
+        "output",
+        [
+            # The bare phrase "no such file or directory" used to be a marker on
+            # its own, so every filesystem probe was reported as a missing module.
+            # Measured: 3 of 9 ordinary shell results were misclassified, and the
+            # cost went UP once the sandbox could run tests, because an agent now
+            # probes the filesystem far more and got told to install a package for
+            # a directory that simply is not there.
+            "ls: cannot access '/work/.git/objects': No such file or directory",
+            "ls: cannot access '/work/results': No such file or directory",
+            "cat: /work/.env: No such file or directory",
+            "find: '/work/nope': No such file or directory",
+            # A test file that does not exist is the agent's typo, not the env.
+            "ERROR: file or directory not found: tests/test_utils.py",
+            # git being absent is BY DESIGN, not a broken environment.
+            "sh: 1: git: not found",
+            "usage: pytest [options] [file_or_dir] [...]",
+        ],
+    )
+    def test_filesystem_probes_are_not_env_failures(self, output):
+        assert _looks_like_env_failure(output) is False, (
+            f"an ordinary shell result was reported as a broken environment, so "
+            f"run_tests would tell the agent to install a package: {output!r}"
+        )
+
+    @pytest.mark.parametrize(
+        "output",
+        [
+            # A missing SCRIPT does mean the environment is at fault -- Python
+            # itself says so, and it is distinguishable from `ls` by the prefix.
+            "python: can't open file 'tests/runtests.py': [Errno 2] No such file or directory",
+            "python3: can't open file '/work/setup.py': [Errno 2] No such file or directory",
+        ],
+    )
+    def test_a_missing_script_is_still_an_env_failure(self, output):
+        """The narrow rule must not overshoot and hide a real missing-script case.
+
+        This is the half that keeps the fix honest: "stop matching the phrase" would
+        also stop detecting a genuinely absent script, which IS an environment
+        problem worth telling the agent about.
+        """
+        assert _looks_like_env_failure(output) is True
+
 
 class TestRunTestsGuard:
     def test_repeat_command_is_refused(self, monkeypatch):
         """A third identical call must be refused instead of executed."""
+        # local-unsafe: the repeat guard sits on the host-execution path, which
+        # plain local now refuses outright (the H finding).
+        monkeypatch.setenv("SANDBOX_MODE", "local-unsafe")
         calls = {"n": 0}
 
         class FakeProc:
@@ -93,7 +140,21 @@ class TestRunTestsGuard:
         assert calls["n"] == 2
         assert "[stop]" not in first and "[stop]" not in second
 
-    def test_env_failure_tells_agent_to_stop(self, monkeypatch):
+    def test_env_failure_offers_the_offline_install_path(self, monkeypatch):
+        """A missing module must be ACTIONABLE, not a dead end (2026-10-08).
+
+        This test used to assert "Do NOT call run_tests again". That was correct
+        when the image had no dependencies and nothing could be installed -- and is
+        now actively wrong: it told the agent to give up on an environment it can
+        fix in one command. The image pre-installs the repos' declared deps and
+        ships an offline wheelhouse, so the message must point at that.
+
+        The install hint appears in docker mode only: --network=none plus
+        `no-index = true` mean pip can reach the wheelhouse and nothing else, so it
+        cannot become a route to a released (oracle) package.
+        """
+        monkeypatch.setenv("SANDBOX_MODE", "docker")
+
         class FakeProc:
             returncode = 1
             stdout = ""
@@ -103,11 +164,48 @@ class TestRunTestsGuard:
 
         out = run_tests("python -m pytest")
         assert "[tests unavailable]" in out
-        assert "Do NOT call run_tests again" in out
-        # It must explain that this is not the agent's fault.
+        # Still tells the agent this is not its patch's fault...
         assert "NOT a problem with your fix" in out
+        # ...but no longer tells it to stop, and gives it the fix.
+        assert "Do NOT call run_tests again" not in out, (
+            "the agent is still told to give up on an environment it can repair"
+        )
+        assert "--no-index" in out and "wheelhouse" in out, (
+            f"the environment failure must say HOW to install offline: {out}"
+        )
+
+    def test_env_failure_omits_the_install_hint_in_local_mode(self, monkeypatch):
+        """The hint must not be given where pip is blocked and could fetch an oracle.
+
+        In local mode `_check_command_security` refuses pip, so telling the agent to
+        run it would send it into a refusal -- and if the guard ever slipped, the
+        host's network would make it a real leak.
+
+        Uses ``local-unsafe`` because plain ``local`` now refuses to execute at all
+        (the H finding); this test is about the hint text on the host-execution
+        path, which is the branch ``local-unsafe`` reaches.
+        """
+        monkeypatch.setenv("SANDBOX_MODE", "local-unsafe")
+
+        class FakeProc:
+            returncode = 1
+            stdout = ""
+            stderr = "ModuleNotFoundError: No module named 'django'"
+
+        monkeypatch.setattr(tools.subprocess, "run", lambda *a, **k: FakeProc())
+
+        out = run_tests("python -m pytest")
+        assert "[tests unavailable]" in out
+        assert "--no-index" not in out, (
+            f"an offline-install hint was given in local mode, where pip is "
+            f"blocked and the network is reachable: {out}"
+        )
 
     def test_genuine_failure_is_reported_normally(self, monkeypatch):
+        # local-unsafe, not local: plain local now refuses to execute at all
+        # (the H finding), so this host-execution path is only reachable here.
+        monkeypatch.setenv("SANDBOX_MODE", "local-unsafe")
+
         class FakeProc:
             returncode = 1
             stdout = "1 failed, 3 passed"

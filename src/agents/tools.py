@@ -382,11 +382,23 @@ def list_files(path: str = ".", max_entries: int = 100) -> str:
     return "\n".join(entries) if entries else f"[empty] {path}"
 
 
-# Environment failures look like a broken sandbox, not a failing test. Retrying
-# cannot help, so the tool tells the agent to stop instead of letting it burn
-# turns. Measured on EXP-20260927-004: one planning step spent >33 minutes and 49
-# tool calls, 15 of them run_tests with 8 different command spellings, because
-# nothing told the agent the test environment simply was not installed.
+# Environment failures look like a broken sandbox, not a failing test.
+#
+# WHAT THIS NO LONGER SAYS (2026-10-08). It used to include the bare phrase
+# "no such file or directory", which is not a missing-module signal at all -- it is
+# what `ls`, `cat` and `find` print for any path that does not exist. Measured: 3
+# of 9 ordinary shell results were misclassified, e.g.
+#     ls: cannot access '/work/.git/objects': No such file or directory
+#     cat: /work/.env: No such file or directory
+# The consequence got worse, not better, once the sandbox could run tests: an agent
+# that probes the filesystem now gets told to "install it OFFLINE from the
+# wheelhouse" for a directory that simply is not there, which is advice about the
+# wrong thing entirely.
+#
+# The phrase is still matched, but only when it accompanies a genuinely
+# interpreter-level failure (see _looks_like_env_failure): a missing SCRIPT makes
+# Python print "can't open file ... No such file or directory", whereas `ls`
+# printing it means nothing about the environment.
 _ENV_FAILURE_MARKERS = (
     "no module named",
     "modulenotfounderror",
@@ -394,14 +406,30 @@ _ENV_FAILURE_MARKERS = (
     "is not recognized as an internal or external command",
     "command not found",
     "cannot find module",
-    "no such file or directory",
+)
+
+#: A missing script/interpreter, where "No such file or directory" DOES mean the
+#: environment is at fault. Requires an explicit interpreter/exec prefix, so a
+#: plain `ls`/`cat` message cannot satisfy it.
+_ENV_FAILURE_PATH_PATTERNS = (
+    re.compile(r"python[\d.]*(?:\.exe)?:\s+can'?t open file .*no such file", re.I),
+    re.compile(r"(?:^|\n)\s*(?:/[\w./-]+/)?(?:python|pytest|pip)[\d.]*(?:\.exe)?:\s+"
+               r"(?:not found|no such file)", re.I),
+    re.compile(r"can'?t open file '[^']*':\s*\[errno 2\]", re.I),
 )
 
 
 def _looks_like_env_failure(output: str) -> bool:
-    """True when the command failed because the environment is missing, not the test."""
+    """True when the command failed because the environment is missing, not the test.
+
+    Deliberately conservative in the "missing path" direction: a bare
+    "No such file or directory" is NOT enough, because every `ls`/`cat` of a
+    non-existent path prints it. Only an interpreter-level form counts.
+    """
     low = output.lower()
-    return any(m in low for m in _ENV_FAILURE_MARKERS)
+    if any(m in low for m in _ENV_FAILURE_MARKERS):
+        return True
+    return any(p.search(output) for p in _ENV_FAILURE_PATH_PATTERNS)
 
 
 # Repeat-call guard: an agent that retries the same failing command is wasting
@@ -416,6 +444,10 @@ def _looks_like_env_failure(output: str) -> bool:
 # providers/tool_loop.py), which is the same rule the turn budget follows.
 _RECENT_TEST_COMMANDS: list[str] = []
 _MAX_REPEATS = 2
+
+#: Once-per-process latch for the `local-unsafe` warning. A list, not a bool, so the
+#: flag can be set from inside `run_tests` without a `global` statement.
+_LOCAL_UNSAFE_WARNED: list[bool] = [False]
 
 #: Roles whose mandate is to inspect, never to author. The review strategy's whole
 #: premise is that the reviewer does not write the code it judges, so a read-only
@@ -582,7 +614,7 @@ def is_sandbox_infrastructure_error(result: str) -> bool:
 
 
 def get_sandbox_mode() -> str:
-    """Return the active sandbox mode: 'docker' (default) or 'local'.
+    """Return the active sandbox mode: 'docker' (default), 'local', or 'local-unsafe'.
 
     The default is **docker**, i.e. fail-CLOSED. It used to be 'local', which
     meant any entry point that did not set SANDBOX_MODE silently executed agent
@@ -591,8 +623,20 @@ def get_sandbox_mode() -> str:
     instead of an unisolated run, which is the correct direction for a safety
     default: the failure is loud and cheap rather than silent and expensive.
 
-    'local' is still available for development and for the local-mode tests, but
-    it must now be requested EXPLICITLY.
+    'local' is REFUSED at execution time (see ``_LOCAL_MODE_REFUSAL``): measured,
+    this host has a WSL bash with internet, and no pattern-based guard can contain
+    a command that reaches it. The mode name is kept so an old configuration fails
+    with an explanation rather than an "unrecognised mode" error.
+
+    'local-unsafe' is the deliberate escape hatch for the TEST SUITE: it runs on
+    the host, and its name says so. The sweep never sets it.
+
+    WARNING -- `local-unsafe` has NO network isolation and the guard does NOT
+    contain it: a cross-language subprocess path (`os.system('curl ...')`) was
+    measured to download an 8.4 MB oracle there. It is for this repository's own
+    test suite (trusted, reviewed code). For agent runs use `docker`, which is
+    pinned by the sweep. See ``_LOCAL_UNSAFE_IS_NOT_ISOLATED`` for the measurements
+    and for why adding more patterns is the wrong fix.
     """
     return os.environ.get("SANDBOX_MODE", "docker").strip().lower()
 
@@ -618,14 +662,13 @@ def _translate_paths_to_container(command: str, root: Path) -> str:
 #: Command patterns attempting network access or package/git retrieval outside
 #: the evaluation sandbox. These close the solutions-leak loophole (2026-10-05)
 #: where agents downloaded upstream patches via curl/wget or inspected remote git refs.
+#:
+#: These are enforced in BOTH modes: none of them has a legitimate offline use, so
+#: there is nothing to gain by relaxing them.
 _SECURITY_COMMAND_PATTERNS = (
     (
         r"(?:^|[;&|\n\r])\s*(?:[\w\\/.-]*[/\\])?git(?:\.exe)?\s+(?:.*?\s+)?(?:fetch|clone|pull|remote\s+add|remote\s+set-url)\b",
         "git network commands (fetch/clone/pull/remote add) are disabled in this sandbox",
-    ),
-    (
-        r"(?:^|[;&|\n\r])\s*(?:[\w\\/.-]*[/\\])?(?:python(?:\.exe)?\s+-m\s+)?pip\d*(?:\.exe)?\s+(?:install|download)\b",
-        "pip package installation and download are disabled in this sandbox",
     ),
     (
         r"(?:^|[;&|\n\r])\s*(?:[\w\\/.-]*[/\\])?(?:curl|wget)(?:\.exe)?\b",
@@ -645,30 +688,485 @@ _SECURITY_COMMAND_PATTERNS = (
     ),
 )
 
+#: pip install/download, blocked ONLY where the network is reachable.
+#:
+#: Operator decision 2026-10-08: the agent must be free to install dependencies.
+#: That is safe in DOCKER mode for a structural reason, not a trusting one: the
+#: container runs ``--network=none`` and ``/etc/pip.conf`` sets
+#: ``no-index = true`` with ``find-links = /opt/wheelhouse``, so pip can resolve
+#: ONLY from the image's local wheelhouse. A released package (which would be a
+#: LATER revision than the base commit, i.e. contain the fix being asked for)
+#: cannot be fetched, because there is no route to fetch it over.
+#:
+#: In LOCAL mode none of that holds -- the host has a working network -- so the
+#: same command WOULD reach PyPI and could pull an oracle. It stays blocked there.
+#: This is the distinction that makes the change safe: the guard is relaxed
+#: exactly where the sandbox enforces the property, and nowhere else.
+#:
+#: The pattern is deliberately broad because a guard is only worth having if the
+#: obvious spellings cannot walk around it. Measured against the previous version:
+#: 12 of 17 spellings ESCAPED, including `python3 -m pip`, `pip3.9`, `sudo pip`,
+#: `uv pip`, `pipx`, and `VAR=x pip` (reviewer report, reproduced 2026-10-08).
+#: A second round (reviewer re-audit) found the pattern still demanded the
+#: subcommand DIRECTLY after pip, so `pip --isolated install` and every subshell
+#: or wrapper form walked around it again.
+#: A third round (final reviewer audit, 2026-10-08) proved the remaining escapes
+#: were a CLASS rather than a spelling list: the shell REMOVES quoting before exec,
+#: so `p'i'p`, `p"i"p`, `'pip'` and `"pip"` all run pip while containing no literal
+#: `pip`, `pi\p` is the same trick with a backslash, `pip \` + newline is POSIX line
+#: continuation, `{ ...; }` groups were not separators, and the option rule allowed
+#: a single token, so `pip --proxy=http://x install` and `env -i pip install`
+#: slipped through. Adding spellings loses that race by construction, so the
+#: command is NORMALISED first (_shell_normalizations) and the canonical form is
+#: matched. Measured: 9/9 of those forms escaped; 0/9 after the change, with 0
+#: false positives on the allow-list (tests/test_network_block.py pins both halves).
+#:
+#:   (?:sudo|env|...|xargs|eval|bash|sh)?  wrappers, incl. shell re-invocation
+#:   (?:-\S+(?:\s+\S+)?\s+)*           wrapper flags with or without a value
+#:                                     (env -i, bash -c, stdbuf -oL)
+#:   (?:[A-Za-z_]\w*=\S*\s+)*         VAR=value prefixes (PIP_NO_INDEX=0 ...)
+#:   (?:\S*[/\\])?                     any path prefix (/usr/bin/, C:\Python39\)
+#:   python\d*(?:\.\d+)?(?:\.exe)?     python, python3, python3.9, python.exe
+#:   pip\d*(?:\.\d+)?(?:\.exe)?        pip, pip3, pip3.9, pip.exe
+#:   uv\s+pip | pipx                    other installers that reach the same index
+#:   (?:\s+-{1,2}[-\w]+(?:=\S+)?(?:\s+\S+)?)*   pip GLOBAL options between tool
+#:                                     and command, incl. --proxy=http://x and
+#:                                     --proxy http://x (pip --isolated install)
+#:   runpip                            pipx's sub-subcommand escape hatch
+#:   separators ()$`{}                 subshell, substitution, backticks, brace group
+#:
+#: A fourth round (final reviewer audit, 2026-10-08) found the guard still missed
+#: shell CONTROL STRUCTURES: `if true; then pip install django; fi` contains no
+#: separator the pattern knew, so it escaped. That mattered because this host has
+#: `C:\Windows\System32\bash.exe` with a WSL Ubuntu that HAS INTERNET (measured:
+#: urlopen(pypi.org) -> 200), and the reviewer USED it to download a real
+#: django-6.1.2 wheel (8.4 MB) through this hole. The fix is the same principle as
+#: before -- recognise the CLASS -- by treating the shell's keywords as command
+#: separators, exactly like `{}`:
+#:
+#:   separators add if then elif else fi while until do done for case esac in
+#:   select  -- each begins or ends a command, so the command after it starts
+#:              fresh and must be matched from the beginning
+_PIP_PATTERN = (
+    r"(?:^|[;&|\n\r()$`{}]|"
+    r"\b(?:if|then|elif|else|fi|while|until|do|done|for|case|esac|in|select)\b)\s*"
+    r"(?:(?:sudo|env|command|nohup|exec|time|nice|setsid|stdbuf|xargs|eval|bash|sh|dash|zsh|ksh)\s+(?:-\S+(?:\s+\S+)?\s+)*)*"
+    r"(?:[A-Za-z_]\w*=\S*\s+)*"                              # VAR=value prefixes
+    r"(?:\S*[/\\])?"                                         # path prefix
+    r"(?:"
+    r"(?:python\d*(?:\.\d+)*(?:\.exe)?\s+(?:-\S+\s+)*-m\s+)?"   # interpreter flags (-E, -I, -S, -Es)
+    r"(?:pip|pipx)\d*(?:\.\d+)*(?:\.exe)?"
+    r"|uv\s+pip"
+    r")"
+    r"(?:\s+-{1,2}[-\w]+(?:=\S+)?(?:\s+\S+)?)*\s+(?:install|download|runpip)\b",
+    "pip package installation and download are disabled outside the Docker sandbox "
+    "(the host has network access, so pip could fetch a released package instead of "
+    "using the checkout). Run it in the container, where only the local wheelhouse "
+    "is reachable.",
+)
 
-def _check_command_security(command: str) -> str | None:
-    """Return an error message if the command tries external network access."""
+#: Interpreter flags that suppress the sandbox's own controls. Measured on this
+#: host: `python -E -m pip download django` bypasses the injected sitecustomize
+#: (PYTHONPATH is ignored under -E) and downloaded django-6.1.2 (8.4 MB) from
+#: PyPI. `-E`/`-I` ignore the PYTHON* environment; `-S` skips site (so
+#: sitecustomize is never imported); `-s` is harmless but travels with `-Es`.
+#: This is a SECOND control, not the primary one: the env below is the control
+#: that cannot be bypassed by a flag, and this makes the attempt fail loudly
+#: instead of silently relying on it.
+_INTERPRETER_FLAG_PATTERN = (
+    r"(?:^|[;&|\n\r()$`{}]|\b(?:if|then|elif|else|fi|while|until|do|done|for|case|esac|in|select)\b)\s*"
+    r"(?:(?:sudo|env|command|nohup|exec|time|nice|setsid|stdbuf|xargs|eval|bash|sh|dash|zsh|ksh)\s+(?:-\S+(?:\s+\S+)?\s+)*)*"
+    r"(?:\S*[/\\])?"
+    r"python\d*(?:\.\d+)*(?:\.exe)?\s+"
+    r"-[A-Za-z]*[EIS][A-Za-z]*\b",
+    "running the interpreter with -E/-I/-S disables this sandbox's network and "
+    "site controls, so it is refused outside the Docker sandbox. Drop the flag: "
+    "the sandbox already blocks the network, and pip cannot reach an index here.",
+)
+
+
+#: A quoted region: everything between a matching pair of ' or ". Used to MASK
+#: data arguments, so shell keywords inside them are not read as separators.
+_QUOTED_REGION = re.compile(r"'[^']*'|\"[^\"]*\"", re.DOTALL)
+
+#: Programs that consume a heredoc body as DATA (their stdin), never as code. Only
+#: these may have the body masked. Deliberately SHORT and unambiguous: every other
+#: program -- including any interpreter NOT on this list -- keeps its body VISIBLE
+#: so the guard reads it as the command it will become. That is the fail-closed
+#: direction: an interpreter nobody thought of is covered by default instead of
+#: needing a new list entry.
+#:
+#: Measured (reviewer, 2026-10-09): masking heredocs unconditionally let 14/14
+#: interpreters escape -- python, python3, python3.9, python.exe, perl, ruby, node,
+#: php, awk, lua, tclsh, Rscript, osascript, expect all accept a script on stdin.
+#: Adding them to a list would have lost the same race one interpreter later.
+#:
+#: `sed` and `awk` are deliberately ABSENT: both can execute shell commands from a
+#: script (`sed -e 'e cmd'`, awk's `system()`), and the heredoc can BE that script
+#: (`sed <<EOF` + `e pip install django` + `EOF`). They are filters, but not
+#: safe-to-mask ones, so their bodies stay visible and the guard reads them.
+_DATA_HEREDOC_PROGRAMS = frozenset({
+    "cat", "tee", "grep", "egrep", "fgrep", "rg", "head", "tail", "wc", "sort",
+    "uniq", "tr", "cut", "paste", "column", "fmt", "more", "less", "diff", "comm",
+    "join", "nl", "od", "xxd", "base64",
+})
+
+#: Tokens that mean the command INVOKES code rather than filtering data. When any is
+#: present, NO heredoc body is masked: the body could reach the executor through
+#: eval, a command substitution, a process substitution, or /dev/stdin, so it must
+#: stay visible. Measured escapes closed by this: eval "$(cat <<EOF ... EOF)",
+#: bash <(cat <<EOF ... EOF), source /dev/stdin <<EOF, . /dev/stdin <<EOF.
+_EXECUTOR_TOKEN = re.compile(
+    r"\b(?:eval|source|exec)\b"
+    r"|\$\(|<\(|/dev/stdin"
+    r"|(?:^|[;&|\n\r()$`{}]|\b(?:if|then|elif|else|fi|while|until|do|done|for|case|esac|in|select)\b)\s*"
+    r"(?:\S*[/\\])?"
+    r"(?:bash|sh|dash|zsh|ksh|busybox|wsl|python\d*(?:\.\d+)*|perl|ruby|node|php|lua|"
+    r"tclsh|expect|awk|Rscript|osascript)(?:\.exe)?\b",
+    re.IGNORECASE,
+)
+
+#: A heredoc together with the COMMAND WORD feeding it. Group 1 is the program (the
+#: word right after a command separator, so `grep -n pip <<EOF` reports `grep`, not
+#: `pip`), group 2 the delimiter, group 3 the body. Non-greedy body + delimiter is
+#: load-bearing: a greedy `.*` swallows the rest of the line, so a real command AFTER
+#: the heredoc would be masked away too (measured: `cat <<'E1' ... E1` followed by
+#: `pip install django` became ALLOW under a greedy pattern).
+_HEREDOC_CMD = re.compile(
+    r"(?:^|[;&|\n\r()$`{}]|\b(?:if|then|elif|else|fi|while|until|do|done|for|case|esac|in|select)\b)\s*"
+    r"([\w./\\-]+)\s+[^;&|\n\r]*?<<-?['\"]?(\w+)['\"]?\n(.*?)\n\s*\2\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+#: A quote SPLICE: quotes that wrap a fragment of a single word (no whitespace, no
+#: shell metacharacter). The shell joins the fragments, so `p'i'p` IS `pip`, and
+#: `'pip'` IS `pip` -- these must be unwrapped, not masked.
+_SPLICE_QUOTE = re.compile(r"'([^'\s;|&(){}`$]*)'|\"([^\"\s;|&(){}`$]*)\"")
+
+#: A shell RE-INVOCATION whose argument is itself a command line. The quoted
+#: argument of `bash -c '...'` (and `eval '...'`) is CODE, not data -- so its body
+#: must be analysed as a command, while `grep 'then pip install' f` is DATA.
+#:
+#: The shell's own flags are matched as flag TOKENS only, with the LAST one allowed
+#: to contain `c` anywhere: the shell accepts combined short flags, so `bash -lc`
+#: and `bash -lxc` both take the command string. Measured: the earlier
+#: `(?:-[A-Za-z]+)*\s+-c` form missed `-lc` (the flag group ate it, then a separate
+#: `-c` was required and absent) -- a regression that let `bash -lc 'pip ...'`
+#: escape. A looser `(?:-\S+(?:\s+\S+)?)*` is also wrong: it consumed `-c 'python`
+#: as "flag with value", so the quote group paired with the INNER quote and the
+#: captured body was `import urllib.request` instead of the command line --
+#: letting `bash -c 'python -E -c "..."'` escape.
+_REINVOKE = re.compile(
+    r"(?:^|[;&|\n\r()$`{}]|\b(?:if|then|elif|else|fi|while|until|do|done|for|case|esac|in|select)\b)\s*"
+    r"(?:(?:sudo|env|command|nohup|exec|time|nice|setsid|stdbuf|xargs)\s+(?:-\S+(?:\s+\S+)?\s+)*)*"
+    r"(?:(?:bash|sh|dash|zsh|ksh)(?:\.exe)?(?:\s+-[A-Za-z]+)*\s+-[A-Za-z]*c[A-Za-z]*|eval)\s+"
+    r"(['\"])(.*?)\1",
+    re.IGNORECASE | re.DOTALL,
+)
+
+#: (A previous `_REINVOKE_HEREDOC` lived here. It matched a shell fed by a heredoc,
+#: but it only knew five shells, so every interpreter -- and every shell spelled with
+#: a wrapper or a full path -- kept its body masked as DATA and escaped. It is
+#: replaced by _HEREDOC_CMD + the fail-closed decision in _heredoc_is_data: a body is
+#: masked only when the feeding program is a known DATA filter and no executor token
+#: appears anywhere in the command.)
+
+
+def _heredoc_is_data(program: str, command: str) -> bool:
+    """True when a heredoc body may be MASKED (treated as data, not as code).
+
+    Fail-CLOSED by construction: masking requires BOTH
+
+    1. the feeding program is on the short, unambiguous data-filter list, and
+    2. no executor token appears anywhere in the command (eval, source, exec, a
+       command/process substitution, /dev/stdin, or any shell/interpreter word).
+
+    Anything else -- an unknown program, an interpreter nobody enumerated, a wrapper
+    like `wsl bash`, a full path to bash.exe -- keeps the body VISIBLE, so the guard
+    reads it as the command it will become. This is the direction that closes the
+    class instead of the instance: a new interpreter is covered by default, rather
+    than requiring a new list entry (measured: 14/14 interpreters escaped when the
+    decision was "mask unless it is a shell").
+    """
+    base = program.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if base.endswith(".exe"):
+        base = base[:-4]
+    if base not in _DATA_HEREDOC_PROGRAMS:
+        return False
+    return not _EXECUTOR_TOKEN.search(command)
+
+
+def _mask_data_heredocs(command: str) -> str:
+    """Blank the BODY of every heredoc whose target consumes it as data.
+
+    Each match is decided on its own (see _heredoc_is_data), so a command can mix a
+    data heredoc and an executor heredoc and only the data one is blanked. The
+    delimiter line is left in place: it is what stops a greedy match from swallowing
+    a real command that follows the heredoc.
+    """
+    def repl(m: re.Match) -> str:
+        if not _heredoc_is_data(m.group(1), command):
+            return m.group(0)
+        return m.group(0).replace(m.group(3), " ")
+
+    return _HEREDOC_CMD.sub(repl, command)
+
+
+def _shell_normalizations(command: str, _depth: int = 0) -> tuple[str, ...]:
+    """Return the command as the SHELL would see it, for guard matching.
+
+    A guard that matches raw text can be walked around with quoting, because the
+    shell removes quoting BEFORE exec. Measured (reviewer audits, 2026-10-08):
+    `p'i'p`, `p"i"p`, `'pip'` and `"pip"` all run pip while containing no literal
+    `pip`; `pi\\p` is the same trick with a backslash; `pip \\` + newline is POSIX
+    line continuation. Enumerating spellings loses that race by construction, so
+    the guard normalises first and matches the canonical form.
+
+    QUOTING IS HANDLED BY MEANING, not by deleting every quote. A first version
+    stripped all quotes, which made shell KEYWORDS inside data arguments look like
+    command separators: `grep -rn 'then pip install' docs/` was refused even though
+    the quoted text is an argument to grep (measured: 6 such false positives).
+    Two variants are therefore produced:
+
+    * MASKED  -- every quoted region becomes a space, so `'then pip install'` can
+      never be read as a separator. This is what keeps data arguments inert.
+    * SPLICED -- quote-splices (`p'i'p`) are unwrapped, then the remaining quotes
+      are masked. This keeps the spelling tricks closed without re-opening the
+      keyword false positives.
+
+    Plus: a shell re-invocation's quoted argument is CODE, so `bash -c '...'` is
+    recursed into (`grep '...'` is not -- it is data, and stays masked).
+
+    Backslash is AMBIGUOUS across the shells this guard faces, so each variant is
+    also returned with backslashes stripped:
+
+    * kept     -- Windows path semantics (`C:\\Python39\\python.exe -m pip ...`)
+    * stripped -- POSIX escape semantics (`pi\\p` -> `pip`)
+
+    A command is blocked if ANY variant matches: each is a shell that could
+    execute it, and the guard must hold for all of them.
+
+    Line continuation is REMOVED, not turned into a space: POSIX deletes the
+    backslash-newline pair, so a continuation INSIDE a token joins it --
+    measured in the container, `pi\\` + newline + `p --version` runs pip 23.0.1.
+    Substituting a space would leave `pi p` and miss that.
+    """
+    cmd = re.sub(r"\\\r?\n", "", command)     # line continuation (joins tokens)
+
+    # Heredoc bodies are blanked only where the body is genuinely data. Done before
+    # the quote masking so a data heredoc's body (which may contain quotes) is
+    # removed as a unit rather than leaving quote fragments behind.
+    cmd = _mask_data_heredocs(cmd)
+
+    masked = _QUOTED_REGION.sub(" ", cmd)
+    spliced = _SPLICE_QUOTE.sub(
+        lambda m: m.group(1) if m.group(1) is not None else m.group(2), cmd
+    )
+    spliced = _QUOTED_REGION.sub(" ", spliced)
+
+    variants: list[str] = []
+    for v in (masked, spliced):
+        variants.append(v)
+        variants.append(v.replace("\\", ""))  # POSIX escape semantics
+
+    # A re-invoked shell's argument is a command line; analyse it too. A heredoc fed
+    # to a shell or interpreter is the same case: its body RUNS, so it must reach the
+    # matcher instead of being masked. Masking is applied per-heredoc, and only for
+    # the programs that consume the body as data (see _heredoc_is_data).
+    #
+    # NOTE (measured): with _PIP_ANYWHERE in place this recursion is currently
+    # REDUNDANT for the cases in the suite -- disabling it leaves every test green,
+    # because the newline before the body already acts as a command separator, so
+    # _PIP_PATTERN matches `pip install ...` there on its own. It is kept as
+    # defence-in-depth for a body form that is not a bare command line (nested
+    # quoting, a body that is itself a shell script with its own heredoc), and it is
+    # recorded here as an EQUIVALENT MUTANT so a future audit does not mistake its
+    # survival for a gap.
+    if _depth < 4:
+        for m in _REINVOKE.finditer(cmd):
+            variants.extend(_shell_normalizations(m.group(2), _depth + 1))
+        for m in _HEREDOC_CMD.finditer(cmd):
+            if not _heredoc_is_data(m.group(1), cmd):
+                body = m.group(3)
+                # The body is analysed BOTH ways, because it is code in an unknown
+                # language:
+                #   * normalised -- catches a shell line (`pip install django`);
+                #   * RAW        -- catches a shell command inside that language's own
+                #     string literal (`system 'pip install django'`), where the quotes
+                #     are syntax, not shell quoting, so masking them would delete the
+                #     only evidence.
+                # The raw variant can refuse a heredoc whose body merely PRINTS the
+                # words (e.g. a python docstring). That is the accepted direction:
+                # fail-closed, and the cost is one retry, while the opposite mistake
+                # hides a real install.
+                variants.append(body)
+                variants.extend(_shell_normalizations(body, _depth + 1))
+
+    return tuple(dict.fromkeys(variants))
+
+
+#: A pip INSTALL spelled ANYWHERE in a line, without requiring it to be the command
+#: word. Needed for a heredoc body that is code in a language the guard does not
+#: parse: `system 'pip install django'` (perl/ruby/R), `os.execute('pip install ...')`
+#: (lua), `execSync('pip install ...')` (node), `<?php system('pip install ...') ?>`.
+#: In those, the quotes belong to THAT language's syntax, so masking them as shell
+#: quoting deletes the only evidence -- the install is an argument, not a command
+#: word, and _PIP_PATTERN (anchored on separators) does not see it.
+#:
+#: Only applied to a NON-DATA heredoc body, which is already known to be code. A
+#: data heredoc is masked and never reaches this check, so the ordinary
+#: `cat <<EOF` + a pip line stays allowed.
+_PIP_ANYWHERE = re.compile(r"\bpip\d*(?:\.\d+)*\b[^\n]{0,40}?\b(?:install|download)\b",
+                           re.IGNORECASE)
+
+
+def _check_command_security(command: str, mode: str | None = None) -> str | None:
+    """Return an error message if the command tries external network access.
+
+    ``mode`` decides whether pip install/download is allowed: it is permitted in
+    ``docker`` (where ``--network=none`` makes a real fetch impossible) and
+    refused otherwise. Callers that do not pass a mode get the ACTIVE one, so the
+    guard cannot drift from the execution path by default.
+
+    The pip rule matches against the NORMALISED command (see
+    ``_shell_normalizations``), because the shell removes quoting and escapes
+    before exec: ``p'i'p install`` runs pip while containing no literal ``pip``.
+    The other patterns match the raw text; they are not quote-sensitive in the
+    same way, and normalising them would only risk new false positives.
+    """
     cmd = (command or "").strip()
+    effective_mode = get_sandbox_mode() if mode is None else mode
     for pattern, reason in _SECURITY_COMMAND_PATTERNS:
         if re.search(pattern, cmd, re.IGNORECASE):
             return f"[blocked] {reason}"
+    if effective_mode != "docker":
+        for pattern, reason in (_PIP_PATTERN, _INTERPRETER_FLAG_PATTERN):
+            for variant in _shell_normalizations(cmd):
+                if re.search(pattern, variant, re.IGNORECASE):
+                    return f"[blocked] {reason}"
+        # A heredoc body is code in a language the guard does not parse, so the
+        # install may appear as an ARGUMENT to that language's exec call
+        # (`system 'pip install django'`, `os.execute('pip install ...')`) rather
+        # than as a command word of its own -- which _PIP_PATTERN, anchored on
+        # separators, does not see. Measured: 6 of 8 interpreter bodies passed with
+        # only the variant scan. This is the narrow extra check that closes them: a
+        # pip INSTALL spelled anywhere in a non-data heredoc body.
+        for m in _HEREDOC_CMD.finditer(cmd):
+            if not _heredoc_is_data(m.group(1), cmd):
+                if _PIP_ANYWHERE.search(m.group(3)):
+                    return f"[blocked] {_PIP_PATTERN[1]}"
     return None
+
+
+#: Environment that removes pip's ability to reach an index at all. This is the
+#: control the reviewer asked for, and it is deliberately NOT a guard: measured,
+#: `PIP_NO_INDEX=1` refuses `pip download django` even when the command also
+#: passes `--index-url https://pypi.org/simple` or `--find-links ...`, and it
+#: survives `-E` (which only ignores PYTHON* variables, not PIP_*). So even a
+#: spelling the guard has never seen cannot fetch anything, because pip has no
+#: index configured to fetch from.
+#:
+#: Set in the LOCAL execution path only. Docker already gets this from
+#: /etc/pip.conf plus --network=none, and the container is meant to install from
+#: its wheelhouse -- overriding the env there would break that capability.
+_PIP_ENV_LOCK = {
+    "PIP_NO_INDEX": "1",
+    "PIP_FIND_LINKS": "",
+    "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+}
+
+
+def _env_without_index(env: dict) -> dict:
+    """Return ``env`` with pip's index access disabled.
+
+    Applied to every local-mode command, so it covers the shell, WSL bash, and any
+    interpreter flag: the variable is read by pip itself at startup.
+    """
+    env = dict(env)
+    env.update(_PIP_ENV_LOCK)
+    return env
+
+
+#: Refusal returned for SANDBOX_MODE=local. This is STRUCTURAL, not a pattern.
+#:
+#: WHY LOCAL MODE NO LONGER EXECUTES ANYTHING (measured 2026-10-08, final audit):
+#: the host has `C:\Windows\System32\bash.exe` with a WSL Ubuntu that has internet,
+#: and the reviewer downloaded a real django-6.1.2 wheel (8.4 MB) through
+#: `run_tests("bash -c \"python3 -c '...urllib...'\"")` -- a command that never
+#: mentions pip, so the pip guard could not see it, and the PIP_* env lock does not
+#: cross into WSL. Measured: 6 of 7 spellings escaped (`bash -c`, `wsl.exe -d
+#: Ubuntu --`, `cmd /c wsl`, a full path to bash.exe, PowerShell Start-Process,
+#: and a bare `python3 -c urllib`), and the download landed on disk.
+#:
+#: An allowlist of "known test runners" was measured too, and it does NOT close
+#: this: the agent WRITES files in the checkout, and pytest executes them, so a
+#: test file calling `subprocess.run(["bash", "-c", ...])` downloaded a wheel just
+#: as well (measured). Any local execution that runs agent-authored code on a host
+#: with a network and a WSL bash is uncontainable by construction.
+#:
+#: So local mode refuses, and the escape hatch for tests is `local-unsafe`, which
+#: is never set by the sweep (`run_final_sweep.py` pins SANDBOX_MODE=docker).
+_LOCAL_MODE_REFUSAL = (
+    "[blocked] SANDBOX_MODE=local does not execute commands: this host has a WSL "
+    "bash with internet access, so any command run here could fetch a released "
+    "package (an oracle) and no pattern-based guard can contain it. Use docker "
+    "mode (the default, and what the sweep uses) for shell and test execution. "
+    "SANDBOX_MODE=local-unsafe exists for the test suite only."
+)
+
+#: WHY `local-unsafe` MUST NOT BE USED FOR AGENT CODE (measured 2026-10-09, audit M+N).
+#:
+#: `local-unsafe` runs on the HOST with NO network isolation. Its name says so, but
+#: the property deserves to be written down where the mode is read, because the
+#: guard does NOT contain this mode either:
+#:
+#:   python -c "os.system('curl -o oracle.whl https://pypi.org/...')"
+#:   bash -c 'curl ...'
+#:
+#: Both were measured to download django-6.1.2 (8.4 MB, 907 .py files) in
+#: `local-unsafe`. The reason is structural, and it is the SAME lesson as the H
+#: finding one layer up: the guard inspects SHELL command text, while the actual
+#: execution path is a STRING inside another language (`os.system`, `os.popen`,
+#: `subprocess`, `system()`, `execSync`, `os.execute`) that then spawns a process.
+#: Text the shell never sees cannot be guarded by a shell pattern, and adding
+#: `os.system|system\(|execSync` to the patterns would lose the same race one
+#: language later -- the exact mistake this codebase has now made four times
+#: (spelling, quoting, shell keywords, heredocs).
+#:
+#: What DOES hold in each mode (measured):
+#:   * docker       -- curl/wget are absent from the image AND --network=none
+#:                     removes the route, so the download fails at the OS level.
+#:                     The sweep pins this mode (`run_final_sweep.py:436`), and the
+#:                     docker pip guard is intentionally NOT applied there.
+#:   * local        -- refuses to execute at all (_LOCAL_MODE_REFUSAL).
+#:   * local-unsafe -- executes, and the guard is the only control. It is NOT
+#:                     sufficient for agent-authored code.
+#:
+#: So this mode is for THIS REPOSITORY'S TEST SUITE, which runs trusted, reviewed
+#: code. Never set it for a real agent run: an agent's shell is not trusted code,
+#: and there is no second layer behind the guard here.
+_LOCAL_UNSAFE_IS_NOT_ISOLATED = (
+    "SANDBOX_MODE=local-unsafe runs on the host with NO network isolation and NO "
+    "containment for cross-language subprocess paths (measured: os.system('curl ...') "
+    "downloaded an 8.4 MB oracle). It exists for this repository's own test suite, "
+    "which runs trusted code. For agent runs use docker mode, which the sweep pins."
+)
 
 
 def run_tests(command: str = "", role: str = "") -> str:
     """Run a test command inside the instance repo (sandboxed, capped).
 
-    SWE-bench checkouts are raw clones: their per-repo dependencies are NOT
-    installed (the official harness supplies those in a conda env). So most test
-    commands fail for environmental reasons. That is not the agent's fault, and
-    retrying cannot fix it — but an agent that does not know this will retry
-    anyway, with new spellings, until its budget is gone.
+    The sandbox image pre-installs the repos' declared dependencies and carries an
+    offline wheelhouse, so a test run is a real regression signal (2026-10-08).
+    It is still NOT an oracle: the answer-bearing test lines are absent from the
+    checkouts, so the suite cannot reveal the expected fix.
 
     Therefore this tool distinguishes two outcomes:
 
     * **test failure** — tests ran and reported failures. Useful signal.
     * **environment failure** — the interpreter or a module is missing. The tool
-      says so explicitly and asks the agent to stop retrying.
+      says so explicitly and, in docker mode, tells the agent how to install it
+      offline from the wheelhouse.
 
     The interpreter is ``sys.executable`` (the project venv), not a bare
     ``python``: on this machine a bare ``python`` resolves to the system
@@ -695,8 +1193,12 @@ def run_tests(command: str = "", role: str = "") -> str:
     if not command:
         command = _guess_test_command(root)
 
+    mode = get_sandbox_mode()
+
     # Sandbox security guard: block commands attempting network access or package/repo fetch.
-    blocked_reason = _check_command_security(command)
+    # The mode is passed so the pip rule matches the isolation actually in force
+    # (permitted only under Docker's --network=none).
+    blocked_reason = _check_command_security(command, mode)
     if blocked_reason:
         _warn(f"[tool-guard] network/security command blocked: {command[:160]!r}")
         return blocked_reason
@@ -727,17 +1229,37 @@ def run_tests(command: str = "", role: str = "") -> str:
         )
     _RECENT_TEST_COMMANDS.append(command)
 
-    mode = get_sandbox_mode()
     # Fail CLOSED on an unrecognised value. The dispatch below has an `else` branch
     # that runs on the host, so a typo ("dockr", "Docker ") would have silently
     # selected the UNISOLATED path — the same class of bug as the old 'local'
     # default, just triggered by a typo instead of an omission.
-    if mode not in ("docker", "local"):
+    if mode not in ("docker", "local", "local-unsafe"):
         return (
-            f"[error] SANDBOX_MODE={mode!r} is not recognised (expected 'docker' or "
-            f"'local'). Refusing to run: an unknown mode would fall through to "
-            f"UNISOLATED host execution."
+            f"[error] SANDBOX_MODE={mode!r} is not recognised (expected 'docker', "
+            f"'local' or 'local-unsafe'). Refusing to run: an unknown mode would "
+            f"fall through to UNISOLATED host execution."
         )
+
+    # STRUCTURAL refusal, not a pattern. See _LOCAL_MODE_REFUSAL for the
+    # measurements: a WSL bash with internet defeats every pattern-based control
+    # on this host, and an allowlist of test runners does not help either, because
+    # pytest executes agent-authored files that can spawn bash themselves.
+    if mode == "local":
+        return _LOCAL_MODE_REFUSAL
+
+    # Loud, once per process, when the unisolated test mode is active. The warning
+    # is not a control -- it cannot stop a cross-language subprocess path (see
+    # _LOCAL_UNSAFE_IS_NOT_ISOLATED) -- but a mode that runs agent code on the host
+    # must at least announce itself, so a misconfigured run is visible in the log
+    # instead of silently unisolated.
+    if mode == "local-unsafe" and not _LOCAL_UNSAFE_WARNED[0]:
+        _LOCAL_UNSAFE_WARNED[0] = True
+        _warn(
+            "[sandbox] SANDBOX_MODE=local-unsafe is active: commands run on the HOST "
+            "with no network isolation. This is for the test suite only -- never for "
+            "an agent run (use docker). See _LOCAL_UNSAFE_IS_NOT_ISOLATED in tools.py."
+        )
+
     if mode == "docker":
         cmd_for_container = _translate_paths_to_container(command, root)
         image = _DOCKER_SANDBOX_IMAGE
@@ -793,10 +1315,26 @@ def run_tests(command: str = "", role: str = "") -> str:
             return f"[error] Docker image '{image}' not found locally. Preflight requires image to be pre-built."
 
     else:
-        # Local execution mode (default / legacy)
+        # SANDBOX_MODE=local-unsafe -- host execution, for the TEST SUITE ONLY.
+        #
+        # 'local' is refused above (see _LOCAL_MODE_REFUSAL). This branch exists so
+        # the suite can still exercise the host-execution code path (env injection,
+        # guard wiring, output handling) without a Docker daemon, and it is named
+        # "unsafe" so that setting it is a deliberate act. The sweep never sets it:
+        # run_final_sweep.py pins SANDBOX_MODE=docker.
+        #
         # Inject sandbox sitecustomize via PYTHONPATH so Python processes have
         # outbound socket/network calls blocked at runtime.
+        #
+        # NOTE (2026-10-08, final reviewer audit): sitecustomize is NOT the only
+        # control, because `-E`/`-I` make the interpreter ignore PYTHONPATH and
+        # `-S` skips site entirely -- measured, `python -E -m pip download django`
+        # fetched a real 8.4 MB django-6.1.2 wheel on this host. So pip's own
+        # configuration is locked down too: with no index configured, pip cannot
+        # fetch anything even when the guard has never seen the spelling, and no
+        # interpreter flag can undo an environment variable it reads itself.
         env = os.environ.copy()
+        env = _env_without_index(env)
         if _SANDBOX_DIR.exists():
             cur_py_path = env.get("PYTHONPATH", "")
             env["PYTHONPATH"] = (
@@ -828,14 +1366,31 @@ def run_tests(command: str = "", role: str = "") -> str:
         out = out[-limit:]
 
     if "[blocked]" not in out and _looks_like_env_failure(out):
+        # A missing module is no longer a dead end (2026-10-08). The image now
+        # pre-installs the repos' declared dependencies and ships a wheelhouse, and
+        # the container has no network, so the fix is an OFFLINE install rather than
+        # giving up. The old text told the agent "Do NOT call run_tests again",
+        # which was correct when nothing could be installed -- and is now actively
+        # wrong, because it stops the agent from fixing its own environment.
+        #
+        # The install hint is safe to give in docker mode only: --network=none plus
+        # `no-index = true` mean pip can reach the local wheelhouse and nothing
+        # else, so this cannot become a route to a released (oracle) package.
+        hint = ""
+        if mode == "docker":
+            hint = (
+                "\nIf a module is missing, install it OFFLINE from the image's "
+                "wheelhouse (there is no network in this sandbox):\n"
+                "    pip install --no-index --find-links=/opt/wheelhouse <package>\n"
+                "Then run the test again. Check what the repo declares in "
+                "setup.py / tests/requirements/ before assuming the package is "
+                "unavailable.\n"
+            )
         return (
-            "[tests unavailable] The test environment for this repository is not "
-            "installed in this sandbox (its dependencies come from the evaluation "
-            "harness, not from a raw clone). This is NOT a problem with your fix, "
-            "and retrying with a different command will not help.\n"
-            "Do NOT call run_tests again. Verify your change by reasoning about the "
-            "code, then produce your final patch.\n\n"
-            f"Command: {command}\n[exit code {proc.returncode}]\n{out}"
+            "[tests unavailable] A required module is missing, so the test could "
+            "not run. This is an environment problem, NOT a problem with your "
+            "fix.\n" + hint +
+            f"\nCommand: {command}\n[exit code {proc.returncode}]\n{out}"
         )
 
     suffix = "\n[... output truncated ...]" if truncated else ""
