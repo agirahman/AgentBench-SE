@@ -131,6 +131,33 @@ class PricingTable:
             "currency": "USD",
             "pricing_version": "2026-09-free",
         },
+        # Meta Model API -- CONTRIBUTOR tier. This is the sweep model as of
+        # 2026-10-09. The route is free at the point of use, but it is NOT a $0
+        # cost card: Meta publishes real per-token rates for this tier, and the
+        # thesis must report them rather than an empty cost column.
+        #
+        # Source: https://dev.meta.ai/docs/pricing-rate-limits#contributor-tier
+        #   "Contributor tier -- Models: muse-spark-1.3-contributor,
+        #    muse-spark-1.2-contributor. Heavily discounted token pricing in
+        #    exchange for permission to use your prompts and completions to train
+        #    future Meta models."
+        #   Price per 1M tokens: cached input $0.002, input $0.10, output $0.20
+        #   (Standard tier for comparison: cached $0.15, input $1.25, output $4.25)
+        #
+        # The discount is the price of training rights on our data, so this card
+        # must be paired with that disclosure wherever the cost is reported: a
+        # reader comparing this arm against the DeepSeek arm is comparing two
+        # different data arrangements, not only two models.
+        #
+        # Rate limits (same page): Contributor tier -- 100 RPM, 3,000,000 TPM; the
+        # sweep's --rate-limit 2.0 is well inside both.
+        "oc/muse-spark-1.3-contributor-free": {
+            "input_per_million": 0.10,
+            "cached_input_per_million": 0.002,
+            "output_per_million": 0.20,
+            "currency": "USD",
+            "pricing_version": "2026-10-09-meta-contributor-tier",
+        },
         "deepseek-v4-flash": {
             "off_peak": {
                 "input_per_million": 0.22,
