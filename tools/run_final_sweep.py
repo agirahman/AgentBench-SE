@@ -7,16 +7,31 @@ drift). Every knob is passed explicitly through tools/run_with_env.py.
 
 The model
 ---------
-`oc/muse-spark-1.3-contributor-free` (Meta's muse-spark, contributor tier),
-served over the RESPONSES API by the `meta` provider. This route is NOT
-Chat-Completions compatible: measured directly against 9router (2026-10-09),
-chat.completions.create returns HTTP 200 with finish_reason="in_progress",
-empty content and total_tokens=0 -- an empty answer with no error -- while
-responses.create completes with working tool calling. Running the sweep on the
-Chat Completions path would have produced 150 silent empty runs.
+Two routes are available and `--route` selects one. A route is a BUNDLE --
+model, provider, the env var that provider reads, and the rate card the cost
+guard prices with -- because the dangerous failure is a MIX of the two
+(recording model A while calling model B). The resume key is
+`instance|model|thinking`, so a mix also makes every finished run look
+outstanding and re-runs it for real money; main() therefore REFUSES a resume
+whose route disagrees with the experiment's own experiment.yaml.
 
-The model id also does NOT appear in GET /v1/models (9router lists only part of
-its catalogue), so the listing is not used as an availability check anywhere.
+`meta` (default): `oc/muse-spark-1.3-contributor-free` (Meta's muse-spark,
+contributor tier), served over the RESPONSES API by the `meta` provider. This
+route is NOT Chat-Completions compatible: measured directly against 9router
+(2026-10-09), chat.completions.create returns HTTP 200 with
+finish_reason="in_progress", empty content and total_tokens=0 -- an empty answer
+with no error -- while responses.create completes with working tool calling.
+Running the sweep on the Chat Completions path would have produced 150 silent
+empty runs.
+
+`opencode`: `cbai/deepseek-v4.1-flash`, served over Chat Completions by the
+`opencode` provider through the same 9router proxy. This is the route the earlier
+paid runs used (RQ3, EXP-20260930-030); its rate card is MEASURED from the
+9router bill (src/evaluation/cost.py).
+
+The muse-spark model id does NOT appear in GET /v1/models (9router lists only
+part of its catalogue), so the listing is not used as an availability check
+anywhere.
 
 What is deliberately different from the earlier 3-issue runs
 -----------------------------------------------------------
@@ -84,19 +99,46 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-#: The sweep model: Meta's muse-spark on the 9router proxy.
+#: The sweep routes, as BUNDLES. Each entry pins everything that must agree:
+#: the model, the provider, the env var that provider reads, and the rate card
+#: the cost guard prices with. Keeping them in one dict is the point -- an
+#: earlier revision hardcoded a single route, and the failure mode of a partial
+#: change is SILENT: e.g. setting OPENCODE_MODEL while selecting --provider meta
+#: leaves the meta provider reading META_MODEL from .env, so the run calls one
+#: model while the manifest records another, and every check still passes.
 #:
-#: Served over the RESPONSES API, not Chat Completions: measured against
-#: 9router (2026-10-09), chat.completions.create for this model returns HTTP
-#: 200 with finish_reason="in_progress", empty content and total_tokens=0 -- a
-#: silent empty failure -- while responses.create completes with working tool
-#: calling. The `meta` provider (src/providers/meta_provider.py) is therefore
-#: selected via --provider, and the model via META_MODEL.
-#:
-#: This id also does NOT appear in GET /v1/models (9router lists only part of
-#: its catalogue); calls to it succeed regardless, so the listing is not used
-#: as an availability check anywhere.
-MODEL = "oc/muse-spark-1.3-contributor-free"
+#: `env_key` MUST be the variable the provider actually reads:
+#:   * meta   -> META_MODEL     (src/config.py:Config.META_MODEL)
+#:   * opencode -> OPENCODE_MODEL (src/config.py:Config.OPENCODE_MODEL)
+#: A wrong key here is invisible without check_effective_model.py.
+ROUTES: dict[str, dict[str, str]] = {
+    # The default: Meta's muse-spark over the Responses API. See the module
+    # docstring for why Chat Completions is not usable for this model.
+    "meta": {
+        "model": "oc/muse-spark-1.3-contributor-free",
+        "provider": "meta",
+        "env_key": "META_MODEL",
+        # The contributor-tier card this route is billed at ($0.10/$0.002/$0.20).
+        "guard_model": "oc/muse-spark-1.3-contributor-free",
+    },
+    # The paid route the earlier runs used (RQ3, the budget curve): DeepSeek
+    # v4.1 Flash over Chat Completions. The guard card is the MEASURED 9router
+    # rate ($0.13941/$0.002467/$0.51345), not the published DeepSeek card --
+    # 9router billed cache hits at full price on this key (see cost.py).
+    "opencode": {
+        "model": "cbai/deepseek-v4.1-flash",
+        "provider": "opencode",
+        "env_key": "OPENCODE_MODEL",
+        "guard_model": "cbai/deepseek-v4.1-flash-billed",
+    },
+}
+#: Route used when --route is not given. The final sweep's measured route.
+DEFAULT_ROUTE = "meta"
+#: The model the DEFAULT route calls, kept as a module-level name because
+#: tests and tools (check_effective_model.py) refer to it directly.
+MODEL = ROUTES[DEFAULT_ROUTE]["model"]
+#: The provider of the default route (same reason as MODEL).
+PROVIDER = ROUTES[DEFAULT_ROUTE]["provider"]
 
 #: The whole task's turn allowance, identical for all three strategies.
 #:
@@ -242,6 +284,7 @@ def select_issues(limit: int | None) -> list[str]:
 
 def select_batch_for_only(
     only: int, exp_id: str, strategies: list[str], candidates: list[str],
+    model: str = MODEL,
 ) -> tuple[list[str], int, int]:
     """Take the next ``only`` still-incomplete RUNS, in order, from this experiment.
 
@@ -351,12 +394,15 @@ def select_batch_for_only(
     done_per_strategy = {
         s: _safe_existing_ids(pred_dir / f"{s}.jsonl") for s in strategies
     }
-    key = _resume_key("", MODEL, THINKING == "true")
+    # ``model`` is a parameter, not the module constant: the resume key embeds
+    # the model, so counting outstanding runs with the WRONG model would report
+    # every finished run as still to do -- and then run them again for money.
+    key = _resume_key("", model, THINKING == "true")
 
     def outstanding(iid: str) -> int:
         # Reuse the same key construction as the loader: strip the leading '|'
         # that the empty instance id leaves behind.
-        k = _resume_key(iid, MODEL, THINKING == "true")
+        k = _resume_key(iid, model, THINKING == "true")
         return sum(1 for s in strategies if k not in done_per_strategy[s])
 
     cumulative = sum(outstanding(i) for i in in_experiment)
@@ -427,14 +473,24 @@ def build_cmd(
     dry_run: bool,
     resume: bool = False,
     exp_id: str | None = None,
+    route: str = DEFAULT_ROUTE,
 ) -> list[str]:
+    # Resolve the bundle FIRST, so a typo fails here rather than producing a
+    # command that silently mixes one route's model with another's provider.
+    r = ROUTES.get(route)
+    if r is None:
+        raise ValueError(
+            f"unknown route {route!r}; known routes: {', '.join(sorted(ROUTES))}"
+        )
     cmd = [
         sys.executable,
         str(ROOT / "tools" / "run_with_env.py"),
-        # META_MODEL, not OPENCODE_MODEL: the meta provider reads META_MODEL,
-        # so an override of the opencode variable would be silently ignored --
-        # the sweep would run .env's model while every other check passed.
-        "--set", f"META_MODEL={MODEL}",
+        # The env var comes from the bundle and MUST be the one this provider
+        # reads: the meta provider reads META_MODEL, the opencode provider reads
+        # OPENCODE_MODEL. Setting the wrong key is silently ignored (the run
+        # would use .env's model while every other check passed), so the pair is
+        # pinned together in ROUTES rather than chosen independently here.
+        "--set", f"{r['env_key']}={r['model']}",
         "--set", f"TOTAL_TOOL_TURNS={TOTAL_TURNS}",
         "--set", "BUDGET_MODE=per_task",
         "--set", f"BUDGET_FLOOR_PER_ACT={FLOOR}",
@@ -446,15 +502,14 @@ def build_cmd(
         # nobody could tell from the turn totals. See MAX_REVISION_ROUNDS above.
         "--set", f"MAX_REVISION_TURNS={MAX_REVISION_ROUNDS}",
         "--set", f"COST_LIMIT_USD={COST_LIMIT_USD}",
-        # The runaway guard must price the rate the upstream ACTUALLY bills.
-        # Left to .env this was the previous route's measured card
-        # (cbai/deepseek-v4.1-flash-billed: output $0.51345/M), which for the
-        # muse route over-prices output ~2.6x -- a $3.00 cap would then bind
-        # after ~$1.17 of real spend and replace the turn-budget fairness
-        # invariant with a dollar bound, exactly the class of silent drift the
-        # pins above exist to prevent. The muse card is the contributor tier
-        # this route is billed at ($0.10 / $0.002 / $0.20).
-        "--set", f"COST_GUARD_MODEL={MODEL}",
+        # The runaway guard must price the rate the upstream ACTUALLY bills, so
+        # the card is part of the route bundle. Left to .env this was the
+        # previous route's measured card (cbai/deepseek-v4.1-flash-billed:
+        # output $0.51345/M), which for the muse route over-prices output ~2.6x
+        # -- a $3.00 cap would then bind after ~$1.17 of real spend and replace
+        # the turn-budget fairness invariant with a dollar bound, exactly the
+        # class of silent drift the pins above exist to prevent.
+        "--set", f"COST_GUARD_MODEL={r['guard_model']}",
         "--set", f"ACT_TIMEOUT_SECONDS={ACT_TIMEOUT_SECONDS}",
         # Explicit for the same reason as ACT_TIMEOUT_SECONDS: left to .env, a
         # stale value could silently disable the only guard against a wedged
@@ -474,9 +529,9 @@ def build_cmd(
         # Reasoning and the answer SHARE this budget, and a measured thinking turn
         # reached 99.1% of 32768. See the constant's note.
         "--set", f"MAX_TOKENS={MAX_TOKENS}",
-        # The meta provider (Responses API). Its model comes from META_MODEL,
-        # set above.
-        "--provider", "meta",
+        # The provider comes from the same bundle as the model: meta talks the
+        # Responses dialect, opencode the Chat Completions one.
+        "--provider", r["provider"],
         "--strategies", *strategies,
         "--instance-ids", *issues,
         "--rate-limit", "2.0",
@@ -609,7 +664,16 @@ def main() -> int:
                          "requires --exp-id")
     ap.add_argument("--exp-id", default=None,
                     help="the experiment directory to continue (e.g. EXP-20261001-001)")
+    ap.add_argument("--route", default=DEFAULT_ROUTE, choices=sorted(ROUTES),
+                    help="which model/provider bundle to run: "
+                         f"{', '.join(sorted(ROUTES))} (default: {DEFAULT_ROUTE})")
     args = ap.parse_args()
+
+    # Resolve the route ONCE, here. Every downstream use (build_cmd, the resume
+    # key, the banner, the state file) reads this bundle, so the model that gets
+    # RECORDED and the model that gets CALLED cannot drift apart.
+    route = ROUTES[args.route]
+    model = route["model"]
 
     if args.resume and not args.exp_id:
         print("ERROR: --resume needs --exp-id, otherwise there is nothing to continue.",
@@ -745,6 +809,46 @@ def main() -> int:
             )
             return 2
 
+        # ROUTE CONSISTENCY. Resuming an experiment with a DIFFERENT model is not
+        # an error the runner can see: the resume key is `instance|model|thinking`,
+        # so with a mismatched model every finished run simply looks outstanding
+        # and is run AGAIN -- paying twice and mixing two models into one
+        # experiment's numbers, with the manifest still claiming one model.
+        #
+        # Measured shape of the trap: EXP-20261009-1548 was written by the meta
+        # route (oc/muse-spark...). `--resume --exp-id EXP-20261009-1548` on the
+        # opencode route would have re-run all 30 recorded runs on cbai and
+        # written them into the same predictions/ files.
+        #
+        # So the route must agree with what the experiment recorded. The recorded
+        # value is the ONLY trustworthy source: it was written at run time by the
+        # runner from the live config, not copied from a command line.
+        exp_yaml = looked_for / "experiment.yaml"
+        if exp_yaml.is_file():
+            try:
+                import yaml
+
+                cfg = yaml.safe_load(exp_yaml.read_text(encoding="utf-8"))
+                recorded = ((cfg or {}).get("provider") or {}).get("model")
+            except (OSError, UnicodeDecodeError, yaml.YAMLError):
+                # Unreadable manifest: not evidence of a mismatch, and refusing
+                # here would strand a real experiment over a corrupt file. The
+                # runner's own resume logic still protects the run keys.
+                recorded = None
+            if recorded and recorded != model:
+                print(
+                    f"ERROR: --resume --exp-id {args.exp_id!r} was recorded with "
+                    f"model {recorded!r},\n"
+                    f"       but --route {args.route} would run {model!r}.\n"
+                    f"       Resuming across models re-runs every finished run "
+                    f"(the resume key embeds the model)\n"
+                    f"       and mixes two models into one experiment. Use "
+                    f"--route {next((k for k, v in ROUTES.items() if v['model'] == recorded), '<matching route>')!s}"
+                    f" or start a new experiment.",
+                    file=sys.stderr,
+                )
+                return 2
+
     # --limit selects the first N usable issues, so N must be >= 1. Measured
     # (read-only, --dry-run): `--limit -1` planned 147 runs and `--limit -5` planned
     # 135, both exit 0 -- `usable[:limit]` with a negative index means "all but the
@@ -807,7 +911,7 @@ def main() -> int:
         # necessarily the first N, so the candidate pool must be the full set.
         candidates = args.issues or select_issues(None)
         issues, runs, runs_cumulative = select_batch_for_only(
-            args.only, args.exp_id, strategies_preview, candidates
+            args.only, args.exp_id, strategies_preview, candidates, model=model
         )
         if not issues:
             print("=" * 78)
@@ -838,7 +942,10 @@ def main() -> int:
     print("=" * 78)
     print("  FINAL SWEEP")
     print("=" * 78)
-    print(f"  model      : {MODEL}")
+    print(f"  route      : {args.route}")
+    print(f"  model      : {model}")
+    print(f"  provider   : {route['provider']} (env {route['env_key']})")
+    print(f"  guard card : {route['guard_model']}")
     print(f"  issues     : {len(issues)}")
     if len(issues) <= 8:
         for i in issues:
@@ -911,7 +1018,8 @@ def main() -> int:
         print("  Preflight OK.")
         print()
 
-    cmd = build_cmd(issues, strategies, args.dry_run, args.resume, args.exp_id)
+    cmd = build_cmd(issues, strategies, args.dry_run, args.resume, args.exp_id,
+                    route=args.route)
     if args.dry_run:
         print("Command:")
         print("  " + " ".join(cmd[1:]))
@@ -919,7 +1027,12 @@ def main() -> int:
 
     started = datetime.now(timezone.utc)
     state = {
-        "model": MODEL,
+        "model": model,
+        # The route is recorded next to the model: the bill window is read back
+        # per model, and a reader needs to know WHICH provider/env pair produced
+        # this window (the two routes share one 9router endpoint).
+        "route": args.route,
+        "provider": route["provider"],
         "issues": issues,
         "strategies": strategies,
         "runs_planned": runs,
@@ -1061,7 +1174,13 @@ def main() -> int:
     print("    python tools/verify_eval_consistency.py             # after evaluating")
     print("    python tools/read_actual_bill.py \\")
     print(f"      --since {state['started_utc']} --until {state['finished_utc']} \\")
-    print(f"      --model {MODEL} --compare results/<EXP-id>")
+    # `model`, NOT the module-level MODEL: MODEL is the DEFAULT route's model, so
+    # printing it here told an --route opencode operator to reconcile the bill
+    # against oc/muse-spark-1.3-contributor-free -- a model this run never called.
+    # Measured on EXP-20261010-062: the hint at the end of an opencode sweep named
+    # the meta model. The window was right, the model was wrong, and a wrong model
+    # in read_actual_bill.py silently compares against the wrong rate card.
+    print(f"      --model {model} --compare results/<EXP-id>")
     return rc
 
 
