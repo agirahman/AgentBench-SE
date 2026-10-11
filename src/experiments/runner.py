@@ -26,7 +26,11 @@ from experiments.swebench_adapter import (
     strip_test_files,
     validate_applicability,
 )
-from agents.tools import ensure_repo_root, is_sandbox_infrastructure_error
+from agents.tools import (
+    drop_scratch_files,
+    ensure_repo_root,
+    is_sandbox_infrastructure_error,
+)
 from evaluation.statistics import export_statistics_json, generate_summary_md
 from evaluation.cost import PricingTable
 from evaluation.retry import is_provider_error, is_rate_limit_error
@@ -1222,6 +1226,23 @@ def run_experiments(
                         f"{issue.instance_id} ({name}) — using raw response as patch"
                     )
                     model_patch = patch.response
+
+                # Drop agent scratch files HERE as well, at the single point where
+                # the submitted patch is final. ``capture_diff`` already filters
+                # the tool-calling path, but this fallback takes the RAW model
+                # response, which never passed through it. Measured on
+                # EXP-20261010-062 (django__django-11019 review): 17 scratch files
+                # (_exp6.py, _t1.txt, ...) reached the submitted patch. The call is
+                # idempotent, so a patch already filtered by capture_diff is
+                # returned unchanged byte for byte.
+                if model_patch.strip():
+                    model_patch, scratch_dropped = drop_scratch_files(model_patch)
+                    if scratch_dropped:
+                        logger.info(
+                            f"  ✂ Removed {len(scratch_dropped)} agent scratch file(s) "
+                            f"from patch for {issue.instance_id} ({name}): "
+                            f"{', '.join(scratch_dropped)}"
+                        )
 
                 # Keep test files out of the submitted patch. The harness resets
                 # test files and applies its own gold test patch; a model patch

@@ -1660,6 +1660,43 @@ _SCRATCH_FILE_PATTERNS = (
     re.compile(r"^scratch[_A-Za-z0-9]*\.py$"),
 )
 
+# Batch 1 of the paid sweep (EXP-20261010-062, route cbai/deepseek-v4.1-flash)
+# leaked 17 scratch files in ONE patch: the django__django-11019 review run
+# shipped 18 files -- the real fix (django/forms/widgets.py) plus 17 throwaways
+# written while debugging (_exp6.py, _t1.txt, _trace.py, _dump.py, _dis.py,
+# _hdr.py, _base.txt, ...). None of them matched the patterns above, so all 17
+# reached the submitted patch.
+#
+# These prefixes are SHORT and GENERIC, so two extra guards keep them from
+# deleting real code -- both measured, not assumed:
+#
+# 1. The suffix is restricted to digits (the naming scheme that was actually
+#    observed: _exp6.py, _t1.txt, _out6.txt), never arbitrary words. This is
+#    what protects a ROOT-LEVEL file of the same kind: a bare `_dis\w*` would
+#    also match a root `_discretization.py` or `_dis_foo.py`, and `_base.py`
+#    would match a root `_base.py` (which is why `_base` allows only .txt/.log).
+#    Note which guard protects which case: the NESTED real modules
+#    (sklearn/preprocessing/_discretization.py, lib/matplotlib/axes/_base.py)
+#    are protected by the root-only rule below, NOT by the digit restriction.
+#
+# 2. They match ONLY at the repository root, where the agent writes scratch
+#    files. Measured across all 53 study checkouts: ZERO files at a repo root
+#    start with `_`, while every short-underscore real module that does exist
+#    (`_os.py`, `_util.py`, `_discretization.py`, `_base.py`) is nested inside
+#    a package directory. A bare `^_` root rule was rejected anyway (a repo
+#    can carry a root `_version.py`); each prefix still names what it removes.
+_ROOT_LEVEL_SCRATCH_PATTERNS = (
+    re.compile(r"^_exp\d*\.py$"),                # _exp6.py
+    re.compile(r"^_t\d+\.(txt|log)$"),           # _t1.txt
+    re.compile(r"^_trace\d*\.py$"),              # _trace.py
+    re.compile(r"^_dump\d*\.(py|txt|log)$"),     # _dump.py, _dump.txt
+    re.compile(r"^_dis\d*\.(py|txt|log)$"),      # _dis.py, _dis.txt
+    re.compile(r"^_def\d*\.py$"),                # _def.py
+    re.compile(r"^_hdr\d*\.py$"),                # _hdr.py
+    re.compile(r"^_base\d*\.(txt|log)$"),        # _base.txt
+    re.compile(r"^_out\d+\.(txt|log)$"),         # _out6.txt
+)
+
 # Names that must NEVER be treated as scratch, whatever the patterns say. Guards
 # against exactly the class of mistake described above.
 _NEVER_SCRATCH = ("__init__.py", "__main__.py", "__about__.py")
@@ -1668,15 +1705,28 @@ _NEVER_SCRATCH = ("__init__.py", "__main__.py", "__about__.py")
 def _is_scratch_file(path: str) -> bool:
     """True when *path* looks like an agent's throwaway check script.
 
-    Basename-only, and the name must carry an explicit throwaway prefix (``_tmp``,
-    ``_verify``, ``_check``, ``_run``, ``_out``, ``tmp_``, ``scratch``). Python
-    dunders are excluded outright: ``__init__.py`` is a real module, and an
-    earlier ``^_.*`` rule deleted it from two patches.
+    Two rule sets, both matched on the basename against an explicit throwaway
+    prefix (never a bare leading underscore):
+
+    * the long, unambiguous prefixes (``_tmp``, ``_verify``, ``_check``,
+      ``_run``, ``_out``, ``tmp_``, ``scratch``) match anywhere in the tree;
+    * the short, generic prefixes (``_exp``, ``_t``, ``_trace``, ``_dump``,
+      ``_dis``, ``_def``, ``_hdr``, ``_base``) match ONLY at the repository
+      root, because a same-named file inside a package is real code
+      (``_discretization.py``, ``_base.py``).
+
+    Python dunders are excluded outright: ``__init__.py`` is a real module, and
+    an earlier ``^_.*`` rule deleted it from two patches.
     """
-    base = path.replace("\\", "/").rsplit("/", 1)[-1]
+    rel = path.replace("\\", "/")
+    base = rel.rsplit("/", 1)[-1]
     if base in _NEVER_SCRATCH:
         return False
-    return any(p.match(base) for p in _SCRATCH_FILE_PATTERNS)
+    if any(p.match(base) for p in _SCRATCH_FILE_PATTERNS):
+        return True
+    if "/" in rel:
+        return False
+    return any(p.match(base) for p in _ROOT_LEVEL_SCRATCH_PATTERNS)
 
 
 def drop_scratch_files(patch: str) -> tuple[str, list[str]]:
