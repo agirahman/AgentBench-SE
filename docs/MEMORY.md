@@ -1,10 +1,10 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-10-15 (batch 1 & 2 SELESAI — 20/50 issue, 60 run, 100% VALID, ~$5,67)
-**Status:** ✅ **20/50 issue SELESAI** — batch 1 (django, `EXP-20261010-062`) dan batch 2 (matplotlib, `EXP-20261012-005`) keduanya **30/30 VALID**. Gate **READY 13/13**, preflight **50/50 pristine**, **1245 test lulus, 1 skipped** (mode local MAUPUN `SANDBOX_MODE=docker`). Sisa 30 issue (sympy 10 + scikit-learn 10 + requests 6 + seaborn 4) untuk batch berikutnya. Detail hasil: §"SWEEP BATCH 1 & 2 SELESAI" di bawah.
+**Last Updated:** 2026-10-15 (batch 3 sympy: 7/30 — DISTOP setelah run ke-7, lanjut sesi berikutnya)
+**Status:** ✅ **20/50 issue SELESAI** — batch 1 (django, `EXP-20261010-062`) dan batch 2 (matplotlib, `EXP-20261012-005`) keduanya **30/30 VALID**. Batch 3 (sympy, `EXP-20261015-001`) **berjalan sebagian: 7/30 tercatat** (3 VALID + 4 PROVIDER_ERROR upstream 16:15-16:30; run ke-8 dihentikan setelah ~4 jam). Gate **READY 13/13**, preflight **50/50 pristine**, **1245 test lulus, 1 skipped** (mode local MAUPUN `SANDBOX_MODE=docker`). Detail: §"SWEEP BATCH 1 & 2 SELESAI" + §"BATCH 3 (sympy)" di bawah. Handoff sesi: [`HANDOFF_20261015.md`](HANDOFF_20261015.md).
 **Active Branch:** `22/feat/sandbox-isolation`
-**Commit terakhir:** `8435126` (Drop agent scratch files from submitted patches, both paths), `505fc09` (`--route` bundle meta | opencode), `fa2fe4b` (Meta Responses provider + silent-failure class ditutup di kedua loop), `8446eb1` (Meta rate card), `c6c7ae3` (image hygiene + command guard)
-**Handoff sesi terakhir:** [`HANDOFF_20261006.md`](HANDOFF_20261006.md) · sebelumnya [`HANDOFF_20261002.md`](HANDOFF_20261002.md)
+**Commit terakhir:** `035cc7e` (Update MEMORY.md: batches 1-2 done), `8435126` (Drop agent scratch files from submitted patches, both paths), `505fc09` (`--route` bundle meta | opencode), `fa2fe4b` (Meta Responses provider + silent-failure class ditutup di kedua loop), `8446eb1` (Meta rate card), `c6c7ae3` (image hygiene + command guard)
+**Handoff sesi terakhir:** [`HANDOFF_20261015.md`](HANDOFF_20261015.md) · sebelumnya [`HANDOFF_20261006.md`](HANDOFF_20261006.md) · [`HANDOFF_20261002.md`](HANDOFF_20261002.md)
 **Detail audit:** [`AUDIT_OPS_PARTNER.md`](AUDIT_OPS_PARTNER.md) · [`AUDIT_SCALE_PARTNER.md`](AUDIT_SCALE_PARTNER.md) · [`AUDIT_PROMPTS_PARTNER.md`](AUDIT_PROMPTS_PARTNER.md) · [`AUDIT_RUN_TESTS_PARTNER.md`](AUDIT_RUN_TESTS_PARTNER.md) · [`RESEARCH_BUDGET_20260929.md`](RESEARCH_BUDGET_20260929.md)
 
 ---
@@ -80,6 +80,72 @@ Sweep kini punya flag **`--route {meta|opencode}`** yang membundel **model + pro
 `_logtail.py` (toolcall terakhir + strip ANSI), `_procs.py` (rantai proses), `_current_run.py`
 (4 lapis: artifact, savepoint, checkout dirty, docker container). Semua membaca log **mana pun
 yang terbaru** (sequencer/resume/retry) — penting karena setiap sesi resume menulis log baru.
+
+---
+
+## ⚠️ BATCH 3 (sympy) — BERJALAN SEBAGIAN, DISTOP 2026-10-15 20:45 WIB
+
+**EXP `EXP-20261015-001` · route opencode · 10 issue sympy · distop di 7/30 setelah run ke-8
+(planning·sym-11897) berjalan ~4 JAM tanpa selesai.**
+
+### Hasil tercatat (7 run)
+
+| # | Run | Status |
+|---|---|---|
+| 1-3 | sym-11400 × direct/planning/review | ✅ **VALID** (semua — issue pertama tuntas ~30 menit) |
+| 4-7 | sym-11870 × 3 + sym-11897 direct | ⚠️ **PROVIDER_ERROR** |
+
+**Penyebab 4 PROVIDER_ERROR**: gangguan upstream `codebuddy.ai` pukul **16:15-16:30**
+(`503 - [403]: <!DOCTYPE html>...` — halaman HTML dari upstream, bukan wifi seperti batch 2).
+Provider pulih ~16:19 dan run berikutnya normal. **Semua 4 run akan di-retry otomatis saat resume.**
+
+### 🔴 Pelajaran BARU: sympy + masking git = agent bingung (run ke-8, ~4 jam)
+
+**Fakta terukur dari log run ke-8 (`planning · sym-11897`):**
+- **314+ toolcall, turn ~126/200** — agent eksplorasi ekstrem.
+- **Agent mencoba `umount /work/.git`** (19:17) untuk membuka masking git → **DITOLAK**
+  (`must be superuser to unmount` — sandbox non-root). ✅ **Sandbox terbukti tahan** (diverifikasi
+  mandiri dengan `docker run` probe).
+- **Agent lalu `find / -xdev -name "refs"` dan `find / -name "index" -path "*git*"`** — mencari
+  git history alternatif. **Sia-sia** (di-mask), tapi memakan banyak turn.
+- Agent juga mencari tarball sympy (`find / -iname "sympy*.tar.gz"`) — kemungkinan mencari
+  solusi upstream dari sumber lain (juga gagal — sandbox bersih).
+- Retry provider **menumpuk di turn 80→85→91→104→116→126** (masing-masing attempt 1/3,
+  auto-recover). Kemungkinan request timeout karena konteks sangat panjang.
+
+**Diagnosis:** masking git **bekerja terlalu baik** — agent tidak menemukan `.git` dan
+menghabiskan waktu mencari jalur alternatif alih-alih menyelesaikan issue. Ini **efek samping
+tak terduga** dari pertahanan keamanan yang perlu ditangani untuk batch berikutnya.
+
+**🔧 Rekomendasi perbaikan (untuk sesi berikutnya):** tambahkan kalimat eksplisit di system
+prompt: *"Git history is intentionally unavailable in this sandbox. Do not search for .git
+directories or git repositories — they are masked by design. Solve the issue from the source
+code alone."* Ini menghilangkan pencarian sia-sia tanpa membuka kebocoran.
+
+**Keputusan operator (2026-10-15 20:45):** distop karena terlalu lama; lanjut besok.
+Run ke-8 dihentikan di tengah (belum tercatat) — resume akan mengulangnya dari awal.
+Checkout sudah dibersihkan (`clean_repos.py` → 2 sympy checkout di-reset).
+
+### ⏭️ Cara resume batch 3
+
+```powershell
+# 1. Bersihkan (runner bersihkan SEBELUM tiap strategi, tidak sesudah)
+.venv\Scripts\python.exe tools\clean_repos.py
+
+# 2. Preflight (Docker WAJIB hidup)
+.venv\Scripts\python.exe tools\preflight_repos.py
+
+# 3. Resume — otomatis skip 3 VALID, kerjakan 4 PROVIDER_ERROR + sisanya
+.venv\Scripts\python.exe tools\run_final_sweep.py --route opencode --resume `
+  --exp-id EXP-20261015-001 --issues `
+  sympy__sympy-11400 sympy__sympy-11870 sympy__sympy-11897 sympy__sympy-12171 `
+  sympy__sympy-12236 sympy__sympy-12419 sympy__sympy-12454 sympy__sympy-12481 `
+  sympy__sympy-13031 sympy__sympy-13043
+```
+
+**Estimasi sisa**: 23 run (4 retry + 19 baru). **Perhatian**: sympy bisa sangat lambat kalau
+agent bingung soal git (lihat pelajaran di atas) — pertimbangkan menambahkan hint prompt dulu
+sebelum resume.
 
 ---
 
@@ -2003,6 +2069,7 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 28. **Wifi putus = `PROVIDER_ERROR`, dan itu SELALU retryable.** Terukur batch 2: 3 run gagal `503 fetch failed ENOTFOUND` saat wifi putus (~17 menit). Resume berikutnya **otomatis hanya mengerjakan run yang gagal** (yang VALID di-skip, tanpa pembayaran ganda). **Jangan panik, jangan relaunch eksperimen baru** — cukup resume.
 29. **Durasi run sangat bergantung repo.** matplotlib **30-130 menit/run** (compile C extension + test suite besar) vs django ~15 menit/run. Jangan intervensi run yang "lama" selama log tumbuh + aktivitas fresh — budget 200 turn + COST_LIMIT_USD akan menghentikannya sendiri. Terukur: run direct 23563 ~130 menit dengan 540+ toolcall **tetap VALID**.
 30. **Scratch-file leak bisa lewat DUA jalur.** Filter di `capture_diff` saja **tidak cukup** — fallback `runner.py` (Item 8a) mengambil teks mentah `patch.response` yang melewati filter. Fix commit `8435126` menutup **keduanya** (`drop_scratch_files` dipanggil juga di runner sebelum `strip_test_files`). Pelajaran umum: kalau memperbaiki sebuah filter, **cari semua jalur yang menghasilkan output yang sama**.
+31. **Masking git bisa MEMBUAT AGEN BINGUNG — biaya waktu, bukan kebocoran (terukur batch 3, 2026-10-15).** Di run `planning·sym-11897` (~4 jam, dihentikan), agent mencoba **`umount /work/.git`** (ditolak, non-root — sandbox tahan ✅) lalu **`find / -xdev -name "refs"`** + `find / -name "index" -path "*git*"` untuk mencari git history alternatif. Sia-sia (di-mask) tapi memakan **puluhan turn**. Agent juga mencari tarball sympy (`find / -iname "sympy*.tar.gz"`) — kemungkinan mencari solusi upstream. **Implikasi:** pertahanan keamanan yang "bekerja terlalu baik" mengubah perilaku agent secara tidak terduga. **⚠️ Hint saat ini TIDAK CUKUP**: `system_prompts.py:33-34` sudah bilang *"Git is not installed in the sandbox — use the git_diff tool (runs on host)"*, tapi agent **tetap** mencoba umount + find. **Rekomendasi:** perkuat jadi eksplisit: *"Do NOT search for .git directories, git repositories, or git history — they are masked by design and searching wastes turns. Solve from the source code alone."* Perbaikan ini **belum diimplementasikan** — pertimbangkan sebelum resume batch 3.
 
 ---
 
