@@ -1,11 +1,85 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-10-06 (audit isolasi sandbox — 3 kelas cacat ditemukan & diperbaiki)
-**Status:** 🛑 **SWEEP DITAHAN** — mitigasi isolasi sudah diperbaiki & terverifikasi, tapi ada **3 keputusan user** yang tertunda (lihat [`HANDOFF_20261006.md`](HANDOFF_20261006.md)). Gate **READY 13/13**, preflight **50/50 pristine**, **692 test lulus** (mode local MAUPUN `SANDBOX_MODE=docker`). **BLOCKER yang sudah tertutup:** kebocoran solusi lewat symlink+`grep` (dulu bisa ekstrak `.env` + `model_patch`). **BLOCKER yang BELUM:** default `SANDBOX_MODE="local"` — sweep tanpa env var = isolasi TIDAK aktif.
+**Last Updated:** 2026-10-15 (batch 1 & 2 SELESAI — 20/50 issue, 60 run, 100% VALID, ~$5,67)
+**Status:** ✅ **20/50 issue SELESAI** — batch 1 (django, `EXP-20261010-062`) dan batch 2 (matplotlib, `EXP-20261012-005`) keduanya **30/30 VALID**. Gate **READY 13/13**, preflight **50/50 pristine**, **1245 test lulus, 1 skipped** (mode local MAUPUN `SANDBOX_MODE=docker`). Sisa 30 issue (sympy 10 + scikit-learn 10 + requests 6 + seaborn 4) untuk batch berikutnya. Detail hasil: §"SWEEP BATCH 1 & 2 SELESAI" di bawah.
 **Active Branch:** `22/feat/sandbox-isolation`
-**Commit terakhir:** `0399ca3` (Docker sandbox isolation, PR #11), `5462f9b` (guard `--resume --exp-id`), `9c91d6a` (reconcile dokumen), `b6abf88` (`--only N`), `e618b8d` (completeness-on-interrupt), `38a1c57` (interrupt exports), `cf19d98` (resume opsi D)
+**Commit terakhir:** `8435126` (Drop agent scratch files from submitted patches, both paths), `505fc09` (`--route` bundle meta | opencode), `fa2fe4b` (Meta Responses provider + silent-failure class ditutup di kedua loop), `8446eb1` (Meta rate card), `c6c7ae3` (image hygiene + command guard)
 **Handoff sesi terakhir:** [`HANDOFF_20261006.md`](HANDOFF_20261006.md) · sebelumnya [`HANDOFF_20261002.md`](HANDOFF_20261002.md)
 **Detail audit:** [`AUDIT_OPS_PARTNER.md`](AUDIT_OPS_PARTNER.md) · [`AUDIT_SCALE_PARTNER.md`](AUDIT_SCALE_PARTNER.md) · [`AUDIT_PROMPTS_PARTNER.md`](AUDIT_PROMPTS_PARTNER.md) · [`AUDIT_RUN_TESTS_PARTNER.md`](AUDIT_RUN_TESTS_PARTNER.md) · [`RESEARCH_BUDGET_20260929.md`](RESEARCH_BUDGET_20260929.md)
+
+---
+
+## 🎉 SWEEP BATCH 1 & 2 SELESAI (2026-10-15) — 20/50 issue, 100% VALID
+
+**Ringkasan terpenting sejak 2026-10-06. Kedua batch berjalan penuh, semua run VALID.**
+
+| Batch | EXP | Repo | Issue | Run | Hasil | Biaya (CSV) | Selesai |
+|---|---|---|---|---|---|---|---|
+| **Batch 1** | `EXP-20261010-062` | django | 10 | 30 | **30/30 VALID** | $3,0665 | 11 Okt |
+| **Batch 2** | `EXP-20261012-005` | matplotlib | 10 | 30 | **30/30 VALID** | $2,5992 | 15 Okt 01:40 |
+| **TOTAL** | | | **20** | **60** | **60/60 VALID** | **~$5,67** | |
+
+**Sisa 30 issue untuk batch berikutnya:** sympy (10) + scikit-learn (10) + requests (6) + seaborn (4).
+Issue django & matplotlib yang sudah selesai terdaftar di CSV masing-masing batch.
+
+**Catatan penting:** VALID = patch well-formed + lolos `git apply` (lihat jebakan #10).
+**Resolved** hanya bisa ditentukan lewat evaluasi Modal SWE-bench harness — **belum dijalankan** untuk kedua batch ini. Langkah berikutnya setelah semua batch selesai: evaluasi Modal.
+
+### 🔀 Perubahan jalur: `--route` bundle (commit `505fc09`)
+
+Sweep kini punya flag **`--route {meta|opencode}`** yang membundel **model + provider + env + guard card** menjadi satu pilihan, plus **guard anti-campur resume** (resume dengan route berbeda dari yang tercatat di `sweep_started.json` → ditolak). Ini mencegah eksperimen tercampur dua model.
+
+- Batch 1 dijalankan dengan route **meta** (`muse-spark`) — **distop di 18/30** karena **free tier habis** (`FreeUsageLimitError`).
+- Batch 1 (lanjutan) & batch 2 memakai route **opencode** (`cbai/deepseek-v4.1-flash`, berbayar).
+
+### 🐛 Insiden & perbaikan selama kedua batch
+
+1. **Batch 1 — scratch files lolos ke patch (SEDANG, sudah diperbaiki, commit `8435126`).**
+   17 file scratch agent (`_exp6.py`, `_t1.txt`, dll) lolos ke patch `11019 review` (82 KB).
+   Filter lama tidak menangkap penamaan itu. Perbaikan final: **suffix-digit + root-only guard**
+   (worker menolak usul awal orchestrator karena akan menghapus file nyata seperti `_discretization.py`
+   — terbukti benar: 5-10 checkout nyata punya file itu). Verifikasi: 18→1 file, 17 dropped,
+   **0 false positive di 133.029 file** (scan reviewer independen), 6 mutasi survivor putaran 1
+   semuanya KILLED setelah tes restriksi ditambahkan. **Fix menyentuh DUA jalur**:
+   `capture_diff` + fallback `runner.py:1238-1245` (jalur fallback dulu melewati filter).
+2. **Batch 1 — 1 run hilang (11283 review) ditolak karena repo kotor** (`__pycache__` terkunci
+   Windows). Resume setelah `clean_repos.py` → **VALID**. Batch 1 jadi 30/30.
+3. **Batch 2 — mesin sleep ~3,8 jam** (19:32→23:18) → 1 API timeout → retry otomatis → sweep
+   lanjut sendiri. **Tidak ada data rusak.** Pelajaran: **matikan sleep/suspend saat sweep malam**.
+4. **Batch 2 — wifi putus (~17:40-17:57)** → 3 run `23563` jadi `PROVIDER_ERROR`
+   (`503 fetch failed ENOTFOUND www.codebuddy.ai`). Wifi pulih → sweep lanjut otomatis.
+   **`PROVIDER_ERROR` selalu retryable** — resume berikutnya hanya mengerjakan 3 run yang gagal
+   (27 VALID di-skip, tidak ada pembayaran ganda).
+5. **Batch 2 — issue `23563` adalah yang terberat**: direct ~130 menit, planning ~114 menit,
+   review ~85 menit — ketiganya akhirnya **VALID** setelah retry. Run direct-nya 540+ toolcall
+   eksplorasi; keputusan "tidak intervensi" terbukti benar.
+6. **Run matplotlib jauh lebih lambat dari django**: ~30-130 menit/run (compile C extension
+   `_qhull_wrapper.cpp` + test suite besar) vs django ~15 menit/run. Ini ekspektasi baru untuk
+   estimasi biaya/waktu batch berikutnya.
+
+### ⏭️ Cara melanjutkan (batch 3)
+
+```powershell
+# 1. Bersihkan checkout (runner membersihkan SEBELUM tiap strategi, tidak sesudah)
+.venv\Scripts\python.exe tools\clean_repos.py
+
+# 2. Verifikasi preflight (Docker harus hidup!)
+.venv\Scripts\python.exe tools\preflight_repos.py
+
+# 3. Launch batch 3 (contoh: 10 issue berikutnya)
+.venv\Scripts\python.exe tools\run_final_sweep.py --route opencode --issues <daftar 10 issue>
+```
+
+**Urutan issue yang direkomendasikan:** sympy → scikit-learn → requests → seaborn.
+**Estimasi per 10-issue batch:** ~$2,5-4 (opencode route), durasi 8-48 jam tergantung repo
+(scikit-learn/sympy lebih cepat dari matplotlib, tapi lebih lambat dari django).
+
+### 🧰 Tool monitoring sesi (di `logs/`, tidak di-commit)
+
+`_loop_progress.py` (ringkasan progres), `_health.py` (status + kesegaran log), `_retry_verify.py`,
+`_logtail.py` (toolcall terakhir + strip ANSI), `_procs.py` (rantai proses), `_current_run.py`
+(4 lapis: artifact, savepoint, checkout dirty, docker container). Semua membaca log **mana pun
+yang terbaru** (sequencer/resume/retry) — penting karena setiap sesi resume menulis log baru.
 
 ---
 
@@ -290,7 +364,7 @@ dipakai `--resume`. Kalau diimplementasikan ulang, keduanya bisa berbeda pendapa
 dan ukuran batch jadi tidak bermakna sama dengan yang benar-benar dijalankan.
 
 **Verifikasi:** 10 test (`tests/test_sweep_only_batch.py`), **7 MERAH** saat
-perbaikannya dimatikan. Suite **508 lulus saat itu** (kini **692**), gate **READY 13/13**.
+perbaikannya dimatikan. Suite **508 lulus saat itu** (kini **1245 lulus, 1 skipped**), gate **READY 13/13**.
 
 ---
 
@@ -879,7 +953,7 @@ menyuntikkan test rusak → gate melaporkan **NOT READY**, exit 1.
 
 | Verifikasi | Hasil |
 |---|---|
-| Unit test | **692 lulus** (mode local **dan** `SANDBOX_MODE=docker`) |
+| Unit test | **1245 lulus, 1 skipped** (mode local **dan** `SANDBOX_MODE=docker`) |
 | Preflight repo | **50/50 pristine** |
 | Fairness budget | **FAIR** — 200/200/200 |
 | Putaran revisi | Setiap act revisi **6+6** (kebutuhan terukur: 6) |
@@ -917,7 +991,7 @@ Sweep **tidak** mengulang dari nol; savepoint per run dibaca dan yang sudah sele
 | **Budget tool-turn** | ✅ Done | `agents/budget.py` — total sama per strategi, sekarang **200** (skala referensi) |
 | **Pre-flight validator** | ✅ Done | `tools/preflight_modal.py` — replikasi kontrak Modal secara lokal |
 | **Rate-limit handling** | ✅ Done | Backoff 429 + circuit breaker |
-| **Test suite** | ✅ Done | **692 lulus** (dari 426). **Lulus di env bersih MAUPUN env kotor**, dan di **mode local MAUPUN `SANDBOX_MODE=docker`** |
+| **Test suite** | ✅ Done | **1245 lulus, 1 skipped** (dari 426). **Lulus di env bersih MAUPUN env kotor**, dan di **mode local MAUPUN `SANDBOX_MODE=docker`** |
 | **Thinking mode** | ✅ **ON** | `deepseek` thinking + effort `medium`; `*_reasoning.md` ditulis per role |
 | **MAX_TOKENS** | ✅ **65536** | Naik dari 32768; reasoning + jawaban berbagi anggaran ini |
 | **Rate card cbai** | ✅ **FIXED** | Diukur dari key yang BENAR (`…da2fe1`), bukan `…b04880` |
@@ -969,6 +1043,24 @@ Sweep **tidak** mengulang dari nol; savepoint per run dibaca dan yang sudah sele
 ---
 
 ## 📊 Hasil Eksperimen Terakhir
+
+### 🎉 `EXP-20261010-062` (batch 1, django) & `EXP-20261012-005` (batch 2, matplotlib) — **60/60 VALID**
+
+**Dua batch pertama dari sweep final. Thinking ON medium, budget 200/200/200, Docker sandbox.**
+
+| Batch | Repo | Issues | Runs | VALID | Biaya (CSV) |
+|---|---|---|---|---|---|
+| `EXP-20261010-062` | django | 10 | 30 | **30** | $3,0665 |
+| `EXP-20261012-005` | matplotlib | 10 | 30 | **30** | $2,5992 |
+| **TOTAL** | | **20** | **60** | **60 (100%)** | **~$5,67** |
+
+**⚠️ Belum dievaluasi Modal** — VALID ≠ resolved. Perlu evaluasi SWE-bench harness untuk skor RQ1.
+Detail lengkap (insiden, durasi, pelajaran): lihat §"SWEEP BATCH 1 & 2 SELESAI" di header dokumen ini.
+
+**Durasi terukur:** batch 1 ~2,5 hari (dengan interrupt rate-limit meta), batch 2 ~2,5 hari (dengan
+resume + retry). Run matplotlib **jauh lebih lambat** (30-130 menit/run) dari django (~15 menit/run).
+
+---
 
 ### `EXP-20260927-010` — 3 issue, budget 20/40/60
 
@@ -1906,6 +1998,11 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 23. **Token pipeline ≠ token yang ditagih (beda ~5×).** `input_tokens_total` mencatat token **baru per turn**; provider menagih **konteks penuh yang dikirim ulang tiap request**. Terukur `EXP-20261002-279`: pipeline 1,20 juta vs bill **6,33 juta** = **5,25×**. Ini **bukan** bug dan **bukan** pencemaran sesi agent — terverifikasi karena rasio konteks kumulatif (12,5 juta char `review` vs 1,5 juta `direct`) cocok, sedangkan rasio request hanya 1,53×. **Implikasi:** biaya naik **lebih cepat daripada jumlah turn** (konteks menumpuk **per act**, jadi `total_turns` bukan prediktor yang baik); **turn adalah variabel biaya utama, bukan token**. Untuk angka biaya, **bill yang menang**. Eksponen persisnya **belum terkalibrasi** — jangan kutip satu angka. Lihat §"Koreksi penting: token" di atas.
 24. **Hitung request dari turn assistant, bukan dari entri trajectory.** Tool call dieksekusi **lokal** oleh harness (provider hanya menyediakan model), jadi eksekusi tool **gratis** — tapi hasilnya dikirim balik sebagai `tool_result` dan itu **request baru yang ditagih penuh**. `review` punya **162 entri** trajectory tapi hanya **54 request**; 108 sisanya hasil tool. Menghitung dari total entri → **over-count 3×**. Field yang benar: `type == "assistant"`. Penyebab mudah salah: saya sempat memakai `kind` yang tidak ada (fieldnya `type`), sehingga hitungannya kacau dua kali.
 25. **Jangan menguji flag baru pada direktori eksperimen nyata.** Saat menguji `--only`, saya menjalankannya pada `EXP-20261002-279` **tanpa `--dry-run`** → **2 run berbayar tak sengaja** (~$0,019), dan CSV pilot itu bertambah dari 3 → 5 baris. **Uji dengan `--dry-run` dulu**, atau pada salinan sekali pakai. Flag yang memicu run adalah **destruktif**: ia menulis ke direktori yang ditunjuk, bukan ke tempat aman. Gate tidak menahannya karena preflight hanya memeriksa **repo pristine**, bukan "apakah kamu yakin menjalankan ini".
+26. **`reset_working_tree` dipanggil di AWAL tiap run, BUKAN di akhir** (`direct_strategy.py:36` dll). Jadi setelah sweep selesai/di-stop, checkout ditinggal **kotor** → preflight sweep berikutnya **menolak start**. **Selalu `tools/clean_repos.py` sebelum launch batch berikutnya** — ini terukur 3× (11283 batch 1, resume batch 2, retry 23563).
+27. **Mesin sleep/suspend memutus sweep.** Terukur batch 2: gap 226 menit (19:32→23:18) → 1 API timeout → retry otomatis → sweep lanjut sendiri (tidak ada data rusak, tapi waktu terbuang). **Matikan sleep/suspend saat sweep malam.**
+28. **Wifi putus = `PROVIDER_ERROR`, dan itu SELALU retryable.** Terukur batch 2: 3 run gagal `503 fetch failed ENOTFOUND` saat wifi putus (~17 menit). Resume berikutnya **otomatis hanya mengerjakan run yang gagal** (yang VALID di-skip, tanpa pembayaran ganda). **Jangan panik, jangan relaunch eksperimen baru** — cukup resume.
+29. **Durasi run sangat bergantung repo.** matplotlib **30-130 menit/run** (compile C extension + test suite besar) vs django ~15 menit/run. Jangan intervensi run yang "lama" selama log tumbuh + aktivitas fresh — budget 200 turn + COST_LIMIT_USD akan menghentikannya sendiri. Terukur: run direct 23563 ~130 menit dengan 540+ toolcall **tetap VALID**.
+30. **Scratch-file leak bisa lewat DUA jalur.** Filter di `capture_diff` saja **tidak cukup** — fallback `runner.py` (Item 8a) mengambil teks mentah `patch.response` yang melewati filter. Fix commit `8435126` menutup **keduanya** (`drop_scratch_files` dipanggil juga di runner sebelum `strip_test_files`). Pelajaran umum: kalau memperbaiki sebuah filter, **cari semua jalur yang menghasilkan output yang sama**.
 
 ---
 
@@ -1967,32 +2064,18 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 ---
 
-**Last working state:** commit `7c5642a` + mitigasi kebocoran layer-1 — **653 test lulus**, gate **READY 11/11**. **Sweep final DIHENTIKAN** di `EXP-20261004-034` (batch 1–4 selesai: **40/50 issue = 120/150 run**, $7,37; batch-5 dihentikan setelah 3 run / $0,15). **Alasan stop: vektor kebocoran solusi** — lihat [`FINDINGS_LEAK_20261005.md`](FINDINGS_LEAK_20261005.md). Layer-1 (sanitasi git + sitecustomize + filter perintah) **SELESAI & TERVERIFIKASI** — tapi **validasi orchestrator membuktikan layer-1 TIDAK CUKUP** (10 bypass jaringan + 7 jalur filesystem; lihat [`VALIDATION_SANDBOX_20261005.md`](VALIDATION_SANDBOX_20261005.md)). **Keputusan: isolasi Docker (utama), isolasi proses (cadangan).**
+**Last working state (2026-10-15):** commit `8435126` — **1245 test lulus, 1 skipped**, gate **READY 13/13**. **20/50 issue SELESAI** dengan isolasi Docker: batch 1 django (`EXP-20261010-062`, 30/30 VALID) + batch 2 matplotlib (`EXP-20261012-005`, 30/30 VALID). Isolasi Docker (layer-2) **TERPASANG & TERVERIFIKASI** (21 probe escape 100% BLOCKED, lihat §"Implementasi Penuh: Docker Sandbox").
 
 **Langkah berikutnya (prioritas):**
 
-0. **⏭️ ISOLASI SEJATI (Docker) — blocker sebelum run berbayar apa pun:**
-   - **Keputusan user:** Docker sebagai utama; isolasi proses Windows (user + ACL + firewall `-LocalUser`) sebagai cadangan.
-   - **Wajib:** kalau Docker dipakai, **seluruh 150 run dijalankan di Docker** — tidak boleh dicampur dengan batch 1–4 (Windows), karena 8,7% perintah Windows-specific dan rasionya tidak merata antar strategi (direct 10,7% vs planning 5,8%) → perbandingan RQ1 akan bias.
-   - Bersihkan dulu (gratis, tanpa admin): hapus `_hits.txt` + `_difft.txt` (berisi `model_patch`), dan 51 `.git/FETCH_HEAD` pre-existing (higiene; terverifikasi menunjuk base_commit, bukan bocor).
-   - Perluas probe regresi: setiap bypass di `VALIDATION_SANDBOX_20261005.md` harus jadi test yang bisa MERAH.
-   - Preflight gate: sweep menolak start kalau isolasi tidak aktif (Docker mati / user sandbox tidak ada).
+0. **⏭️ BATCH 3 — lanjutkan sweep (20/50 → 50/50 issue):**
+   - Sisa **30 issue**: sympy (10) + scikit-learn (10) + requests (6) + seaborn (4).
+   - Resep: `clean_repos.py` → `preflight_repos.py` (Docker WAJIB hidup) → launch.
+   - **Route: `--route opencode`** (`cbai/deepseek-v4.1-flash`, berbayar — sama seperti batch 1 lanjutan & batch 2).
+   - Estimasi ~$2,5-4 per 10-issue batch. **Eksperimen BARU** (jangan lanjutkan EXP lama).
+   - Lihat §"Cara melanjutkan (batch 3)" di header untuk command persis.
 
-1. **Setelah isolasi terpasang: run ulang sweep dari nol (150 run) di lingkungan Docker** — karena komparabilitas, batch 1–4 (Windows) **tidak bisa dilanjutkan** kalau shell berubah. Estimasi ~$10–15, 20+ jam.
-   Eksperimen: **buat baru** (jangan lanjutkan `EXP-20261004-034` yang Windows). Resep per batch:
-   ```
-   python tools/clean_repos.py          # WAJIB antar-batch
-   python tools/run_final_sweep.py --limit <N naik> --resume --exp-id <EXP-id>
-   python tools/check_semantic_cache.py --exp <EXP-id>   # verdict nyata
-   ```
-   ⚠️ **`--limit` diukur dalam ISSUE dari awal dataset**, jadi tiap batch **naikkan N**
-   (10 → 20 → 30 → 40 → 50). `--limit 10` di batch ke-2 dst = "Nothing to do".
-   ⚠️ **`--only M` TIDAK BISA menambah issue baru** — hanya menambal run yang belum
-   selesai di issue yang sudah terekam. Untuk menambah issue, **naikkan `--limit`**.
-   ⚠️ **Re-run issue terdampak TIDAK otomatis** — `--resume` men-skip run yang selesai;
-   perlu hapus baris savepoint mereka dulu, atau eksperimen baru.
-
-2. **Setelah sweep selesai:**
+1. **Setelah semua batch selesai: evaluasi Modal** — ini yang menentukan **resolved rate** (RQ1).
    - `python tools/check_sweep_state.py --exp <EXP-id>` — setiap run hadir?
    - Evaluasi Modal → `python tools/eval_modal.py ...`
    - `python tools/read_actual_bill.py --since ... --until ... --model cbai/deepseek-v4.1-flash --compare results/<EXP-id>` — RQ3, cross-check biaya.
@@ -2000,17 +2083,17 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
      Keduanya beda ~5× dan mengukur hal berbeda — lihat §"Koreksi penting: token".
      Jendela bill ada di `logs/sweep_started.json` → `attempts` (satu per attempt).
 
-3. **Masalah validitas review (78% → 12,5%)** — **sudah dikoreksi**, tidak perlu keputusan lagi. Angka sebenarnya: **1 dari 8 (12,5%)** penolakan yang bergantung pada file test. Lihat §"Koreksi" baris 276-304.
+2. **Masalah validitas review (78% → 12,5%)** — **sudah dikoreksi**, tidak perlu keputusan lagi. Angka sebenarnya: **1 dari 8 (12,5%)** penolakan yang bergantung pada file test. Lihat §"Koreksi" baris 276-304.
 
-4. **Ablation reviewer (opsional, untuk tesis):** `review` tanpa ronde review = `planning`. Kalau ketiga strategi seri di 50 issue, ablation ini memisahkan "review berguna" dari "review tidak berpengaruh".
+3. **Ablation reviewer (opsional, untuk tesis):** `review` tanpa ronde review = `planning`. Kalau ketiga strategi seri di 50 issue, ablation ini memisahkan "review berguna" dari "review tidak berpengaruh".
 
-5. **`11019`** sudah dijawab — **tapi jawabannya bergantung regime.** Tanpa thinking:
+4. **`11019`** sudah dijawab — **tapi jawabannya bergantung regime.** Tanpa thinking:
    **batas kapabilitas** (0 truncation, act berhenti di ~20% anggaran, patch VALID tapi
    salah semantik). Dengan thinking **ON** (yang dipakai sweep final): **resolved di
    ketiga strategi**. Jadi **jangan** laporkan sebagai "tidak bisa diselesaikan" —
    menyelesaikannya adalah **temuan RQ1**. Tidak perlu run tambahan.
 
-6. **M3 — SELESAI** (commit berikutnya). Jalankan sweep **bertahap** dengan
+5. **M3 — SELESAI** (commit berikutnya). Jalankan sweep **bertahap** dengan
    **prefix `--limit` yang tumbuh**:
    ```
    # staging: lanjut ke issue baru — naikkan --limit tiap batch
@@ -2024,5 +2107,5 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
    Wajib didampingi `--resume`. Scope `--only` dibatasi ke issue yang sudah ada di EXP.
    Lihat §"M3 — Sweep bertahap: `--limit <N naik> --resume`".
 
-7. **⚠️ Kalau menguji flag baru: pakai `--dry-run` DULU.** Jangan jalankan pada
+6. **⚠️ Kalau menguji flag baru: pakai `--dry-run` DULU.** Jangan jalankan pada
    direktori eksperimen nyata — lihat pelajaran #25.
