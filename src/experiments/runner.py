@@ -444,11 +444,18 @@ def _load_existing_ids(jsonl_path: str) -> set[str]:
             grouped.setdefault(_resume_key(iid, model, thinking), []).append(entry)
 
     for key, entries in grouped.items():
+        # Infrastructure first, patch second. A SANDBOX_DOWN run KEEPS its patch
+        # (see the 2026-10-07 detection below, runner.py:1301) precisely so an
+        # evaluator can still score it, but that patch is work done WITHOUT test
+        # feedback. Testing the patch first would put every such key into
+        # ``ids`` and skip it forever -- freezing exactly the contaminated runs
+        # --resume is meant to redo. The row's status, not its patch, decides
+        # retryability.
+        if any(_is_infrastructure_failure(e) for e in entries):
+            continue                         # always retryable, patch or not
         if any((e.get("model_patch") or "").strip() for e in entries):
             ids.add(key)                     # finished (1)
             continue
-        if any(_is_infrastructure_failure(e) for e in entries):
-            continue                         # always retryable
         attempts = _no_patch_attempts(entries)
         if attempts >= _MAX_NO_PATCH_ATTEMPTS:
             ids.add(key)                     # option D: budget used up (2)
