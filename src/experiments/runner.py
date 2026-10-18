@@ -401,20 +401,37 @@ def _load_existing_ids(jsonl_path: str) -> set[str]:
 
     Each key is ``instance_id|model|thinking`` (see ``_resume_key``).
 
-    A key is returned (= "--resume may skip it") when EITHER:
+    PRECEDENCE -- the three rules are evaluated per key, in this order, and the
+    FIRST one that matches decides. This ordering is the contract; a key can hold
+    rows of several kinds at once, so "which rule wins when they disagree" has to
+    be stated, not implied:
 
-    1. some row produced a patch -- the run plainly finished; or
-    2. the key has already used up its no-diff retries
-       (``_MAX_NO_PATCH_ATTEMPTS`` rows with no patch and no ``error_type``).
+    1. **A genuine outcome wins.** If ANY row has a non-empty patch AND is not an
+       infrastructure death, the key is DONE and returned (``--resume`` skips it).
+       This outranks rule 2: earlier infra rows do NOT un-finish later success.
+       Regression this guards (verified on production data):
+       EXP-20261012-005 matplotlib__matplotlib-23563 has a PROVIDER_ERROR row
+       (patchlen 0) then a VALID row (patchlen 928), and EXP-20261002-542
+       django__django-11001/review has INTERRUPTED (patchlen 0) then VALID
+       (patchlen 552). Both must skip; a version that checked infrastructure first
+       re-ran the paid-for successes -- and because the evaluator dedups on the
+       LAST row (tools/eval_modal.py), the worse retry could replace the good one.
+    2. **Otherwise, infrastructure deaths stay retryable.** If no row qualifies
+       under rule 1 and ANY row is an infrastructure death, the key is NOT
+       returned -- it stays retryable however many times it died, which is the
+       entire point of --resume. Measured on EXP-20260929-022 django-11019/review,
+       a 502. This rule is what keeps SANDBOX_DOWN correct: such a run KEEPS its
+       patch (see the 2026-10-07 detection in the runner), but that patch is work
+       done WITHOUT test feedback, so rule 1 refuses it (the row IS an infra death)
+       and this rule re-runs it instead of freezing the contamination.
+    3. **Else the bounded no-patch budget.** If every row is a no-patch OUTCOME,
+       the key is returned once it has used up ``_MAX_NO_PATCH_ATTEMPTS`` such rows
+       (no patch, no ``error_type``).
 
-    Case 2 is option "D" of docs/PLAN_RESUME_FIX_20261002.md. Before it, ANY empty
+    Rule 3 is option "D" of docs/PLAN_RESUME_FIX_20261002.md. Before it, ANY empty
     patch was retried forever. Measured on this repo: 299 (strategy x instance)
     combinations are no-diff outcomes, so every resume re-ran all of them. One
     retry keeps the recovery chance and bounds that leak.
-
-    A key whose rows are infrastructure deaths is NEVER returned -- it stays
-    retryable no matter how many times it has died, which is the entire point of
-    --resume. Measured on EXP-20260929-022 django-11019/review, a 502.
 
     The count is deliberately per FILE (one strategy), matching how the runner
     looks it up: it calls this once per strategy with that strategy's jsonl.
@@ -444,21 +461,36 @@ def _load_existing_ids(jsonl_path: str) -> set[str]:
             grouped.setdefault(_resume_key(iid, model, thinking), []).append(entry)
 
     for key, entries in grouped.items():
-        # Infrastructure first, patch second. A SANDBOX_DOWN run KEEPS its patch
-        # (see the 2026-10-07 detection below, runner.py:1301) precisely so an
-        # evaluator can still score it, but that patch is work done WITHOUT test
-        # feedback. Testing the patch first would put every such key into
-        # ``ids`` and skip it forever -- freezing exactly the contaminated runs
-        # --resume is meant to redo. The row's status, not its patch, decides
-        # retryability.
-        if any(_is_infrastructure_failure(e) for e in entries):
-            continue                         # always retryable, patch or not
-        if any((e.get("model_patch") or "").strip() for e in entries):
-            ids.add(key)                     # finished (1)
+        # Precedence, decided per key (the contract is spelled out in the
+        # docstring). The ORDER is the whole fix:
+        #
+        # 1. A real outcome wins. "Real" = a non-empty patch on a row that is NOT
+        #    an infrastructure death. Test this FIRST: a key whose earlier rows
+        #    died and whose later row succeeded is FINISHED. An earlier version
+        #    tested infrastructure first, so a PROVIDER_ERROR row re-ran the
+        #    success that followed it (EXP-20261012-005:
+        #    matplotlib__matplotlib-23563, PROVIDER_ERROR row 8, VALID row 11 with
+        #    a 928-char patch -- paid-for work run again).
+        if any(
+            (e.get("model_patch") or "").strip()
+            and not _is_infrastructure_failure(e)
+            for e in entries
+        ):
+            ids.add(key)                     # finished by a genuine outcome (1)
             continue
+        # 2. Otherwise infra deaths keep the key retryable. A SANDBOX_DOWN run
+        #    KEEPS its patch (see the 2026-10-07 detection below,
+        #    runner.py:1332-1350) precisely so an evaluator can still score it, but
+        #    that patch is work done WITHOUT test feedback. Its patch is non-empty
+        #    yet it must NOT be retired here -- step 1 already excluded it because
+        #    the row IS an infrastructure death, and this branch keeps it retryable
+        #    however many times it died.
+        if any(_is_infrastructure_failure(e) for e in entries):
+            continue                         # always retryable, patch or not (2)
+        # 3. No outcome at all: fall back to the bounded no-patch retry budget.
         attempts = _no_patch_attempts(entries)
         if attempts >= _MAX_NO_PATCH_ATTEMPTS:
-            ids.add(key)                     # option D: budget used up (2)
+            ids.add(key)                     # option D: budget used up (3)
             if attempts > _MAX_NO_PATCH_ATTEMPTS:
                 logger.warning(
                     f"Resume: {key} has {attempts} no-patch attempts, more than the "
