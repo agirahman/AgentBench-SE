@@ -990,5 +990,13 @@ def test_live_single_call_returns_text():
                                    role="live-check")
     except (openai.APIConnectionError, openai.APITimeoutError) as exc:
         pytest.skip(f"9router endpoint unavailable: {exc}")
+    except openai.APIStatusError as exc:
+        # 410 ModelDeprecated / 404 model-not-found mean the configured live model
+        # is gone, not that the provider is broken: the docstring's contract is
+        # "skipped (never failed)". Every other status (5xx, 429, 400) is a real
+        # failure and must surface.
+        if exc.status_code in (404, 410):
+            pytest.skip(f"live model unavailable (deprecated or removed): {exc}")
+        raise
 
     assert result.response.strip(), "the model answered with no text"
