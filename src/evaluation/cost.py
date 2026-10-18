@@ -172,6 +172,29 @@ class PricingTable:
             "currency": "USD",
             "pricing_version": "2026-08-16",
         },
+        # The OFFICIAL DeepSeek model id, and what the sweep route actually
+        # calls. `deepseek-v4-flash` is the 9router spelling; `deepseek-flash`
+        # is the name api.deepseek.com/v1 lists. CostCalculator prices on
+        # inference.model, so without this entry every final-run row reports
+        # $0.00 and RQ3 (the cost comparison) is empty -- silently, because the
+        # readiness gate does not check rate cards. The rates are the official
+        # DeepSeek card, kept identical to `deepseek-v4-flash` above so the two
+        # spellings of one model price the same. This is a REAL charge, not the
+        # dummy/estimate card PRICING_MODEL_OVERRIDE produces.
+        "deepseek-flash": {
+            "off_peak": {
+                "input_per_million": 0.22,
+                "cached_input_per_million": 0.007,
+                "output_per_million": 0.66,
+            },
+            "peak": {
+                "input_per_million": 0.44,
+                "cached_input_per_million": 0.014,
+                "output_per_million": 1.32,
+            },
+            "currency": "USD",
+            "pricing_version": "2026-08-16",
+        },
         # CommandCode-routed models. Same underlying DeepSeek model, different
         # provider route, so the official DeepSeek rate card is applied as a
         # DUMMY pricing (non-zero) so cost metrics are never $0 in reports.

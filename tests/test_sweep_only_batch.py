@@ -1002,11 +1002,16 @@ def test_build_cmd_refuses_an_unknown_route():
         mod.build_cmd(["i"], ["direct"], True, route="metaa")
 
 
-def test_default_route_is_meta():
-    """The no-flag default must stay the route the sweep was measured on."""
+def test_default_route_is_deepseek():
+    """The no-flag default must be the route the sweep now runs on.
+
+    Was `meta` (oc/muse-spark); the sweep moved to DeepSeek official, whose
+    model is `deepseek-flash`. The invariant is the same either way: the
+    module-level MODEL must stay in step with the DEFAULT route.
+    """
     mod = _load_sweep_module()
-    assert mod.DEFAULT_ROUTE == "meta"
-    assert mod.MODEL == mod.ROUTES["meta"]["model"], (
+    assert mod.DEFAULT_ROUTE == "deepseek"
+    assert mod.MODEL == mod.ROUTES["deepseek"]["model"], (
         "the module-level MODEL must stay in step with the default route"
     )
 

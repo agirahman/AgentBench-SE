@@ -7,7 +7,7 @@ drift). Every knob is passed explicitly through tools/run_with_env.py.
 
 The model
 ---------
-Two routes are available and `--route` selects one. A route is a BUNDLE --
+Routes are available and `--route` selects one. A route is a BUNDLE --
 model, provider, the env var that provider reads, and the rate card the cost
 guard prices with -- because the dangerous failure is a MIX of the two
 (recording model A while calling model B). The resume key is
@@ -15,13 +15,18 @@ guard prices with -- because the dangerous failure is a MIX of the two
 outstanding and re-runs it for real money; main() therefore REFUSES a resume
 whose route disagrees with the experiment's own experiment.yaml.
 
-`meta` (default): `oc/muse-spark-1.3-contributor-free` (Meta's muse-spark,
+`deepseek` (default): `deepseek-flash` on DeepSeek OFFICIAL
+(api.deepseek.com/v1), served by the `deepseek` provider. The model name is the
+one the official endpoint lists; the 9router spelling `deepseek-v4-flash` is not
+a model there. Its rate card is the official DeepSeek card (src/evaluation/cost.py).
+
+`meta`: `oc/muse-spark-1.3-contributor-free` (Meta's muse-spark,
 contributor tier), served over the RESPONSES API by the `meta` provider. This
 route is NOT Chat-Completions compatible: measured directly against 9router
 (2026-10-09), chat.completions.create returns HTTP 200 with
 finish_reason="in_progress", empty content and total_tokens=0 -- an empty answer
 with no error -- while responses.create completes with working tool calling.
-Running the sweep on the Chat Completions path would have produced 150 silent
+Running a sweep on the Chat Completions path would have produced 150 silent
 empty runs.
 
 `opencode`: `cbai/deepseek-v4.1-flash`, served over Chat Completions by the
@@ -29,8 +34,8 @@ empty runs.
 paid runs used (RQ3, EXP-20260930-030); its rate card is MEASURED from the
 9router bill (src/evaluation/cost.py).
 
-The muse-spark model id does NOT appear in GET /v1/models (9router lists only
-part of its catalogue), so the listing is not used as an availability check
+The meta muse-spark model id does NOT appear in GET /v1/models (9router lists
+only part of its catalogue), so the listing is not used as an availability check
 anywhere.
 
 What is deliberately different from the earlier 3-issue runs
@@ -131,9 +136,19 @@ ROUTES: dict[str, dict[str, str]] = {
         "env_key": "OPENCODE_MODEL",
         "guard_model": "cbai/deepseek-v4.1-flash-billed",
     },
+    # DeepSeek OFFICIAL (api.deepseek.com/v1), not a proxy. The model name is
+    # `deepseek-flash` -- the 9router spelling `deepseek-v4-flash` is not a model
+    # the official endpoint lists. The guard card stays keyed on the 9router
+    # name because that is the rate card this project reports against.
+    "deepseek": {
+        "model": "deepseek-flash",
+        "provider": "deepseek",
+        "env_key": "DEEPSEEK_MODEL",
+        "guard_model": "deepseek-v4-flash",
+    },
 }
 #: Route used when --route is not given. The final sweep's measured route.
-DEFAULT_ROUTE = "meta"
+DEFAULT_ROUTE = "deepseek"
 #: The model the DEFAULT route calls, kept as a module-level name because
 #: tests and tools (check_effective_model.py) refer to it directly.
 MODEL = ROUTES[DEFAULT_ROUTE]["model"]
@@ -491,6 +506,12 @@ def build_cmd(
         # would use .env's model while every other check passed), so the pair is
         # pinned together in ROUTES rather than chosen independently here.
         "--set", f"{r['env_key']}={r['model']}",
+        # The master switch for the whole tool mechanism. Config.TOOLCALL_ENABLED
+        # defaults to FALSE, so leaving it to .env meant tools were on only
+        # because that file happened to say true: a drifted .env would collapse
+        # every strategy to single-shot with no error, and the readiness gate
+        # does not check it. Pinned for the same reason as every knob below.
+        "--set", "TOOLCALL_ENABLED=true",
         "--set", f"TOTAL_TOOL_TURNS={TOTAL_TURNS}",
         "--set", "BUDGET_MODE=per_task",
         "--set", f"BUDGET_FLOOR_PER_ACT={FLOOR}",
