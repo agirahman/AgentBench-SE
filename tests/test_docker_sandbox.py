@@ -1,6 +1,7 @@
 """Tests for Docker sandbox isolation, path translation, and preflight guards."""
 from __future__ import annotations
 
+import importlib
 import re
 import subprocess
 import sys
@@ -22,6 +23,7 @@ from agents.tools import (
     set_repo_root,
 )
 from providers.system_prompts import (
+    READONLY_GIT_DIFF_TOOL_SYSTEM_PROMPT,
     READONLY_TOOL_SYSTEM_PROMPT,
     TOOL_SYSTEM_PROMPT,
     get_readonly_system_prompt,
@@ -285,15 +287,111 @@ class TestReadonlySystemPromptsDocker:
         assert "POSIX (Linux)" not in prompt
         assert "You may NOT modify files" in prompt
 
-    def test_module_level_readonly_constant_matches_the_helper(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_module_level_readonly_constant_matches_the_helper(self) -> None:
         """The imported constant is built at import time; pin it against the helper.
 
         A test that only called the helper could pass while the shipped constant
         (what the agents actually receive) was stale or hand-edited.
+
+        The constant is FROZEN at import, using whatever ``SANDBOX_MODE`` the
+        process had then. Calling ``monkeypatch.setenv`` afterwards cannot change
+        it, so the old version of this test compared a local-mode constant against a
+        docker-mode helper and failed whenever the suite ran with
+        ``SANDBOX_MODE=local``. The frozen mode is therefore read off the constant
+        itself (the POSIX hint is present iff it was built in docker mode) and the
+        helper is asked for THAT mode -- deterministic under any ambient env, and it
+        still catches a stale or hand-edited constant.
         """
+        built_in_docker = "POSIX (Linux)" in READONLY_TOOL_SYSTEM_PROMPT
+        expected = get_readonly_system_prompt("docker" if built_in_docker else "local")
+        assert READONLY_TOOL_SYSTEM_PROMPT == expected
+        if built_in_docker:
+            assert "intentionally unavailable/masked by design" in READONLY_TOOL_SYSTEM_PROMPT
+
+    def test_readonly_prompt_names_git_diff_only_for_roles_that_have_it(self) -> None:
+        """planner's tool set has no git_diff; reviewer's does. The hint must match.
+
+        Telling a role to use a tool it does not have is the defect class this
+        read-only framing exists to avoid (see system_prompts.py). The tool sets are
+        read from AGENT_TOOLS rather than hard-coded, so this cannot drift from the
+        real wiring.
+        """
+        from agents.tools import AGENT_TOOLS
+
+        planner = get_readonly_system_prompt(
+            "docker", has_git_diff="git_diff" in AGENT_TOOLS["planner"]
+        )
+        reviewer = get_readonly_system_prompt(
+            "docker", has_git_diff="git_diff" in AGENT_TOOLS["reviewer"]
+        )
+
+        assert "git_diff" not in planner, "planner has no git_diff tool but is told to use it"
+        assert "git_diff" in reviewer, "reviewer has git_diff but its prompt never points at it"
+        # The masked-git rule must reach BOTH roles: both burn turns hunting .git.
+        assert "intentionally unavailable/masked by design" in planner
+        assert "intentionally unavailable/masked by design" in reviewer
+        assert "POSIX (Linux)" in planner and "POSIX (Linux)" in reviewer
+        assert "You may NOT modify files" in planner
+        assert "You may NOT modify files" in reviewer
+
+    def test_agent_wiring_selects_the_prompt_by_real_tool_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """End-to-end: the prompt each role ACTUALLY receives matches its tool set.
+
+        The constants are pinned here so the assertion is independent of the
+        shell's ``SANDBOX_MODE`` at import time; what is under test is which of them
+        ``BaseAgent.act`` hands to the planner versus the reviewer.
+        """
+        planner = self._system_prompt_for("planner", monkeypatch)
+        reviewer = self._system_prompt_for("reviewer", monkeypatch)
+
+        assert "git_diff" not in planner
+        assert "intentionally unavailable/masked by design" in planner
+        assert "git_diff" in reviewer
+        assert "intentionally unavailable/masked by design" in reviewer
+        assert planner != reviewer
+
+    @staticmethod
+    def _system_prompt_for(role: str, monkeypatch: pytest.MonkeyPatch) -> str:
+        """Drive one real agent's ``act`` and return the system prompt it used."""
+        from agents.blackboard import Blackboard
+        from agents.messages import AgentMessage
+        from models.inference import InferenceResult
+        from models.issue import Issue
+
         monkeypatch.setenv("SANDBOX_MODE", "docker")
-        assert READONLY_TOOL_SYSTEM_PROMPT == get_readonly_system_prompt()
-        assert "intentionally unavailable/masked by design" in READONLY_TOOL_SYSTEM_PROMPT
+        # Pin the frozen constants to docker-built ones, so the test does not depend
+        # on the ambient mode at import time.
+        monkeypatch.setattr(
+            "agents.base.READONLY_TOOL_SYSTEM_PROMPT", get_readonly_system_prompt("docker")
+        )
+        monkeypatch.setattr(
+            "agents.base.READONLY_GIT_DIFF_TOOL_SYSTEM_PROMPT",
+            get_readonly_system_prompt("docker", has_git_diff=True),
+        )
+        monkeypatch.setattr("agents.base.TOOL_SYSTEM_PROMPT", get_tool_system_prompt("docker"))
+
+        captured: list[str] = []
+
+        class _CapturingProvider:
+            def generate_with_tools(self, prompt, role="", tools=None, system_prompt="", **kwargs):
+                captured.append(system_prompt)
+                return InferenceResult(role=role, response="done")
+
+            def generate(self, prompt, role=""):
+                return InferenceResult(role=role, response="done")
+
+        agent_cls = {
+            "planner": "PlannerAgent",
+            "reviewer": "ReviewerAgent",
+        }[role]
+        module = importlib.import_module(f"agents.{role}_agent")
+        agent = getattr(module, agent_cls)(_CapturingProvider())
+        agent.use_tools = True
+        task = AgentMessage(sender="orchestrator", receiver=role, content="issue")
+        context = Blackboard(issue=Issue("x", "psf/requests", "abc", "fix it"), plan="p", patch="d")
+        agent.act(task, context)
+        assert captured, f"the {role} agent made no tool-calling call"
+        return captured[-1]
 
 
 class TestSandboxCanRunTests:

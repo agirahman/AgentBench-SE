@@ -6,10 +6,11 @@ from config import Config
 from models.inference import InferenceResult
 from agents.messages import AgentMessage
 from agents.blackboard import Blackboard
-from agents.tools import get_tools_for_agent
+from agents.tools import AGENT_TOOLS, get_tools_for_agent
 from providers.system_prompts import (
     TOOL_SYSTEM_PROMPT,
     READONLY_TOOL_SYSTEM_PROMPT,
+    READONLY_GIT_DIFF_TOOL_SYSTEM_PROMPT,
     EDITING_ROLES as _EDITING_ROLES,
 )
 from utils.prompt_loader import load_prompt_or_default, load_prompt, prompt_exists
@@ -128,11 +129,19 @@ class BaseAgent(ABC):
         context.bb_ops = []
 
         if self.use_tools and hasattr(self.provider, "generate_with_tools"):
-            system_prompt = (
-                TOOL_SYSTEM_PROMPT
-                if self.name in _EDITING_ROLES
-                else READONLY_TOOL_SYSTEM_PROMPT
-            )
+            # The read-only prompt names git_diff only for roles whose REAL tool
+            # set contains it (read_file/grep/list_files -> planner; +git_diff ->
+            # reviewer). Telling a role to use a tool it does not have is the same
+            # defect class this whole block avoids for editing instructions.
+            if self.name in _EDITING_ROLES:
+                system_prompt = TOOL_SYSTEM_PROMPT
+            else:
+                has_git_diff = "git_diff" in AGENT_TOOLS.get(self.name, ())
+                system_prompt = (
+                    READONLY_GIT_DIFF_TOOL_SYSTEM_PROMPT
+                    if has_git_diff
+                    else READONLY_TOOL_SYSTEM_PROMPT
+                )
             inference = self.provider.generate_with_tools(
                 prompt,
                 role=self.name,
