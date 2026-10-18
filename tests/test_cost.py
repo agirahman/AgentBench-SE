@@ -40,6 +40,43 @@ def test_deepseek_pricing_off_peak_structure():
     assert pricing["pricing_version"] == "2026-08-16"
 
 
+def test_deepseek_flash_alias_prices_like_the_original_card():
+    """`deepseek-flash` is the official model id the sweep route actually calls.
+
+    CostCalculator prices on ``inference.model``, and the route records
+    ``deepseek-flash``. Without an alias card here, every final-run row would
+    report $0.00 -- silently, since no readiness check reads the rate table --
+    and RQ3 (the cost comparison) would be empty. The rates must be non-zero AND
+    identical to the ``deepseek-v4-flash`` card for BOTH windows, so the two
+    spellings of one model cannot drift apart.
+    """
+    original = PricingTable.get("deepseek-v4-flash")
+    alias = PricingTable.get("deepseek-flash")
+    assert alias is not None, "the official model name has no rate card"
+    assert original is not None
+
+    for window in ("off_peak", "peak"):
+        rates = PricingTable.rates_for("deepseek-flash", window)
+        assert rates["input_per_million"] > 0, f"{window} input priced at $0"
+        assert rates["output_per_million"] > 0, f"{window} output priced at $0"
+        assert rates == PricingTable.rates_for("deepseek-v4-flash", window), (
+            f"{window}: the alias drifted from the deepseek-v4-flash card"
+        )
+
+    # The same token counts must cost the same under either spelling.
+    alias_cost = CostCalculator().calculate(
+        _inference(model="deepseek-flash", prompt=1000, completion=500, cached=700)
+    )
+    original_cost = CostCalculator().calculate(
+        _inference(model="deepseek-v4-flash", prompt=1000, completion=500, cached=700)
+    )
+    assert alias_cost.total_cost_usd > 0
+    assert alias_cost.total_cost_usd == pytest.approx(original_cost.total_cost_usd)
+    assert alias_cost.peak_total_cost_usd == pytest.approx(
+        original_cost.peak_total_cost_usd
+    )
+
+
 def test_rates_for_flat_model_uses_same_card():
     off = PricingTable.rates_for("tencent/hy3", "off_peak")
     peak = PricingTable.rates_for("tencent/hy3", "peak")

@@ -144,9 +144,12 @@ class Config:
     )
 
     DEEPSEEK_API_KEY = _get_env("DEEPSEEK_API_KEY")
+    # The official DeepSeek API (api.deepseek.com/v1) lists its models as
+    # `deepseek-flash` and `deepseek-v4-pro`; `deepseek-v4-flash` is a 9router
+    # spelling and returns no such model on the official endpoint.
     DEEPSEEK_MODEL = _get_env(
         "DEEPSEEK_MODEL",
-        "deepseek-v4-flash",
+        "deepseek-flash",
     )
 
     TEMPERATURE = _get_float_env("TEMPERATURE", 0.2)

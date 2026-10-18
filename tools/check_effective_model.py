@@ -70,6 +70,7 @@ def read_model(env_overrides: dict[str, str], attr: str) -> str:
 _ENV_KEY_TO_ATTR = {
     "META_MODEL": "META_MODEL",
     "OPENCODE_MODEL": "OPENCODE_MODEL",
+    "DEEPSEEK_MODEL": "DEEPSEEK_MODEL",
 }
 
 

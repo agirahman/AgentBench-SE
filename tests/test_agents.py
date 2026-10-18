@@ -126,6 +126,76 @@ def test_build_agent_team_returns_four_agents(provider):
         assert agent.provider is provider
 
 
+class ToolsCapableProvider(DummyProvider):
+    """Stands in for a provider that implements generate_with_tools.
+
+    The registry keys tool mode off ``hasattr(provider, "generate_with_tools")``,
+    so the attribute's PRESENCE is what matters, not its body.
+    """
+
+    def generate_with_tools(self, prompt, role="", **kwargs):  # pragma: no cover
+        raise NotImplementedError
+
+
+def test_build_agent_team_enables_tools_when_provider_supports_them(monkeypatch):
+    """A tool-capable provider + TOOLCALL_ENABLED must turn use_tools on.
+
+    This is the pin for the DeepSeek regression: DeepSeekProvider lacked
+    generate_with_tools, so `--provider deepseek` silently disabled tools for
+    every agent and collapsed all strategies to single-shot.
+    """
+    import agents.registry as registry
+
+    monkeypatch.setattr(registry.Config, "TOOLCALL_ENABLED", True)
+    team = build_agent_team(ToolsCapableProvider())
+
+    assert all(agent.use_tools for agent in team.values()), (
+        "a provider with generate_with_tools and TOOLCALL_ENABLED=true must "
+        "activate tool mode for every agent"
+    )
+
+
+def test_build_agent_team_leaves_tools_off_for_a_provider_without_the_method(monkeypatch):
+    """The other half: a provider WITHOUT generate_with_tools must not be told
+    to use tools, or every act would reach a method that does not exist."""
+    import agents.registry as registry
+
+    monkeypatch.setattr(registry.Config, "TOOLCALL_ENABLED", True)
+    team = build_agent_team(DummyProvider())
+
+    assert not any(agent.use_tools for agent in team.values())
+
+
+def test_build_agent_team_enables_tools_for_the_real_deepseek_provider(monkeypatch):
+    """The regression this ticket fixes, pinned on the REAL provider class.
+
+    `--provider deepseek` used to disable tools silently because
+    DeepSeekProvider had no generate_with_tools: the registry's hasattr check
+    was False, so every agent stayed single-shot and the strategies measured a
+    degraded pipeline rather than the strategy. Constructed via __new__ so no
+    DEEPSEEK_API_KEY and no network call is needed -- hasattr reads the class.
+    """
+    import agents.registry as registry
+    from providers.deepseek_provider import DeepSeekProvider
+
+    monkeypatch.setattr(registry.Config, "TOOLCALL_ENABLED", True)
+    provider = DeepSeekProvider.__new__(DeepSeekProvider)
+
+    assert hasattr(provider, "generate_with_tools")
+    team = build_agent_team(provider)
+    assert all(agent.use_tools for agent in team.values())
+
+
+def test_build_agent_team_leaves_tools_off_when_disabled(monkeypatch):
+    """TOOLCALL_ENABLED=false switches tools off even for a capable provider."""
+    import agents.registry as registry
+
+    monkeypatch.setattr(registry.Config, "TOOLCALL_ENABLED", False)
+    team = build_agent_team(ToolsCapableProvider())
+
+    assert not any(agent.use_tools for agent in team.values())
+
+
 def test_blackboard_log_appends_messages(bb):
     msg = AgentMessage(sender="executor", receiver="reviewer", content="x")
     bb.log(msg)

@@ -1,4 +1,5 @@
 import time
+from typing import Optional
 
 from openai import OpenAI
 
@@ -7,6 +8,9 @@ from utils.logger import logger
 from models.inference import InferenceResult
 from evaluation.retry import with_retry
 from providers.response_utils import build_openai_inference_result
+from providers.tool_loop import run_tool_loop
+from providers.system_prompts import TOOL_SYSTEM_PROMPT
+from agents.tools import TOOL_SCHEMAS
 
 
 class DeepSeekProvider:
@@ -24,6 +28,22 @@ class DeepSeekProvider:
         self.user_id = ""
 
         logger.info(f"DeepSeek model : {self.model}")
+
+    def _extra_body(self) -> dict:
+        """Reasoning/thinking passthrough, shared by both call paths.
+
+        Attached only when DEEPSEEK_THINKING is enabled, so the
+        thinking-vs-nothinking comparison is real at the API level. The
+        ``user_id`` (when set) rides along here too, so the single-shot and
+        tool-calling paths cannot drift apart.
+        """
+        extra: dict = {}
+        if Config.DEEPSEEK_THINKING:
+            extra["thinking"] = {"type": "enabled"}
+            extra["reasoning_effort"] = Config.DEEPSEEK_REASONING_EFFORT
+        if self.user_id:
+            extra["user_id"] = self.user_id
+        return extra
 
     @with_retry(
         retry_on=lambda r: (
@@ -44,14 +64,8 @@ class DeepSeekProvider:
                 "max_tokens": Config.MAX_TOKENS,
                 "response_format": {"type": "json_object"},
             }
-            if Config.DEEPSEEK_THINKING:
-                kwargs["extra_body"] = {
-                    "thinking": {"type": "enabled"},
-                    "reasoning_effort": Config.DEEPSEEK_REASONING_EFFORT,
-                }
-            if self.user_id:
-                extra_body = kwargs.get("extra_body") or {}
-                extra_body["user_id"] = self.user_id
+            extra_body = self._extra_body()
+            if extra_body:
                 kwargs["extra_body"] = extra_body
             response = self.client.chat.completions.create(**kwargs)
 
@@ -73,6 +87,48 @@ class DeepSeekProvider:
 
         except Exception as e:
             logger.error(f"DeepSeek Generate Error: {e}")
+            raise
+
+    # ------------------------------------------------------------------
+    # Tool-calling loop.
+    #
+    # No @with_retry here on purpose: retrying this function restarts the whole
+    # conversation when one request times out, which discards the exploration
+    # and hands out a fresh tool-turn budget. Retry is per request, inside the
+    # loop.
+    # ------------------------------------------------------------------
+    def generate_with_tools(
+        self,
+        prompt: str,
+        role: str = "",
+        tools: Optional[list] = None,
+        max_tool_turns: Optional[int] = None,
+        max_cost_usd: Optional[float] = None,
+        repo_root: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+    ) -> InferenceResult:
+        """Run a tool-calling conversation and return the final answer.
+
+        Delegates to the shared loop in ``providers.tool_loop`` so this provider
+        and the others cannot drift apart. The final ``result.response`` is the
+        LAST assistant text (tool messages excluded); every executed call is in
+        ``result.tool_calls`` for the artifact trail.
+        """
+        try:
+            return run_tool_loop(
+                self.client,
+                model=self.model,
+                prompt=prompt,
+                role=role,
+                tools=tools or TOOL_SCHEMAS,
+                max_tool_turns=max_tool_turns,
+                max_cost_usd=max_cost_usd,
+                repo_root=repo_root,
+                extra_body=self._extra_body() or None,
+                system_prompt=system_prompt or TOOL_SYSTEM_PROMPT,
+            )
+        except Exception as e:
+            logger.error(f"DeepSeek Tool Generate Error: {e}")
             raise
 
     def health_check(self) -> bool:
