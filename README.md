@@ -17,7 +17,7 @@
 
 ## Tentang Proyek
 
-AgentBench-SE adalah eksperimen perangkat lunak yang membandingkan tiga strategi orkestrasi agent dalam menyelesaikan isu *bug fixing* Python. Setiap strategi memakai model AI yang sama (tencent/hy3) sehingga perbedaan hasil murni dipengaruhi oleh struktur orkestrasi.
+AgentBench-SE adalah eksperimen perangkat lunak yang membandingkan tiga strategi orkestrasi agent dalam menyelesaikan isu *bug fixing* Python. Setiap strategi memakai model AI yang sama (DeepSeek official `deepseek-flash`) sehingga perbedaan hasil murni dipengaruhi oleh struktur orkestrasi.
 
 Tujuan riset:
 
@@ -39,7 +39,7 @@ flowchart LR
     C1 --> T
     C2 --> T
     C3 --> T
-    T --> P[Provider: tencent/hy3 via OpenRouter]
+    T --> P[Provider: deepseek-flash via DeepSeek official]
     P --> D[Patch + Messages + Metadata]
     D --> E[results/csv/experiment_results.csv]
     D --> F[results/predictions/predictions.jsonl]
@@ -79,7 +79,7 @@ AgantBech-SE/
 │   │   ├── executor_agent.py   # ExecutorAgent (S2, S3 + revisi)
 │   │   ├── reviewer_agent.py   # ReviewerAgent (S3)
 │   │   └── registry.py         # build_agent_team(provider)
-│   ├── providers/              # OpenRouter, Gemini, Groq, OpenCode
+│   ├── providers/              # DeepSeek official (utama), OpenRouter, Gemini, Groq, OpenCode
 │   ├── strategies/             # Direct, Planning, Review (komposisi agent_team)
 │   ├── experiments/            # Runner + SWE-bench adapter + observability
 │   ├── evaluation/             # Cost, retry, statistics, evaluator
@@ -103,8 +103,8 @@ AgantBech-SE/
 - Python 3.10+
 - pip
 - (Opsional) Docker Desktop — hanya bila ingin menjalankan SWE-bench harness evaluasi
-- API key untuk OpenRouter:
-  - `OPENROUTER_API_KEY` (utama — model: `tencent/hy3`)
+- API key untuk DeepSeek official:
+  - `DEEPSEEK_API_KEY` (utama — model: `deepseek-flash`)
 
 ## Instalasi
 
@@ -121,15 +121,17 @@ pip install -r requirements.txt
 Buat file `.env` di root proyek:
 
 ```env
-OPENROUTER_API_KEY=your_openrouter_key
-OPENROUTER_MODEL=tencent/hy3:free
+DEEPSEEK_API_KEY=your_deepseek_key
+DEEPSEEK_MODEL=deepseek-flash
 
 TEMPERATURE=0.2
 MAX_RETRIES=3
 ```
 
 > [!NOTE]
-> Untuk konsistensi riset, eksperimen utama memakai OpenRouter (`tencent/hy3`).
+> Untuk konsistensi riset, eksperimen utama memakai DeepSeek official (`deepseek-flash`
+> via `https://api.deepseek.com/v1`). Provider DeepSeek mendukung **tool-calling**
+> (`generate_with_tools()`), dan itulah jalur yang dipakai run final.
 
 > [!IMPORTANT]
 > **Biaya dilaporkan dalam USD.** Kurs `USD_IDR_RATE` tidak lagi dibaca pipeline,
@@ -177,7 +179,7 @@ Opsi CLI:
 | Argumen | Default | Keterangan |
 |:--------|:--------|:-----------|
 | `--output` | `results` | Direktori output |
-| `--provider` | `gemini` | `gemini`, `groq`, `opencode`, `openrouter`, `deepseek`, `commandcode` |
+| `--provider` | `gemini` | `gemini`, `groq`, `opencode`, `meta`, `openrouter`, `deepseek`, `commandcode` |
 | `--issues` | (semua 50) | Batas jumlah issue untuk testing |
 | `--resume` | `False` | Lanjutkan dari run sebelumnya |
 | `--rate-limit` | `1.5` | Delay antar strategi (detik). Nilai ini benar-benar dipakai; jitter kecil ditambahkan otomatis |
@@ -236,6 +238,14 @@ python -m swebench.harness.run_evaluation `
 > Build image Docker untuk SWE-bench butuh 30-60 menit dan RAM besar. Lewati langkah ini bila hanya butuh metrik internal (execution time, token, inference count).
 
 ## Hasil Eksperimen
+
+> [!NOTE]
+> Run final memakai model **berbayar** `deepseek-flash` (DeepSeek official), dan biaya
+> diambil dari **kartu harga resmi DeepSeek** yang terpasang di
+> `src/evaluation/cost.py` (alias `deepseek-flash`, tarif identik `deepseek-v4-flash`:
+> 0.22/0.007/0.66 per 1M token off-peak; 0.44/0.014/1.32 peak). Ini **charge nyata**,
+> bukan estimasi `PRICING_MODEL_OVERRIDE` — itulah yang membuat RQ3 dapat diisi.
+> Run final **belum dijalankan**; saldo DeepSeek belum dipakai.
 
 Metrik yang dikumpulkan per strategi per issue:
 
