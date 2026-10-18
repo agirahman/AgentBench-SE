@@ -19,18 +19,37 @@ import os
 EDITING_ROLES = frozenset({"direct", "executor"})
 
 # The sandbox is a different world from the host, so the agent must be told which
-# one it is in. Split into two parts on purpose: the read-only roles (planner,
-# reviewer) need the environment half (POSIX + the deliberately masked .git) but
-# must NOT receive the dependency half, which tells the reader to run the tests
-# and install wheels -- an instruction they are not allowed to carry out.
-_SANDBOX_ENV_HINT = (
+# one it is in. Split on purpose: the read-only roles (planner, reviewer) need the
+# environment half (POSIX + the deliberately masked .git) but must NOT receive the
+# dependency half, which tells the reader to run the tests and install wheels -- an
+# instruction they are not allowed to carry out.
+#
+# The environment half is itself split, because ONE sentence in it names a TOOL
+# (git_diff, which runs on the host). Not every read-only role carries that tool:
+# planner's tool set is read_file/grep/list_files only (agents.tools.AGENT_TOOLS),
+# while reviewer's includes git_diff. Telling a role to use a tool it does not have
+# is the same defect class this module avoids elsewhere (see the read-only framing
+# below), so the git_diff sentence is a separate piece handed out only to the roles
+# whose tool set actually contains it.
+_SANDBOX_POSIX_HINT = (
     "The execution sandbox is POSIX (Linux): use grep/ls/cat, not findstr/dir/type. "
-    "Absolute Windows paths are not valid there. Git is not installed in the sandbox — "
-    "use the git_diff tool (runs on host) to inspect changes. "
+    "Absolute Windows paths are not valid there. "
+)
+
+_SANDBOX_GIT_DIFF_HINT = (
+    "Git is not installed in the sandbox — use the git_diff tool (runs on host) "
+    "to inspect changes. "
+)
+
+_SANDBOX_MASKED_GIT_HINT = (
     "Git history is intentionally unavailable/masked by design: do NOT search for "
     ".git directories, git repositories, or git history, and do not try to unmount "
     "them — such searches waste turns; solve the issue from the source code alone. "
 )
+
+# The editors' env half: POSIX + git_diff (direct/executor all carry it) + the
+# masked-git rule.
+_SANDBOX_ENV_HINT = _SANDBOX_POSIX_HINT + _SANDBOX_GIT_DIFF_HINT + _SANDBOX_MASKED_GIT_HINT
 
 _SANDBOX_DEPS_HINT = (
     "The sandbox HAS this repo's common dependencies pre-installed, so run the tests. "
@@ -113,14 +132,33 @@ _READONLY_BASE = (
 )
 
 
-def get_readonly_system_prompt(sandbox_mode: str | None = None) -> str:
-    """Read-only variant: same env hint as the editors, no write/test instruction."""
+def get_readonly_system_prompt(
+    sandbox_mode: str | None = None, *, has_git_diff: bool = False
+) -> str:
+    """Read-only variant: same env hint as the editors, no write/test instruction.
+
+    ``has_git_diff`` must reflect the role's REAL tool set. The env hint's git_diff
+    sentence names a TOOL, and only direct/executor/reviewer carry it -- planner's
+    set is read_file/grep/list_files (agents.tools.AGENT_TOOLS). A role told to use
+    a tool it does not have is the defect class this read-only framing exists to
+    avoid, so the sentence is handed out only when the tool is actually present.
+    """
     mode = (sandbox_mode or os.environ.get("SANDBOX_MODE", "docker")).strip().lower()
-    hint = _SANDBOX_ENV_HINT if mode == "docker" else ""
+    hint = ""
+    if mode == "docker":
+        hint = _SANDBOX_POSIX_HINT
+        if has_git_diff:
+            hint += _SANDBOX_GIT_DIFF_HINT
+        hint += _SANDBOX_MASKED_GIT_HINT
     return _READONLY_BASE + hint + "You may NOT modify files. Do not describe what you are about to do; do it."
 
 
+# Read-only role WITHOUT git_diff (planner): POSIX + masked git, no git_diff line.
 READONLY_TOOL_SYSTEM_PROMPT = get_readonly_system_prompt()
+
+# Read-only role WITH git_diff (reviewer). Separate constant so the two cannot
+# drift into telling a role to use a tool it does not have.
+READONLY_GIT_DIFF_TOOL_SYSTEM_PROMPT = get_readonly_system_prompt(has_git_diff=True)
 
 # Single-shot path (no tools sent at all). The previous text told the model to
 # "use the provided tools" even here, where none existed — so it narrated tool
