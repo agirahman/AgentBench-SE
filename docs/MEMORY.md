@@ -1,11 +1,76 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-10-15 (batch 3 sympy: 7/30 — DISTOP setelah run ke-7, lanjut sesi berikutnya)
-**Status:** ✅ **20/50 issue SELESAI** — batch 1 (django, `EXP-20261010-062`) dan batch 2 (matplotlib, `EXP-20261012-005`) keduanya **30/30 VALID**. Batch 3 (sympy, `EXP-20261015-001`) **berjalan sebagian: 7/30 tercatat** (3 VALID + 4 PROVIDER_ERROR upstream 16:15-16:30; run ke-8 dihentikan setelah ~4 jam). Gate **READY 13/13**, preflight **50/50 pristine**, **1245 test lulus, 1 skipped** (mode local MAUPUN `SANDBOX_MODE=docker`). Detail: §"SWEEP BATCH 1 & 2 SELESAI" + §"BATCH 3 (sympy)" di bawah. Handoff sesi: [`HANDOFF_20261015.md`](HANDOFF_20261015.md).
-**Active Branch:** `22/feat/sandbox-isolation`
-**Commit terakhir:** `035cc7e` (Update MEMORY.md: batches 1-2 done), `8435126` (Drop agent scratch files from submitted patches, both paths), `505fc09` (`--route` bundle meta | opencode), `fa2fe4b` (Meta Responses provider + silent-failure class ditutup di kedua loop), `8446eb1` (Meta rate card), `c6c7ae3` (image hygiene + command guard)
+**Last Updated:** 2026-10-18 (peralihan route ke DeepSeek official `deepseek-flash`; batch 3 sympy tetap 7/30 — DISTOP, lanjut sesi berikutnya)
+**Status:** ✅ **20/50 issue SELESAI** — batch 1 (django, `EXP-20261010-062`) dan batch 2 (matplotlib, `EXP-20261012-005`) keduanya **30/30 VALID**. Batch 3 (sympy, `EXP-20261015-001`) **berjalan sebagian: 7/30 tercatat** (3 VALID + 4 PROVIDER_ERROR upstream 16:15-16:30; run ke-8 dihentikan setelah ~4 jam). Riset kini beralih ke **DeepSeek official `deepseek-flash`** (sweep `DEFAULT_ROUTE = "deepseek"`): gate **ready efektif 13/13** (12/13 PASS di lane; `disk budget` hijau di checkout utama — lihat §"Status readiness terukur"), preflight **50/50 pristine**, **1263 test lulus, 3 skipped** (mode local MAUPUN `SANDBOX_MODE=docker`). Detail: §"Peralihan ke DeepSeek official" + §"SWEEP BATCH 1 & 2 SELESAI" + §"BATCH 3 (sympy)" di bawah. Handoff sesi: [`HANDOFF_20261015.md`](HANDOFF_20261015.md).
+**Active Branch:** `30/fix/docs-deepseek-final` (base `22/feat/sandbox-isolation`)
+**Commit terakhir:** 🔸 **perubahan sesi ini BELUM di-commit** (working tree modifikasi saja). Branch head = `53008a3` (Merge branch `26/fix/planner-hint-and-test` ke `22/feat/sandbox-isolation`); commit sebelumnya di branch ini: `267ab22` (Fix over-broad resume precedence), `ff84ccf` (git_diff hint hanya untuk role read-only), `8522244` (Record batch 3 partial run 7/30 sympy), `035cc7e` (Update MEMORY.md: batches 1-2 done), `8435126` (Drop agent scratch files from submitted patches, both paths), `505fc09` (`--route` bundle meta | opencode), `fa2fe4b` (Meta Responses provider + silent-failure class ditutup di kedua loop), `8446eb1` (Meta rate card)
 **Handoff sesi terakhir:** [`HANDOFF_20261015.md`](HANDOFF_20261015.md) · sebelumnya [`HANDOFF_20261006.md`](HANDOFF_20261006.md) · [`HANDOFF_20261002.md`](HANDOFF_20261002.md)
 **Detail audit:** [`AUDIT_OPS_PARTNER.md`](AUDIT_OPS_PARTNER.md) · [`AUDIT_SCALE_PARTNER.md`](AUDIT_SCALE_PARTNER.md) · [`AUDIT_PROMPTS_PARTNER.md`](AUDIT_PROMPTS_PARTNER.md) · [`AUDIT_RUN_TESTS_PARTNER.md`](AUDIT_RUN_TESTS_PARTNER.md) · [`RESEARCH_BUDGET_20260929.md`](RESEARCH_BUDGET_20260929.md)
+
+---
+
+## 🔄 Peralihan ke DeepSeek official (`deepseek-flash`) — 2026-10-18
+
+**Ringkasan:** riset beralih ke **DeepSeek official** (`https://api.deepseek.com/v1`), model
+`deepseek-flash`, **dengan tool-calling aktif**. Sweep punya route baru **`deepseek`** dan
+`DEFAULT_ROUTE = "deepseek"` (`tools/run_final_sweep.py`). Route lama `meta` dan `opencode`
+tetap ada. Perubahan kode sudah diterapkan di branch `30/fix/docs-deepseek-final`
+(**belum di-commit**), dan **run final belum dijalankan**; saldo DeepSeek belum dipakai.
+
+| Aspek | Sebelum | Sesudah |
+|---|---|---|
+| Provider default sweep | `meta` (`oc/muse-spark-1.3-contributor-free` via Responses API) | **`deepseek`** (`deepseek-flash` official) |
+| Env var model (default route) | `META_MODEL` | **`DEEPSEEK_MODEL`** (default `deepseek-flash`) |
+| Guard card (default route) | `oc/muse-spark-1.3-contributor-free` | **`deepseek-v4-flash`** |
+| `TOOLCALL_ENABLED` | terserah `.env` (default config `false`) | **di-pin `true`** oleh sweep |
+| Kartu harga `deepseek-flash` | **tidak ada** → biaya `$0.00` | **alias resmi**, tarif identik `deepseek-v4-flash` |
+
+### 🕳️ Tiga kegagalan senyap yang ditutup
+
+1. **Provider tanpa `generate_with_tools` → tool-calling mati senyap.** `DeepSeekProvider`
+   dulu tidak punya `generate_with_tools()`, padahal `src/agents/registry.py` memakai gate
+   `hasattr(provider, "generate_with_tools")` (baris 16). Tanpa method itu, gate **mematikan
+   tool-calling untuk SEMUA agent tanpa error apa pun** → semua strategi kolaps jadi
+   single-shot. Sekarang `DeepSeekProvider.generate_with_tools()` ada dan mendelegasi ke
+   `providers.tool_loop.run_tool_loop`.
+   **Pelajaran:** `hasattr`-gate **tidak pernah gagal keras** — ia hanya diam dan mengubah
+   perilaku. Tambah method = tambah jalur; pastikan gate-nya sadar, bukan senyap.
+2. **Nama model resmi tanpa kartu harga → biaya `$0.00` senyap, RQ3 kosong.** `PricingTable`
+   dulunya hanya punya `deepseek-v4-flash` (ejaan 9router), bukan `deepseek-flash` (nama resmi
+   `api.deepseek.com/v1`). `CostCalculator` mem-price dari `inference.model`, jadi setiap baris
+   run final tercatat **$0.00** dan perbandingan biaya RQ3 kosong — **dan gate tetap hijau**
+   karena tidak ada satu pun readiness check yang membaca tabel harga. Sekarang ada alias
+   `deepseek-flash` dengan tarif identik (0.22/0.007/0.66 off-peak; 0.44/0.014/1.32 peak)
+   — **charge nyata**, bukan estimasi `PRICING_MODEL_OVERRIDE`.
+   **Pelajaran:** menyelaraskan nama model **harus** disertai menyelaraskan kartu harga.
+   Nama yang salah tidak error, hanya menghasilkan biaya nol.
+3. **`TOOLCALL_ENABLED` tidak di-pin sweep.** Sebelumnya hanya `.env` yang menyalakannya,
+   padahal default `Config.TOOLCALL_ENABLED` adalah `false`. `.env` yang drift → semua strategi
+   single-shot tanpa error, dan gate tidak memeriksanya. Sekarang
+   `tools/run_final_sweep.py` mem-pass `--set TOOLCALL_ENABLED=true` eksplisit (baris 514).
+
+### 🔧 Dua gate readiness yang diperbaiki
+
+- **`network block` salah menguji.** `tools/verify_network_block.py` dulu memakai mode ambient
+  (`SANDBOX_MODE` dari environment), bukan mode eksplisit — jadi verifier-nya yang salah, bukan
+  guard-nya. Sekarang menguji **`mode="local"` DAN `mode="docker"` eksplisit**, sehingga
+  hasilnya tidak bergantung pada `SANDBOX_MODE` ambient.
+- **Test live `test_live_single_call_returns_text` FAIL.** Kini **skip** pada HTTP **410**
+  (model-deprecated) dan **404** (model-not-found) — kontraknya memang "skipped, never failed",
+  sedangkan 5xx/429/400 tetap naik sebagai kegagalan nyata.
+
+### ✅ Status readiness terukur
+
+- **12/13 gate PASS** di lane ini. Gate ke-13 (`disk budget`) **exit 0 di checkout utama** —
+  ia hanya FAIL di lane karena `results/EXP-*` gitignored (lane kosong → `IndexError`).
+  Jadi **13/13 efektif**.
+- **Suite: 1263 passed, 3 skipped** (test live kini skip, bukan FAIL).
+
+### 🚧 Batasan (tetap berlaku)
+
+- **Saldo DeepSeek $1 belum dipakai.** Provider sudah disiapkan, belum ada panggilan berbayar.
+- **CommandCode belum siap** (tidak ada API key / belum subs) — hanya disiapkan, tidak diuji.
+- **Run final belum dijalankan.** Batch 3 (7/30 sympy) adalah uji pipeline, **tidak di-resume**.
 
 ---
 
@@ -2001,9 +2066,10 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 | Key | Nilai | Catatan |
 |---|---|---|
+| `DEEPSEEK_MODEL` | `deepseek-flash` | **model resmi DeepSeek official** (`https://api.deepseek.com/v1`) yang dipakai route `deepseek`. Sweep mem-pin ini lewat env var route (`--set DEEPSEEK_MODEL=deepseek-flash`). Ejaan 9router `deepseek-v4-flash` **bukan** nama model di endpoint resmi |
 | `OPENCODE_MODEL` | `oc/space-bunny-free` | **model gratis** — untuk smoke test. **Sweep meng-override ke `cbai/deepseek-v4.1-flash` (berbayar) lewat `--set`**; RQ3 butuh yang berbayar |
 | `OPENCODE_BASE_URL` | `http://localhost:20128/v1` | 9router harus hidup |
-| `TOOLCALL_ENABLED` | `true` | edit-then-diff |
+| `TOOLCALL_ENABLED` | `true` | edit-then-diff. **Sweep kini mem-pin `true` eksplisit** (`--set TOOLCALL_ENABLED=true`); sebelumnya hanya `.env` yang menyalakannya padahal default config `false` |
 | `TOTAL_TOOL_TURNS` | `200` | pool per strategi: direct 200; planning 190+10; review 152+48 |
 | `MAX_TOOL_TURNS` | `20` | fallback per-act, hanya jika TOTAL=0 |
 | `BUDGET_MODE` | `per_task` | **eksplisit** (dulu tidak diset → default `per_act`, beda dari sweep) |
@@ -2021,7 +2087,7 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 | Key | Default | Kenapa tidak diset |
 |---|---|---|
-| `PRICING_MODEL_OVERRIDE` | `""` | diisi hanya saat mau menghargai token model gratis dengan rate card berbayar (**estimasi**) |
+| `PRICING_MODEL_OVERRIDE` | `""` | diisi hanya saat mau menghargai token model gratis dengan rate card berbayar (**estimasi**). **Tetap kosong** untuk route `deepseek`: kartu harga `deepseek-flash` sudah jadi alias resmi di `PricingTable` (`src/evaluation/cost.py`), jadi biaya dihitung **langsung** dari kartu resmi — bukan override/estimasi |
 
 > **Catatan:** `tools/run_final_sweep.py` mem-pass **semua** nilai di atas lewat
 > `run_with_env.py --set`, jadi sweep tidak bergantung pada `.env`. Nilai di `.env`
@@ -2131,16 +2197,21 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 ---
 
-**Last working state (2026-10-15):** commit `8435126` — **1245 test lulus, 1 skipped**, gate **READY 13/13**. **20/50 issue SELESAI** dengan isolasi Docker: batch 1 django (`EXP-20261010-062`, 30/30 VALID) + batch 2 matplotlib (`EXP-20261012-005`, 30/30 VALID). Isolasi Docker (layer-2) **TERPASANG & TERVERIFIKASI** (21 probe escape 100% BLOCKED, lihat §"Implementasi Penuh: Docker Sandbox").
+**Last working state (2026-10-15):** commit `8435126` — **1245 test lulus, 1 skipped** (angka **historis** 2026-10-15; angka terkini **1263 lulus, 3 skipped**, lihat header), gate **READY 13/13** saat itu. **20/50 issue SELESAI** dengan isolasi Docker: batch 1 django (`EXP-20261010-062`, 30/30 VALID) + batch 2 matplotlib (`EXP-20261012-005`, 30/30 VALID). Isolasi Docker (layer-2) **TERPASANG & TERVERIFIKASI** (21 probe escape 100% BLOCKED, lihat §"Implementasi Penuh: Docker Sandbox").
 
 **Langkah berikutnya (prioritas):**
 
-0. **⏭️ BATCH 3 — lanjutkan sweep (20/50 → 50/50 issue):**
-   - Sisa **30 issue**: sympy (10) + scikit-learn (10) + requests (6) + seaborn (4).
-   - Resep: `clean_repos.py` → `preflight_repos.py` (Docker WAJIB hidup) → launch.
-   - **Route: `--route opencode`** (`cbai/deepseek-v4.1-flash`, berbayar — sama seperti batch 1 lanjutan & batch 2).
-   - Estimasi ~$2,5-4 per 10-issue batch. **Eksperimen BARU** (jangan lanjutkan EXP lama).
-   - Lihat §"Cara melanjutkan (batch 3)" di header untuk command persis.
+0. **⏭️ RUN FINAL — route `deepseek` (DeepSeek official `deepseek-flash`):**
+   - Sweep kini default ke route **`deepseek`** (`DEFAULT_ROUTE = "deepseek"`), model resmi
+     `deepseek-flash` via `https://api.deepseek.com/v1`, dengan tool-calling aktif.
+   - **Saldo DeepSeek $1 BELUM dipakai** — provider sudah disiapkan, **belum ada panggilan
+     berbayar**. Menunggu keputusan user sebelum run final dijalankan.
+   - **Run final belum dijalankan.** Batch 3 (7/30 sympy) adalah uji pipeline, **tidak
+     di-resume**.
+   - Resep bila dijalankan: `clean_repos.py` → `preflight_repos.py` (Docker WAJIB hidup) →
+     `tools/run_final_sweep.py` (route default `deepseek`). Estimasi biaya mengacu kartu
+     resmi `deepseek-flash` (0.22/0.007/0.66 off-peak; 0.44/0.014/1.32 peak per 1M token).
+   - **CommandCode belum siap** (tidak ada API key / belum subs) — hanya disiapkan, tidak diuji.
 
 1. **Setelah semua batch selesai: evaluasi Modal** — ini yang menentukan **resolved rate** (RQ1).
    - `python tools/check_sweep_state.py --exp <EXP-id>` — setiap run hadir?
