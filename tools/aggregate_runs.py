@@ -80,7 +80,7 @@ def aggregate(runs: list[pd.DataFrame], metrics: list[str]) -> pd.DataFrame:
                 elif metric == "generation_success_rate":
                     values.append((sub["error"].fillna("").str.len() == 0).mean())
                 elif metric in sub.columns and pd.api.types.is_numeric_dtype(sub[metric]):
-                    values.append(sub[metric].sum() if metric in ("cost_usd_offpeak", "cost_usd_actual", "cost_idr_offpeak", "cost_idr_actual", "execution_time", "total_tokens") else sub[metric].mean())
+                    values.append(sub[metric].sum() if metric in ("cost_usd_offpeak", "cost_usd_actual", "execution_time", "total_tokens") else sub[metric].mean())
                 else:
                     continue
             if not values:

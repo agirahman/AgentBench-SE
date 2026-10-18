@@ -18,7 +18,10 @@ from evaluation.statistics import (
 
 @pytest.fixture
 def sample_df():
-    """4 rows = 2 strategies × 2 issues, mix of success/error."""
+    """4 rows = 2 strategies × 2 issues, mix of success/error.
+
+    USD only: the pipeline carries no IDR columns, so none appear here.
+    """
     return pd.DataFrame(
         [
             {
@@ -28,7 +31,6 @@ def sample_df():
                 "inference_count": 1,
                 "total_tokens": 500,
                 "cost_usd": 0.001,
-                "cost_idr": 16.5,
                 "error": "",
                 "patch_status": "VALID",
             },
@@ -39,7 +41,6 @@ def sample_df():
                 "inference_count": 1,
                 "total_tokens": 600,
                 "cost_usd": 0.002,
-                "cost_idr": 33.0,
                 "error": "timeout",
                 "patch_status": "MALFORMED_HEADER",
             },
@@ -50,7 +51,6 @@ def sample_df():
                 "inference_count": 2,
                 "total_tokens": 1200,
                 "cost_usd": 0.004,
-                "cost_idr": 66.0,
                 "error": "",
                 "patch_status": "VALID",
             },
@@ -61,12 +61,26 @@ def sample_df():
                 "inference_count": 2,
                 "total_tokens": 1500,
                 "cost_usd": 0.005,
-                "cost_idr": 82.5,
                 "error": "",
                 "patch_status": "NORMALIZE",
             },
         ]
     )
+
+
+@pytest.fixture
+def legacy_df_with_idr(sample_df):
+    """A CSV from the OLD pipeline: it still has ``*_idr*`` columns.
+
+    The 5 real batches on disk look like this. The IDR figures were computed with
+    whatever rate .env held at the time, so they must be IGNORED — reading them
+    would mix two rates in one table. The USD column is the source of truth.
+    """
+    df = sample_df.copy()
+    df["cost_idr"] = [16.5, 33.0, 66.0, 82.5]
+    df["cost_idr_offpeak"] = [16.5, 33.0, 66.0, 82.5]
+    df["cost_idr_actual"] = [16.5, 33.0, 66.0, 82.5]
+    return df
 
 
 class TestSuccessRate:
@@ -170,7 +184,7 @@ def test_summary_md_handles_all_failed_strategy(tmp_path):
     df = pd.DataFrame([
         {"instance_id": "a", "strategy": "direct", "execution_time": 1.0,
          "inference_count": 1, "total_tokens": 10, "cost_usd_offpeak": 0.001,
-         "cost_idr_offpeak": 16.5, "error": "429 rate limit",
+         "error": "429 rate limit",
          "patch_status": "TIMEOUT", "apply_status": "UNKNOWN"},
     ])
     out = tmp_path / "summary.md"
@@ -178,6 +192,58 @@ def test_summary_md_handles_all_failed_strategy(tmp_path):
     text = out.read_text(encoding="utf-8")
     assert "n/a" in text
     assert "Patch Applicability" in text
+
+
+def test_cost_per_success_has_no_idr_columns(sample_df):
+    """The pipeline emits USD only — no IDR column in the computed table."""
+    cps = compute_cost_per_success(sample_df)
+    idr_cols = [c for c in cps.columns if "idr" in c.lower()]
+    assert idr_cols == [], (
+        f"compute_cost_per_success still emits IDR columns {idr_cols}; the rate "
+        f"must be applied at reporting time (tools/convert_to_idr.py --rate)"
+    )
+
+
+def test_legacy_idr_columns_are_ignored_not_used(legacy_df_with_idr, sample_df):
+    """Old CSVs still carry IDR columns; they must not change any USD result.
+
+    The 5 batches on disk were converted with whatever rate .env held then, so
+    those figures are not comparable with each other. Reading them would silently
+    mix rates, so the USD column is the only source of truth.
+    """
+    modern = compute_cost_per_success(sample_df)
+    legacy = compute_cost_per_success(legacy_df_with_idr)
+    pd.testing.assert_frame_equal(modern, legacy)
+
+
+def test_statistics_json_records_no_exchange_rate(tmp_path, sample_df):
+    """statistics.json must not freeze a rate: it is chosen at reporting time."""
+    import json
+
+    out = tmp_path / "statistics.json"
+    export_statistics_json(sample_df, str(out))
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert "usd_idr_rate" not in data["pricing"], (
+        "statistics.json carries an exchange rate, so a batch is frozen to a rate "
+        "and batches become incomparable"
+    )
+
+
+def test_summary_md_reports_usd_and_points_to_the_conversion_tool(tmp_path, sample_df):
+    """The summary is USD-only, and must tell the reader how to get IDR."""
+    out = tmp_path / "summary.md"
+    generate_summary_md(sample_df, str(out))
+    text = out.read_text(encoding="utf-8")
+    assert "Rp" not in text, (
+        "the summary still prints Rp figures, which would carry a rate chosen at "
+        "sweep time"
+    )
+    assert "Exchange Rate" not in text, (
+        "the summary still prints an exchange rate, which would freeze a batch to it"
+    )
+    assert "convert_to_idr.py" in text, (
+        "the summary must point the reader to the explicit conversion tool"
+    )
 
 
 def test_applyability_rate_counts_only_strictly_applyable(sample_df):

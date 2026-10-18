@@ -414,7 +414,7 @@ def _experiment_result(hit: bool):
     run = InferenceRun(patch="", inferences=[inf])
     cost = CostSummary(
         input_cost_usd=0.0, output_cost_usd=0.0, total_cost_usd=0.0,
-        total_cost_idr=0.0, semantic_cache_hit=hit,
+        semantic_cache_hit=hit,
         semantic_cache_cost_saved_usd=0.01 if hit else 0.0,
     )
     return ExperimentResult(

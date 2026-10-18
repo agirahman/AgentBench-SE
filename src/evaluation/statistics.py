@@ -133,8 +133,14 @@ def compute_cost_per_success(df: pd.DataFrame) -> pd.DataFrame:
     Uses the window-aware ``cost_usd_actual`` (real rate per WIB peak/off-peak)
     while still surfacing the off-peak and peak extremes for reference.
 
+    USD only. Any IDR figure is produced explicitly at reporting time by
+    ``tools/convert_to_idr.py``, so every batch is converted with the SAME rate
+    instead of whatever ``.env`` held when each batch ran.
+
     Accepts every cost-column generation so that CSVs written before the
-    ``cost_usd`` → ``cost_usd_offpeak`` rename remain readable.
+    ``cost_usd`` → ``cost_usd_offpeak`` rename remain readable. Legacy CSVs still
+    contain ``*_idr*`` columns; they are ignored rather than read, because those
+    figures were converted with a rate that may differ from the one being used now.
     """
     df = _ensure_strategy_column(_ensure_error_column(df))
     if df.empty:
@@ -142,14 +148,8 @@ def compute_cost_per_success(df: pd.DataFrame) -> pd.DataFrame:
     total_cost_usd = _cost_col(
         df, "cost_usd_actual", "actual_cost_usd", "cost_usd_offpeak", "cost_usd"
     )
-    total_cost_idr = _cost_col(
-        df, "cost_idr_actual", "actual_cost_idr", "cost_idr_offpeak", "cost_idr"
-    )
     peak_cost_usd = _cost_col(
         df, "cost_usd_peak", "cost_usd_peak_total", "peak_total_cost_usd"
-    )
-    peak_cost_idr = _cost_col(
-        df, "cost_idr_peak", "cost_idr_peak_total", "peak_total_cost_idr"
     )
     off_cost_usd = _cost_col(df, "cost_usd_offpeak", "cost_usd")
     if "resolved" in df.columns:
@@ -164,13 +164,10 @@ def compute_cost_per_success(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "total_cost_usd": total_cost_usd,
-            "total_cost_idr": total_cost_idr,
             "off_peak_total_cost_usd": off_cost_usd,
             "peak_total_cost_usd": peak_cost_usd,
-            "peak_total_cost_idr": peak_cost_idr,
             "success_count": success_cnt,
             "cost_usd_per_success": total_cost_usd / safe,
-            "cost_idr_per_success": total_cost_idr / safe,
         }
     )
 
@@ -299,8 +296,13 @@ def compute_api_requests(df: pd.DataFrame) -> pd.Series:
     return df.groupby("strategy")["total_turns"].sum()
 
 
-def export_statistics_json(df: pd.DataFrame, out_path: str, pricing: dict | None = None, usd_idr_rate: float = 16500.0) -> None:
-    """Serialize computed metrics to a statistics.json file."""
+def export_statistics_json(df: pd.DataFrame, out_path: str, pricing: dict | None = None) -> None:
+    """Serialize computed metrics to a statistics.json file.
+
+    No exchange rate is recorded: the pipeline is USD-only, and the rate is chosen
+    at reporting time (``tools/convert_to_idr.py --rate``). Storing one here would
+    freeze a batch to a rate and make batches incomparable.
+    """
     df = _ensure_strategy_column(df)
     model_name = df["model"].iloc[0] if "model" in df.columns and len(df) else "unknown"
     inp_rate, cached_rate, out_rate, ver = _pricing_rates(pricing)
@@ -324,7 +326,6 @@ def export_statistics_json(df: pd.DataFrame, out_path: str, pricing: dict | None
             "input_per_1m": inp_rate,
             "cached_input_per_1m": cached_rate,
             "output_per_1m": out_rate,
-            "usd_idr_rate": usd_idr_rate,
         },
     }
     with open(out_path, "w", encoding="utf-8") as f:
@@ -359,15 +360,14 @@ def _usd(x) -> str:
         return "n/a"
 
 
-def _idr(x) -> str:
-    try:
-        return f"Rp{float(x):,.0f}"
-    except (TypeError, ValueError):
-        return "n/a"
+def generate_summary_md(df: pd.DataFrame, out_path: str, pricing: dict | None = None) -> None:
+    """Write a Markdown summary (tables) to *out_path*.
 
-
-def generate_summary_md(df: pd.DataFrame, out_path: str, pricing: dict | None = None, usd_idr_rate: float = 16500.0) -> None:
-    """Write a Markdown summary (tables) to *out_path*."""
+    USD only. This used to print an exchange rate and Rp figures, which meant the
+    summary carried whatever rate was in ``.env`` at the time — a value that
+    differed from Config's default and made batches incomparable. IDR now comes
+    from ``tools/convert_to_idr.py --rate``, which records the rate and date it used.
+    """
     df = _ensure_strategy_column(df)
     sr = compute_success_rate(df)
     ati = compute_avg_time_per_inference(df)
@@ -393,8 +393,7 @@ def generate_summary_md(df: pd.DataFrame, out_path: str, pricing: dict | None = 
         f.write(f"- Pricing Source: {pricing_ver}\n")
         f.write(f"- Input (regular): ${inp_rate:.2f}/1M tokens\n")
         f.write(f"- Input (cache hit): ${cached_rate:.3f}/1M tokens\n")
-        f.write(f"- Output: ${out_rate:.2f}/1M tokens\n")
-        f.write(f"- Exchange Rate: 1 USD = Rp{usd_idr_rate:,.0f}\n\n")
+        f.write(f"- Output: ${out_rate:.2f}/1M tokens\n\n")
 
         f.write("## Success Rate (Patch Generation)\n\n")
         f.write(_df_to_md_table(sr.to_frame(name="success_rate")))
@@ -412,29 +411,24 @@ def generate_summary_md(df: pd.DataFrame, out_path: str, pricing: dict | None = 
         if not cps_out.empty:
             fmt_cols = {
                 "total_cost_usd": _usd,
-                "total_cost_idr": _idr,
                 "off_peak_total_cost_usd": _usd,
                 "peak_total_cost_usd": _usd,
-                "peak_total_cost_idr": _idr,
                 "cost_usd_per_success": _usd,
-                "cost_idr_per_success": _idr,
             }
             for col, fn in fmt_cols.items():
                 if col in cps_out.columns:
                     cps_out[col] = cps_out[col].apply(fn)
             cps_out = cps_out.rename(columns={
                 "total_cost_usd": "total_spend_usd",
-                "total_cost_idr": "total_spend_idr",
                 "cost_usd_per_success": "avg_usd_per_success",
-                "cost_idr_per_success": "avg_idr_per_success",
             })
             total_usd = cps["total_cost_usd"].sum()
-            total_idr = cps["total_cost_idr"].sum()
         else:
             total_usd = 0.0
-            total_idr = 0.0
         f.write(_df_to_md_table(cps_out))
-        f.write(f"\n\n**Total Spend: ${total_usd:.6f} (Rp{total_idr:,.0f})**\n")
+        f.write(f"\n\n**Total Spend: ${total_usd:.6f}**\n")
+        f.write("\n> Costs are in USD. For IDR, convert explicitly with a single rate "
+                "for every batch: `python tools/convert_to_idr.py --all --rate <kurs>`.\n")
 
         f.write("\n\n## Cache Hit Rate\n\n")
         f.write(_df_to_md_table(chr_.to_frame(name="cache_hit_rate")))

@@ -92,9 +92,15 @@ for cap, label in ((200, "if the cap is reached"), (100, "if runs stop early, as
 print(f"\n  Wall clock:")
 print(f"    measured at pool 40: {sec_per_run_40:.0f}s/run ({sec_per_run_40 * 150 / 3600:.1f}h for 150)")
 for cap in (100, 200):
-    # Turns scale ~linearly, so time does too, but capped by the act timeout.
+    # Turns scale ~linearly, so time does too. The old 3x ceiling assumed the
+    # 3600s act timeout; that bound was REMOVED 2026-10-06, so there is now no
+    # synthetic ceiling. The same 3x FACTOR is kept so the comparison stays
+    # apples-to-apples with earlier estimates, but treat it as a heuristic, not
+    # an enforced bound: a healthy long act at pool 200 can exceed 3x the pool-40
+    # time (a measured 502 took ~6,000s for ONE act), so these projections are
+    # now more uncertain than before.
     factor = cap / 40
-    est = sec_per_run_40 * min(factor, 3.0)  # 3x = the act timeout ceiling
+    est = sec_per_run_40 * min(factor, 3.0)  # 3x is now a heuristic, not a bound
     print(f"    at pool {cap}: ~{est:.0f}s/run -> ~{est * 150 / 3600:.1f}h for 150 runs")
 
 print()

@@ -17,6 +17,15 @@ _FAILURE_STATUSES = (
     "PROVIDER_ERROR",
     "ERROR",
     "FAILED",
+    # Every run_tests call failed at the sandbox (daemon down / image missing).
+    # The agent had no way to run a test, so this run does not measure the
+    # strategy and must not be reported as an ordinary empty patch. Measured on
+    # EXP-20261007-003, where 9 such runs were all reported VALID.
+    "SANDBOX_DOWN",
+    # An act made no progress for STALL_TIMEOUT_SECONDS; the tool loop abandoned
+    # a wedged connection. Its own bucket because it is neither a budget problem
+    # (TIMEOUT) nor a provider error -- it is a connection that stopped moving.
+    "STALLED",
 )
 
 
@@ -110,8 +119,9 @@ def build_experiment_manifest(
                 ),
                 "semantic_cache_hit_turns": r.cost.semantic_cache_hit_turns,
                 "cost": {
+                    # USD only: the exchange rate is a presentation choice, so the
+                    # pipeline does not carry one (see tools/convert_to_idr.py).
                     "total_usd": round(r.cost.total_cost_usd, 6),
-                    "total_idr": round(r.cost.total_cost_idr, 2),
                     "total_usd_off_peak": round(r.cost.total_cost_usd, 6),
                     "total_usd_peak": round(r.cost.peak_total_cost_usd, 6),
                 },

@@ -24,6 +24,7 @@ redirect, and the partner's first attempt produced 13 false writes from ``->`` i
 a printed string.
 """
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -33,6 +34,40 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from agents import tools as T  # noqa: E402
+
+
+def _docker_daemon_alive() -> bool:
+    """True when the real Docker daemon answers. Used only to SKIP, never to pass."""
+    try:
+        proc = subprocess.run(
+            ["docker", "info"], capture_output=True, text=True, timeout=15
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def _sandbox_image_present() -> bool:
+    try:
+        proc = subprocess.run(
+            ["docker", "image", "inspect", "agentbench-sandbox:latest"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+#: The three tests below execute a real command through run_tests, which in the
+#: default (docker) mode needs a live daemon plus the built sandbox image.
+#: Without it they FAIL on infrastructure, not on the property they pin.
+#: Same pattern as tests/test_docker_sandbox.py::requires_docker.
+requires_docker = pytest.mark.skipif(
+    not (_docker_daemon_alive() and _sandbox_image_present()),
+    reason="requires a running Docker daemon with agentbench-sandbox:latest built",
+)
 
 
 # ------------------------------------------------ the write classifier itself
@@ -181,12 +216,16 @@ def test_a_read_only_role_cannot_write_through_run_tests(tmp_path):
         T.set_repo_root(None)
 
 
-def test_a_read_only_role_can_still_run_tests(tmp_path):
+@requires_docker
+def test_a_read_only_role_can_still_run_tests(tmp_path, monkeypatch):
     """The guard must not stop the reviewer from gathering evidence.
 
     The audit measured that 10 of the reviewer's 13 run_tests calls were read-only
     probes and 3 were test runs. Refusing those would cripple verification.
     """
+    # Pin the mode: the decorator requires docker, and without this the test
+    # inherits the ambient SANDBOX_MODE (SANDBOX_MODE=local now refuses to execute).
+    monkeypatch.setenv("SANDBOX_MODE", "docker")
     T.set_repo_root(tmp_path)
     T.reset_test_guard()
     try:
@@ -197,13 +236,15 @@ def test_a_read_only_role_can_still_run_tests(tmp_path):
         T.set_repo_root(None)
 
 
-def test_the_executor_can_still_use_a_mutating_command(tmp_path):
+@requires_docker
+def test_the_executor_can_still_use_a_mutating_command(tmp_path, monkeypatch):
     """The executor legitimately cleans up its own scratch files via the shell.
 
     Measured in EXP-20260930-332 (planning/11019): the executor removed its own
     untracked _t*.py scratch files with ``os.remove``. That is housekeeping by a
     role that may write, and must keep working.
     """
+    monkeypatch.setenv("SANDBOX_MODE", "docker")
     T.set_repo_root(tmp_path)
     T.reset_test_guard()
     try:
@@ -220,8 +261,10 @@ def test_the_executor_can_still_use_a_mutating_command(tmp_path):
         T.set_repo_root(None)
 
 
-def test_run_tests_without_a_role_keeps_legacy_behaviour(tmp_path):
+@requires_docker
+def test_run_tests_without_a_role_keeps_legacy_behaviour(tmp_path, monkeypatch):
     """No role means no enforcement, so existing tests and callers still work."""
+    monkeypatch.setenv("SANDBOX_MODE", "docker")
     T.set_repo_root(tmp_path)
     T.reset_test_guard()
     try:

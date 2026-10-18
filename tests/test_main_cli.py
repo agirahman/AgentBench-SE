@@ -99,6 +99,7 @@ def test_provider_model_map_covers_all_providers():
         "groq",
         "openrouter",
         "opencode",
+        "meta",
         "deepseek",
         "commandcode",
     }
@@ -106,9 +107,23 @@ def test_provider_model_map_covers_all_providers():
     assert _PROVIDER_MODEL_MAP["groq"] == Config.GROQ_MODEL
     assert _PROVIDER_MODEL_MAP["openrouter"] == Config.OPENROUTER_MODEL
     assert _PROVIDER_MODEL_MAP["opencode"] == Config.OPENCODE_MODEL
+    assert _PROVIDER_MODEL_MAP["meta"] == Config.META_MODEL
     assert _PROVIDER_MODEL_MAP["deepseek"] == Config.DEEPSEEK_MODEL
     assert _PROVIDER_MODEL_MAP["commandcode"] == Config.COMMANDCODE_MODEL
     assert all(_PROVIDER_MODEL_MAP.values())
+
+
+def test_parse_args_accepts_meta_provider(monkeypatch):
+    """--provider meta must be selectable; without it the sweep cannot run the
+    Responses-API route at all."""
+    monkeypatch.setattr(
+        "sys.argv",
+        ["main.py", "--provider", "meta", "--issues", "1"],
+    )
+
+    args = parse_args()
+
+    assert args.provider == "meta"
 
 
 def test_save_experiment_config_deepseek_model_and_pricing(tmp_path):

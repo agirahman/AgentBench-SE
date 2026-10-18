@@ -21,6 +21,7 @@ stays a real bound.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -136,13 +137,112 @@ def _trim_messages_for_context(messages: list[dict], keep_chars: int) -> None:
         )
 
 
-def _retryable_response(resp) -> bool:
-    """True when a single response would end the loop with nothing.
+def _int_usage_field(usage, *names: str) -> int:
+    """First int-valued field among *names*, or 0 when none is present.
+
+    ``isinstance(value, int)`` rather than a bare ``getattr(..., 0)``: a test
+    double or an SDK version missing the field would otherwise hand back a
+    Mock/None, and adding that to the totals raises TypeError mid-run.
+    """
+    for name in names:
+        value = getattr(usage, name, None)
+        if isinstance(value, int):
+            return value
+    return 0
+
+
+def _accumulate_response_usage(usage_totals: dict, resp) -> None:
+    """Accumulate the semantic-cache signal and token counts of one paid response.
+
+    Shared by BOTH loops (Chat Completions and the Responses dialect) so the
+    accounting cannot drift between them. Called on every successful HTTP
+    response, including one that is about to be retried for an empty answer --
+    that request was still billed, and dropping its usage would understate the
+    cost of the act.
+
+    Reads either usage dialect: Chat Completions (``prompt_tokens`` /
+    ``completion_tokens``) or Responses (``input_tokens`` / ``output_tokens``).
+
+    NOTE ON EQUIVALENCE (an earlier report called this extraction
+    "byte-identical"; an AST diff showed it is not, so the claim is corrected
+    here). The helper is a BEHAVIOUR-EQUIVALENT SUPERSET of the inline code it
+    replaced, with three deliberate differences, all improvements:
+
+    * usage values that are not ints (a string or a float, e.g. from a
+      gateway that serialises them oddly) no longer raise ``TypeError`` on
+      ``+=`` -- they are skipped by :func:`_int_usage_field`;
+    * ``input_tokens`` / ``output_tokens`` are accepted as fallbacks, which is
+      what makes the same accumulator usable by the Responses dialect (that
+      dialect has no ``prompt_tokens``);
+    * a response with NO usage at all still contributes its semantic-cache
+      signal, because the header read happens before the usage guard.
+
+    The response-cache signal is read from the HTTP HEADERS before the usage
+    guard: it can be present on a response whose usage block is missing, and
+    returning early on ``u is None`` would drop exactly the signal this
+    function exists to preserve. The signal is accumulated per response, not
+    read once at the end, because ``_finalize`` replaces ``result.usage`` with
+    ``usage_totals`` -- anything only on the final response object is lost.
+    """
+    hit, saved = extract_semantic_cache(getattr(resp, "response_headers", None))
+    if hit:
+        # Sticky: one hit anywhere in the act is enough to taint it.
+        usage_totals["semantic_cache_hit"] = True
+        usage_totals["semantic_cache_cost_saved_usd"] += saved
+        usage_totals["semantic_cache_hit_turns"] += 1
+
+    u = getattr(resp, "usage", None)
+    if u is None:
+        return
+    pt = _int_usage_field(u, "prompt_tokens", "input_tokens")
+    ct = _int_usage_field(u, "completion_tokens", "output_tokens")
+    tt = _int_usage_field(u, "total_tokens") or (pt + ct)
+    usage_totals["prompt_tokens"] += pt
+    usage_totals["completion_tokens"] += ct
+    usage_totals["total_tokens"] += tt
+    usage_totals["cached_tokens"] += _extract_cached_tokens(u)
+
+
+class EmptyResponseError(RuntimeError):
+    """HTTP 200 with no text and no tool call -- the silent-failure shape.
+
+    Measured against 9router (2026-10-09) on the muse-spark route: a request
+    comes back looking complete (status 200, ``finish_reason="in_progress"``)
+    with empty content and ``usage.total_tokens=0``. Returned as-is it is
+    recorded as a successful act whose answer is an empty string, so a whole
+    sweep can fail with no error anywhere in the log.
+
+    Raised by BOTH loops (Chat Completions and the Responses dialect) after the
+    in-place retries are exhausted, because ``call_with_retry`` deliberately
+    RETURNS (not raises) the last retryable result. Failing loudly here is what
+    turns the silent failure into a recorded, resumable one.
+
+    Lives in this module, next to ``StalledError``: both loops already depend
+    on it (``tool_loop_responses`` imports its helpers from here), so this is
+    the shared location with the least movement.
+    """
+
+
+def _retryable_chat_response(resp) -> bool:
+    """True when a single CHAT COMPLETIONS response would end the loop with nothing.
+
+    Dialect note: this reads ``choices[0].message`` and ``tool_calls`` -- the
+    Chat Completions shape. The Responses dialect has its own predicate
+    (``tool_loop_responses._retryable_responses_response``), which reads
+    ``status`` and ``output`` items; the two must not be mixed.
 
     A response WITH tool calls is normal even when its text is empty — that is
     how tool calling looks. Only "no tool call and no text" is a dead end worth
     resending, and resending it costs one request rather than the whole
     conversation.
+
+    Content is read through :func:`_extract_content`, exactly like
+    :func:`_chat_response_is_empty`: some providers return content as a LIST of
+    parts, which is a valid shape. Calling ``.strip()`` on that list raised
+    ``AttributeError``, and because this predicate runs BEFORE the post-retry
+    check, the exception aborted a response that carried perfectly good text
+    (the retry then re-sent it 3x and the act failed). Using the extractor here
+    closes the list shape at the predicate, so both functions agree.
     """
     try:
         msg = resp.choices[0].message
@@ -150,7 +250,58 @@ def _retryable_response(resp) -> bool:
         return False
     if getattr(msg, "tool_calls", None):
         return False
-    return not (getattr(msg, "content", "") or "").strip()
+    return not _extract_content(msg).strip()
+
+
+def _chat_response_is_empty(resp) -> bool:
+    """True when a Chat Completions response carries no answer and no tool call.
+
+    This is the POST-RETRY check used by ``run_tool_loop``'s ``_create``, not
+    the retry predicate. It deliberately differs from
+    :func:`_retryable_chat_response` in two ways:
+
+    * a response with NO ``choices`` at all counts as empty here. The retry
+      predicate returns False for that shape (so it is not resent), but it has
+      no text and no tool call either -- returning it would record an empty
+      answer as a successful act.
+    * content is read through ``_extract_content`` so the check cannot crash on
+      a provider that returns content as a list of parts.
+
+    A response with TOOL CALLS is NEVER empty, even when its text is blank:
+    that is normal tool calling, and treating it as a failure would break the
+    whole loop.
+    """
+    choices = getattr(resp, "choices", None) or []
+    if not choices:
+        return True
+    msg = getattr(choices[0], "message", None)
+    if msg is None:
+        return True
+    if getattr(msg, "tool_calls", None):
+        return False
+    return not _extract_content(msg).strip()
+
+
+def _wrap_up_nudge(role: str) -> str:
+    """The "you are almost out of budget" message, matched to the role's mandate.
+
+    Telling a read-only role (planner, reviewer) to "apply your fix with
+    edit_file" is an instruction it cannot obey -- it has no edit_file tool --
+    and it invites the model to narrate an edit that never happens instead of
+    returning its verdict. Shared by both loops (Chat Completions and
+    Responses) so the two cannot drift.
+    """
+    if role in _EDITING_ROLES:
+        return (
+            "You are almost out of tool budget. Stop exploring and apply "
+            "your fix NOW with edit_file, then reply with a one-line "
+            "summary and no tool call."
+        )
+    return (
+        "You are almost out of tool budget. Stop exploring and reply "
+        "NOW with your final answer and no tool call. Do not call any "
+        "more tools."
+    )
 
 
 def _is_context_overflow(exc: Exception) -> bool:
@@ -178,6 +329,75 @@ def _is_context_overflow(exc: Exception) -> bool:
             "input is too long",
         )
     )
+
+
+class StalledError(Exception):
+    """An act produced nothing for longer than STALL_TIMEOUT_SECONDS.
+
+    Raised when a single HTTP request exceeds the no-progress bound. The runner
+    maps it to ``patch_status="STALLED"`` -- a status distinct from TIMEOUT,
+    because the remedy differs: a timeout is a budget problem, a stall is a
+    wedged connection that no amount of extra turns would fix.
+
+    Why this exists at all: ``API_TIMEOUT`` bounds each socket READ, not the
+    request. A server that keeps dribbling bytes resets that timer forever, which
+    is what held EXP-20261007-003 for ~3 hours (CPU 0, no log line) while every
+    guard in the system sat inside one blocked read and could not fire.
+    """
+
+
+def _call_with_stall_guard(func, stall_seconds, label: str):
+    """Run ``func`` on a daemon thread; raise StalledError if it outlives the bound.
+
+    Why a thread rather than a deadline passed to the HTTP client: the bound has
+    to apply to the WHOLE call including the SDK's own retries and any read that
+    keeps being reset by dribbled bytes. Passing a smaller ``timeout`` cannot do
+    that -- it is per-read, which is the exact hole being closed.
+
+    The thread is a daemon so an abandoned request cannot keep the process alive
+    at exit. It is deliberately NOT joined on timeout: a thread wedged in a
+    socket read cannot be interrupted, so waiting for it would reintroduce the
+    hang. It is left to die with the connection, and the caller moves on.
+
+    ``stall_seconds <= 0`` disables the guard and runs ``func`` inline, so the
+    disabled path is byte-for-byte the previous behaviour (no thread, no
+    overhead).
+    """
+    if not stall_seconds or stall_seconds <= 0:
+        return func()
+
+    box: dict = {}
+
+    def _runner():
+        try:
+            box["result"] = func()
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+            box["error"] = exc
+
+    worker = threading.Thread(
+        target=_runner,
+        name=f"stall-guard:{label}",
+        daemon=True,
+    )
+    worker.start()
+    worker.join(stall_seconds)
+
+    if worker.is_alive():
+        # The worker may still be running and may yet touch shared state. It is
+        # abandoned here rather than cancelled (it cannot be), which is safe
+        # because the only shared object it can still write is the response it
+        # would have returned -- and that is now discarded. See the usage-safety
+        # note where the guard is applied.
+        raise StalledError(
+            f"{label} produced no response within {stall_seconds:.0f}s "
+            f"(STALL_TIMEOUT_SECONDS); abandoning the request. The connection is "
+            f"wedged -- the per-read API_TIMEOUT cannot bound a server that keeps "
+            f"sending bytes."
+        )
+
+    if "error" in box:
+        raise box["error"]
+    return box.get("result")
 
 
 def run_tool_loop(
@@ -236,6 +456,10 @@ def run_tool_loop(
     if max_wall_seconds is None:
         configured = getattr(Config, "ACT_TIMEOUT_SECONDS", 0) or 0
         max_wall_seconds = configured if configured > 0 else None
+    # No-progress bound, independent of the wall-clock bound above. Read here so
+    # all three providers inherit it without threading a new parameter through.
+    # 0 (or a missing attribute, e.g. in a test double) disables the guard.
+    stall_seconds = getattr(Config, "STALL_TIMEOUT_SECONDS", 0) or 0
     temperature = Config.TEMPERATURE if temperature is None else temperature
     timeout = Config.API_TIMEOUT if timeout is None else timeout
     max_tokens = Config.MAX_TOKENS if max_tokens is None else max_tokens
@@ -322,38 +546,10 @@ def run_tool_loop(
     def _record_usage(resp) -> None:
         """Accumulate tokens for a request we actually paid for.
 
-        Called on every successful HTTP response, including one that is about to
-        be retried for empty content — that request was still billed.
-
-        The response-cache signal is accumulated HERE, not read once at the end.
-        ``_finalize`` replaces ``result.usage`` with ``usage_totals``, so any
-        signal that only lived on the final response object was discarded — and
-        because every sweep run goes through this loop, the flag was lost for
-        every run, making a cache hit impossible to detect after the fact. The
-        header is on EVERY response, so it must be collected on every response.
+        Delegates to the shared accumulator so the Chat Completions and
+        Responses loops cannot disagree about what a retried request cost.
         """
-        # Read the cache signal BEFORE the usage guard: it travels in the HTTP
-        # headers, not the body, so it can be present on a response whose usage
-        # block is missing. Returning early on `u is None` would drop exactly the
-        # signal this function exists to preserve.
-        hit, saved = extract_semantic_cache(getattr(resp, "response_headers", None))
-        if hit:
-            # Sticky: one hit anywhere in the act is enough to taint it, so this
-            # is never reset back to False by a later miss.
-            usage_totals["semantic_cache_hit"] = True
-            usage_totals["semantic_cache_cost_saved_usd"] += saved
-            usage_totals["semantic_cache_hit_turns"] += 1
-
-        u = getattr(resp, "usage", None)
-        if u is None:
-            return
-        pt = getattr(u, "prompt_tokens", 0) or 0
-        ct = getattr(u, "completion_tokens", 0) or 0
-        tt = getattr(u, "total_tokens", 0) or (pt + ct)
-        usage_totals["prompt_tokens"] += pt
-        usage_totals["completion_tokens"] += ct
-        usage_totals["total_tokens"] += tt
-        usage_totals["cached_tokens"] += _extract_cached_tokens(u)
+        _accumulate_response_usage(usage_totals, resp)
 
     def _create(kwargs: dict, label: str):
         """One request, retried in place on failure or empty content.
@@ -361,6 +557,16 @@ def run_tool_loop(
         The retry wraps this single call rather than the loop, so a timeout on
         turn N resends turn N: the conversation so far and the turn budget are
         both untouched.
+
+        After the retries are exhausted, an answer that is STILL empty raises
+        :class:`EmptyResponseError` instead of being returned. This is the
+        silent-failure guard: ``call_with_retry`` deliberately RETURNS (not
+        raises) the last retryable result, and letting that reach the caller
+        would record an empty answer as a successful act. Measured on the
+        muse-spark route (2026-10-09): ``finish_reason="in_progress"`` with
+        empty content and 0 tokens looks like a completed request. The check is
+        dialect-aware: it reads the Chat Completions shape (a response with
+        TOOL CALLS and no text is normal tool calling, never a failure).
         """
 
         def _attempt():
@@ -368,20 +574,60 @@ def run_tool_loop(
             # the response-cache signal) are attached to the parsed object. A
             # plain create() returns a model with no header field at all, so the
             # signal would be unreadable no matter what this loop did with it.
-            resp = create_completion_with_headers(client, **kwargs)
+            #
+            # The STALL GUARD wraps ONLY the HTTP call, deliberately. It cannot
+            # wrap `_record_usage` too: a stalled attempt is abandoned on a live
+            # thread, and if that thread later woke up and ran _record_usage it
+            # would mutate `usage_totals` concurrently with the retry that
+            # replaced it -- double-counting tokens and racing on the dict. By
+            # keeping every shared-state write on THIS thread, an abandoned
+            # thread's only remaining effect is the response object it returns,
+            # which is discarded. Token accounting therefore stays exact even
+            # when a request is abandoned.
+            resp = _call_with_stall_guard(
+                lambda: create_completion_with_headers(client, **kwargs),
+                stall_seconds,
+                label,
+            )
             _record_usage(resp)
             return resp
 
-        return call_with_retry(
+        resp = call_with_retry(
             _attempt,
-            retry_on=_retryable_response,
+            retry_on=_retryable_chat_response,
             # A context overflow cannot be cured by resending: the conversation
             # only grows. Retrying it burns the backoff schedule AND pays for the
             # same oversized prompt again, and it hides the error from the caller's
             # own handler until the final attempt.
-            fatal_on=_is_context_overflow,
+            #
+            # A STALL is fatal for the same reason: the connection is wedged, so
+            # an immediate resend would block for another full STALL_TIMEOUT and
+            # burn ~15 more minutes of a 150-run sweep. Both stop the act at once
+            # and let the runner record why.
+            fatal_on=lambda exc: _is_context_overflow(exc) or isinstance(exc, StalledError),
             label=label,
         )
+        # THE SILENT-FAILURE GUARD (post-retry). ``call_with_retry`` returns
+        # the last retryable result when the retries run out -- so an
+        # empty-but-200 response would otherwise be recorded as a successful
+        # act whose answer is "". Measured on the muse-spark route: HTTP 200,
+        # finish_reason="in_progress", empty content, 0 tokens. A response WITH
+        # tool calls is excluded by the check itself (normal tool calling).
+        if _chat_response_is_empty(resp):
+            usage = getattr(resp, "usage", None)
+            total_tokens = getattr(usage, "total_tokens", None) if usage is not None else None
+            finish = "EMPTY_RESPONSE"
+            try:
+                finish = getattr(resp.choices[0], "finish_reason", "") or finish
+            except (AttributeError, IndexError, TypeError):
+                pass
+            raise EmptyResponseError(
+                f"{label}: {model} returned an EMPTY response "
+                f"(finish_reason={finish!r}, total_tokens={total_tokens}) after "
+                f"retries -- no text and no tool call. This is the silent-failure "
+                f"shape; failing loudly so the run can be resumed."
+            )
+        return resp
 
     def _finalize(resp) -> InferenceResult:
         elapsed = time.perf_counter() - t0
@@ -443,19 +689,7 @@ def run_tool_loop(
         # narrate an edit that never happens instead of returning its verdict.
         remaining = max_tool_turns - turn
         if remaining <= 1:
-            if role in _EDITING_ROLES:
-                wrap_up = (
-                    "You are almost out of tool budget. Stop exploring and apply "
-                    "your fix NOW with edit_file, then reply with a one-line "
-                    "summary and no tool call."
-                )
-            else:
-                wrap_up = (
-                    "You are almost out of tool budget. Stop exploring and reply "
-                    "NOW with your final answer and no tool call. Do not call any "
-                    "more tools."
-                )
-            messages.append({"role": "user", "content": wrap_up})
+            messages.append({"role": "user", "content": _wrap_up_nudge(role)})
 
         try:
             response = _create(kwargs, f"tool_loop[{role}] turn {turn}")

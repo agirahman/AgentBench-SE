@@ -26,10 +26,15 @@ from experiments.swebench_adapter import (
     strip_test_files,
     validate_applicability,
 )
-from agents.tools import ensure_repo_root
+from agents.tools import (
+    drop_scratch_files,
+    ensure_repo_root,
+    is_sandbox_infrastructure_error,
+)
 from evaluation.statistics import export_statistics_json, generate_summary_md
 from evaluation.cost import PricingTable
 from evaluation.retry import is_provider_error, is_rate_limit_error
+from providers.tool_loop import StalledError
 from config import Config
 from experiment_id import generate_experiment_id, create_experiment_dir
 from experiments.observability import build_experiment_manifest, write_issue_run_summary
@@ -253,6 +258,16 @@ _PATCH_STATUS_FAILED = {
     # is a BaseException and was previously NOT caught at all, so the instance
     # vanished with no row -- see the ``except KeyboardInterrupt`` branch below.
     "INTERRUPTED",
+    # Written when every run_tests call in the run failed at the sandbox
+    # (daemon down / image missing). An INFRASTRUCTURE death, not an outcome:
+    # the agent had no test feedback, so the run must be retried once the
+    # sandbox is fixed rather than accepted as the strategy's answer. Without
+    # this, --resume would skip the contaminated runs and keep them as data.
+    "SANDBOX_DOWN",
+    # Written when an act made no progress for STALL_TIMEOUT_SECONDS and the
+    # tool loop abandoned a wedged connection. Retryable: a stall says nothing
+    # about the strategy, and a fresh connection usually succeeds.
+    "STALLED",
 }
 
 #: How many times a "no diff" outcome is retried before it is accepted as final.
@@ -312,6 +327,48 @@ def _is_completed_entry(entry: dict) -> bool:
     return not _is_infrastructure_failure(entry)
 
 
+def sandbox_down_reason(inferences) -> str:
+    """Return a reason string when EVERY run_tests call failed at the sandbox.
+
+    Returns "" when the run is fine, so the caller can use it as a boolean.
+
+    The rule, and why each part is there:
+
+    * **At least one call.** An agent that never ran a test is NOT sandbox-down.
+      Plenty of legitimate runs answer from reading the code; marking them would
+      be the "control that cries wolf" failure this repo already has a name for.
+    * **Every call failed at the sandbox.** One infra error among successful runs
+      is a blip, not contamination -- the agent still had test feedback, so its
+      patch still reflects the strategy.
+    * **No successful call at all.** The moment one test executes, the sandbox
+      demonstrably worked, and the run is valid.
+
+    Measured on EXP-20261007-003: the daemon was down for the whole session, so
+    every run_tests call in all 9 runs returned the daemon error and each run was
+    still recorded VALID. Detecting it here makes the contamination automatic --
+    previously it was found only by reading the tool-call trail by hand.
+    """
+    calls = 0
+    infra_errors = 0
+    for inf in inferences or []:
+        for call in getattr(inf, "tool_calls", []) or []:
+            if call.get("name") != "run_tests":
+                continue
+            calls += 1
+            if is_sandbox_infrastructure_error(call.get("result") or ""):
+                infra_errors += 1
+
+    if calls == 0:
+        return ""
+    if infra_errors < calls:
+        return ""
+    return (
+        f"all {calls} run_tests call(s) failed at the sandbox "
+        f"(docker daemon down or image missing); the agent never had a working "
+        f"test environment, so this run does not measure the strategy"
+    )
+
+
 def _no_patch_attempts(entries: list[dict]) -> int:
     """How many no-patch OUTCOME attempts do these rows represent?
 
@@ -344,20 +401,37 @@ def _load_existing_ids(jsonl_path: str) -> set[str]:
 
     Each key is ``instance_id|model|thinking`` (see ``_resume_key``).
 
-    A key is returned (= "--resume may skip it") when EITHER:
+    PRECEDENCE -- the three rules are evaluated per key, in this order, and the
+    FIRST one that matches decides. This ordering is the contract; a key can hold
+    rows of several kinds at once, so "which rule wins when they disagree" has to
+    be stated, not implied:
 
-    1. some row produced a patch -- the run plainly finished; or
-    2. the key has already used up its no-diff retries
-       (``_MAX_NO_PATCH_ATTEMPTS`` rows with no patch and no ``error_type``).
+    1. **A genuine outcome wins.** If ANY row has a non-empty patch AND is not an
+       infrastructure death, the key is DONE and returned (``--resume`` skips it).
+       This outranks rule 2: earlier infra rows do NOT un-finish later success.
+       Regression this guards (verified on production data):
+       EXP-20261012-005 matplotlib__matplotlib-23563 has a PROVIDER_ERROR row
+       (patchlen 0) then a VALID row (patchlen 928), and EXP-20261002-542
+       django__django-11001/review has INTERRUPTED (patchlen 0) then VALID
+       (patchlen 552). Both must skip; a version that checked infrastructure first
+       re-ran the paid-for successes -- and because the evaluator dedups on the
+       LAST row (tools/eval_modal.py), the worse retry could replace the good one.
+    2. **Otherwise, infrastructure deaths stay retryable.** If no row qualifies
+       under rule 1 and ANY row is an infrastructure death, the key is NOT
+       returned -- it stays retryable however many times it died, which is the
+       entire point of --resume. Measured on EXP-20260929-022 django-11019/review,
+       a 502. This rule is what keeps SANDBOX_DOWN correct: such a run KEEPS its
+       patch (see the 2026-10-07 detection in the runner), but that patch is work
+       done WITHOUT test feedback, so rule 1 refuses it (the row IS an infra death)
+       and this rule re-runs it instead of freezing the contamination.
+    3. **Else the bounded no-patch budget.** If every row is a no-patch OUTCOME,
+       the key is returned once it has used up ``_MAX_NO_PATCH_ATTEMPTS`` such rows
+       (no patch, no ``error_type``).
 
-    Case 2 is option "D" of docs/PLAN_RESUME_FIX_20261002.md. Before it, ANY empty
+    Rule 3 is option "D" of docs/PLAN_RESUME_FIX_20261002.md. Before it, ANY empty
     patch was retried forever. Measured on this repo: 299 (strategy x instance)
     combinations are no-diff outcomes, so every resume re-ran all of them. One
     retry keeps the recovery chance and bounds that leak.
-
-    A key whose rows are infrastructure deaths is NEVER returned -- it stays
-    retryable no matter how many times it has died, which is the entire point of
-    --resume. Measured on EXP-20260929-022 django-11019/review, a 502.
 
     The count is deliberately per FILE (one strategy), matching how the runner
     looks it up: it calls this once per strategy with that strategy's jsonl.
@@ -387,14 +461,36 @@ def _load_existing_ids(jsonl_path: str) -> set[str]:
             grouped.setdefault(_resume_key(iid, model, thinking), []).append(entry)
 
     for key, entries in grouped.items():
-        if any((e.get("model_patch") or "").strip() for e in entries):
-            ids.add(key)                     # finished (1)
+        # Precedence, decided per key (the contract is spelled out in the
+        # docstring). The ORDER is the whole fix:
+        #
+        # 1. A real outcome wins. "Real" = a non-empty patch on a row that is NOT
+        #    an infrastructure death. Test this FIRST: a key whose earlier rows
+        #    died and whose later row succeeded is FINISHED. An earlier version
+        #    tested infrastructure first, so a PROVIDER_ERROR row re-ran the
+        #    success that followed it (EXP-20261012-005:
+        #    matplotlib__matplotlib-23563, PROVIDER_ERROR row 8, VALID row 11 with
+        #    a 928-char patch -- paid-for work run again).
+        if any(
+            (e.get("model_patch") or "").strip()
+            and not _is_infrastructure_failure(e)
+            for e in entries
+        ):
+            ids.add(key)                     # finished by a genuine outcome (1)
             continue
+        # 2. Otherwise infra deaths keep the key retryable. A SANDBOX_DOWN run
+        #    KEEPS its patch (see the 2026-10-07 detection below,
+        #    runner.py:1332-1350) precisely so an evaluator can still score it, but
+        #    that patch is work done WITHOUT test feedback. Its patch is non-empty
+        #    yet it must NOT be retired here -- step 1 already excluded it because
+        #    the row IS an infrastructure death, and this branch keeps it retryable
+        #    however many times it died.
         if any(_is_infrastructure_failure(e) for e in entries):
-            continue                         # always retryable
+            continue                         # always retryable, patch or not (2)
+        # 3. No outcome at all: fall back to the bounded no-patch retry budget.
         attempts = _no_patch_attempts(entries)
         if attempts >= _MAX_NO_PATCH_ATTEMPTS:
-            ids.add(key)                     # option D: budget used up (2)
+            ids.add(key)                     # option D: budget used up (3)
             if attempts > _MAX_NO_PATCH_ATTEMPTS:
                 logger.warning(
                     f"Resume: {key} has {attempts} no-patch attempts, more than the "
@@ -473,11 +569,8 @@ def _rows_from_savepoints(pred_dir: Path, strategies) -> list[dict]:
                 "input_tokens_regular": None,
                 "output_tokens": None,
                 "cost_usd_offpeak": None,
-                "cost_idr_offpeak": None,
                 "cost_usd_peak_total": None,
-                "cost_idr_peak_total": None,
                 "cost_usd_actual": None,
-                "cost_idr_actual": None,
                 "input_cost_usd_total": None,
                 "output_cost_usd": None,
                 "input_cost_usd_cached": None,
@@ -854,9 +947,9 @@ def _export_interrupted_run(exp_dir, all_results, pred_dir, strategies, issues,
 
     try:
         export_statistics_json(df, f"{exp_dir}/generation_statistics.json",
-                               pricing=pricing, usd_idr_rate=Config.USD_IDR_RATE)
+                               pricing=pricing)
         generate_summary_md(df, f"{exp_dir}/generation_report.md",
-                            pricing=pricing, usd_idr_rate=Config.USD_IDR_RATE)
+                            pricing=pricing)
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"Could not export the statistics/report after the interrupt: {exc}")
 
@@ -958,16 +1051,13 @@ def _results_from_flat_rows(rows: list[dict]) -> list[ExperimentResult]:
             input_cost_usd=_num(row.get("input_cost_usd_total")),
             output_cost_usd=_num(row.get("output_cost_usd")),
             total_cost_usd=_num(row.get("cost_usd_offpeak")),
-            total_cost_idr=_num(row.get("cost_idr_offpeak")),
             pricing_version=_text(row.get("pricing_version")),
             cached_input_tokens=int(_num(row.get("input_tokens_cached"))),
             regular_input_tokens=int(_num(row.get("input_tokens_regular"))),
             cached_input_cost_usd=_num(row.get("input_cost_usd_cached")),
             regular_input_cost_usd=_num(row.get("input_cost_usd_regular")),
             peak_total_cost_usd=_num(row.get("cost_usd_peak_total")),
-            peak_total_cost_idr=_num(row.get("cost_idr_peak_total")),
             actual_cost_usd=_num(row.get("cost_usd_actual")),
-            actual_cost_idr=_num(row.get("cost_idr_actual")),
             # Rebuilt from the CSV so a resumed experiment keeps the integrity
             # flag. _truthy, not bool(): a blank cell arrives as NaN and bool(NaN)
             # is True, which would invent a hit on every recovered row.
@@ -1176,6 +1266,23 @@ def run_experiments(
                     )
                     model_patch = patch.response
 
+                # Drop agent scratch files HERE as well, at the single point where
+                # the submitted patch is final. ``capture_diff`` already filters
+                # the tool-calling path, but this fallback takes the RAW model
+                # response, which never passed through it. Measured on
+                # EXP-20261010-062 (django__django-11019 review): 17 scratch files
+                # (_exp6.py, _t1.txt, ...) reached the submitted patch. The call is
+                # idempotent, so a patch already filtered by capture_diff is
+                # returned unchanged byte for byte.
+                if model_patch.strip():
+                    model_patch, scratch_dropped = drop_scratch_files(model_patch)
+                    if scratch_dropped:
+                        logger.info(
+                            f"  ✂ Removed {len(scratch_dropped)} agent scratch file(s) "
+                            f"from patch for {issue.instance_id} ({name}): "
+                            f"{', '.join(scratch_dropped)}"
+                        )
+
                 # Keep test files out of the submitted patch. The harness resets
                 # test files and applies its own gold test patch; a model patch
                 # that creates the same test file makes `git checkout <base_commit>
@@ -1221,6 +1328,26 @@ def run_experiments(
                                 f"({name}): {type(exc).__name__}: {exc}"
                             )
                             result.apply_status = "UNKNOWN"
+
+                # --- Sandbox-down detection (2026-10-07 incident) ---
+                # MUST come AFTER the patch-status re-derivation above, so it can
+                # override a status that would otherwise read VALID. A run whose
+                # every run_tests call hit a dead daemon did not measure the
+                # strategy: the agent worked without any test feedback. Recording
+                # it VALID is what made 9 contaminated runs look usable and cost a
+                # whole session of data.
+                #
+                # The patch is still kept (it is real work, and an evaluator can
+                # still score it); only the STATUS changes, so the run is excluded
+                # from strategy comparison instead of silently counted.
+                sandbox_reason = sandbox_down_reason(result.execution.inferences)
+                if sandbox_reason:
+                    logger.warning(
+                        f"  ⚠ SANDBOX_DOWN: {issue.instance_id} ({name}) — "
+                        f"{sandbox_reason}"
+                    )
+                    patch_status = "SANDBOX_DOWN"
+                    result.patch_status = "SANDBOX_DOWN"
 
                 pred_entry = {
                     "instance_id": issue.instance_id,
@@ -1328,6 +1455,13 @@ def run_experiments(
                 # as a strategy that ran out of time.
                 if is_rate_limit_error(e):
                     failure_status = "RATE_LIMIT"
+                elif isinstance(e, StalledError):
+                    # A wedged connection, not a budget problem. Given its own
+                    # status because the remedy differs: more turns or more time
+                    # would not help, only a retry on a fresh connection. The
+                    # tool loop raises this after STALL_TIMEOUT_SECONDS of no
+                    # progress, so the sweep cannot sit silent for hours.
+                    failure_status = "STALLED"
                 elif is_provider_error(e):
                     failure_status = "PROVIDER_ERROR"
                 else:
@@ -1354,7 +1488,22 @@ def run_experiments(
 
                 empty_run = InferenceRun(patch="", inferences=[])
                 empty_exec = ExecutionResult(run=empty_run)
-                empty_cost = CostSummary(0.0, 0.0, 0.0, 0.0, "")
+                # KEYWORD args, never positional. This was positional
+                # (`CostSummary(0.0, 0.0, 0.0, 0.0, "")`) until removing the IDR
+                # fields shifted every later parameter by one, so `""` landed in
+                # `cached_input_tokens` (an int field) and the exporter raised
+                # `TypeError: can only concatenate str (not "int") to str`.
+                #
+                # That only fired on the FAILURE path, so it looked harmless in
+                # normal runs — but a 150-run sweep hits rate limits and provider
+                # errors, and every one of those runs goes through here. A field
+                # reorder must never be able to silently reinterpret a value.
+                empty_cost = CostSummary(
+                    input_cost_usd=0.0,
+                    output_cost_usd=0.0,
+                    total_cost_usd=0.0,
+                    pricing_version="",
+                )
                 empty_eval = EvaluationResult(success=False, error=str(e))
                 all_results.append(ExperimentResult(
                     instance_id=issue.instance_id,
@@ -1466,14 +1615,14 @@ def run_experiments(
     stats_path = f"{exp_dir}/generation_statistics.json"
     model_name = df["model"].iloc[0] if len(df) else provider_name
     pricing = PricingTable.get(model_name) if model_name else None
-    export_statistics_json(df, stats_path, pricing=pricing, usd_idr_rate=Config.USD_IDR_RATE)
+    export_statistics_json(df, stats_path, pricing=pricing)
     logger.success(f"Statistics exported: {stats_path}")
 
     # NOTE: this is the PRE-EVAL generation report (patch generation only),
     # NOT the resolved rate. The authoritative resolved rate is eval/summary.md
     # produced by report_generator from Modal results. See PLAN.md Item 5.
     summary_path = f"{exp_dir}/generation_report.md"
-    generate_summary_md(df, summary_path, pricing=pricing, usd_idr_rate=Config.USD_IDR_RATE)
+    generate_summary_md(df, summary_path, pricing=pricing)
     logger.success(f"Generation report (PRE-EVAL) exported: {summary_path}")
 
     manifest = build_experiment_manifest(

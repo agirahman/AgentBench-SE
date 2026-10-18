@@ -405,6 +405,10 @@ tabelnya tetap menyatakan sesuatu yang tidak ada di file. `PRICING_MODEL_OVERRID
 (`:964-981`) tidak mencantumkan key ini sama sekali, padahal ia satu-satunya knob yang membedakan
 jalur langsung dari jalur sweep. Ini jebakan reprodusibilitas, bukan blocker sweep.
 
+**[CATATAN 2026-10-06]** Bound sweep sekarang DIHAPUS: sweep memakai 0 (unbounded). Default
+interaktif tetap 1800 untuk `python src/main.py`. `.env.example` sekarang mencantumkan key ini
+jelas dengan catatan bahwa sweep meng-override-nya ke 0 secara eksplisit.
+
 ### 5d. ✅ Klaim lain di `HANDOFF_20261001.md` §6 — semua TERVERIFIKASI
 
 | Klaim | Perintah | Hasil |

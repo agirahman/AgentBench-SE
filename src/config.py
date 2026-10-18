@@ -125,6 +125,18 @@ class Config:
     # model prefix selects the upstream (oc/... vs cmd/...).
     OPENCODE_BASE_URL = _get_env("OPENCODE_BASE_URL", "http://localhost:20128/v1")
 
+    # Meta (muse-spark) models, routed through the SAME 9router proxy (same key
+    # and base URL as opencode). Different DIALECT, though: this route only
+    # answers the Responses API. Measured directly against 9router --
+    # chat.completions.create returns HTTP 200 with finish_reason="in_progress",
+    # content="" and total_tokens=0 (an EMPTY answer, no error: a silent
+    # failure), while responses.create completes and its tool calling works.
+    #
+    # The model is deliberately absent from GET /v1/models (9router lists only
+    # part of its catalogue), so the listing must never be used as an
+    # availability check.
+    META_MODEL = _get_env("META_MODEL", "oc/muse-spark-1.3-contributor-free")
+
     OPENROUTER_API_KEY = _get_env("OPENROUTER_API_KEY")
     OPENROUTER_MODEL = _get_env(
         "OPENROUTER_MODEL",
@@ -132,9 +144,12 @@ class Config:
     )
 
     DEEPSEEK_API_KEY = _get_env("DEEPSEEK_API_KEY")
+    # The official DeepSeek API (api.deepseek.com/v1) lists its models as
+    # `deepseek-flash` and `deepseek-v4-pro`; `deepseek-v4-flash` is a 9router
+    # spelling and returns no such model on the official endpoint.
     DEEPSEEK_MODEL = _get_env(
         "DEEPSEEK_MODEL",
-        "deepseek-v4-flash",
+        "deepseek-flash",
     )
 
     TEMPERATURE = _get_float_env("TEMPERATURE", 0.2)
@@ -217,6 +232,30 @@ class Config:
     # because the backoff happens inside the tool loop and never surfaces as a
     # failure to the runner. 0 = unbounded (the previous behaviour).
     ACT_TIMEOUT_SECONDS = _get_int_env("ACT_TIMEOUT_SECONDS", 1800)
+    # NOTE on the default: 1800 is kept for INTERACTIVE use (a single agent run
+    # from the REPL/CLI), where a hung loop is a local problem. THE SWEEP DOES NOT
+    # USE THIS DEFAULT -- tools/run_final_sweep.py pins ACT_TIMEOUT_SECONDS=0
+    # explicitly via --set (see the build_cmd function), so sweep behavior never
+    # depends on .env. This mirrors how SANDBOX_MODE is pinned: default for local
+    # use, explicit for the measured experiment. 0 = unbounded in tool_loop.
+    #
+    # No-progress bound for ONE act, in seconds. This is NOT a wall-clock cap on
+    # the act and must not be confused with ACT_TIMEOUT_SECONDS above: it bounds
+    # how long an act may go without producing anything, so a healthy run that
+    # makes progress every few minutes runs as long as it needs to.
+    #
+    # Why it exists: httpx's timeout is PER READ, so a server that dribbles bytes
+    # can hold a connection open indefinitely. Measured with a real socket: a 1 s
+    # timeout let a 1-byte-per-0.8 s drip run for 9.6 s, and that same shape held
+    # the 2026-10-07 sweep (EXP-20261007-003) for ~3 hours with CPU at 0 and no
+    # log line. ACT_TIMEOUT_SECONDS=0 removes the only other backstop, so without
+    # this nothing can interrupt a wedged read.
+    #
+    # Why 900: the bound must exceed API_TIMEOUT (600), or it would fire on
+    # requests the read timeout still permits. Measured across 767 requests in
+    # three experiments, the longest single request was 598 s, so 900 s has 1.5x
+    # headroom and never touched a healthy run. 0 = disabled.
+    STALL_TIMEOUT_SECONDS = _get_int_env("STALL_TIMEOUT_SECONDS", 900)
     # Price every run with this model's rate card, whatever model actually served
     # it. Needed because the budget-curve runs use a free testing model whose real
     # rate is $0: without this, all 21 cost columns read 0.00, a dollar cap can
@@ -263,6 +302,16 @@ class Config:
     SOURCE_CONTEXT_MAX_FILE_LINES = _get_int_env("SOURCE_CONTEXT_MAX_FILE_LINES", 600)
     REPO_CACHE_DIR = _get_env("REPO_CACHE_DIR", "datasets/repos")
 
+    # NOT READ BY THE PIPELINE. The pipeline reports cost in USD only, because the
+    # exchange rate is a presentation choice rather than research data: if the
+    # pipeline converted, each sweep batch would be frozen to whatever rate `.env`
+    # held when it ran, and costs across batches would stop being comparable. IDR
+    # is produced at REPORTING time instead, with an explicit operator-supplied
+    # rate: `python tools/convert_to_idr.py --all --rate <kurs>`.
+    #
+    # Kept only so an existing `.env` does not break on load, and so the old value
+    # is visible if someone compares an old artefact against a new one. Do not
+    # reintroduce a reader for this.
     USD_IDR_RATE = _get_float_env("USD_IDR_RATE", 16500.0)
 
 

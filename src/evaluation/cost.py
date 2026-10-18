@@ -51,8 +51,21 @@ def window_for(timestamp_utc: str, model: str = "") -> str:
     return "off_peak"
 
 
-@dataclass
+@dataclass(kw_only=True)
 class CostResult:
+    """Cost of one inference, in USD only.
+
+    There is deliberately no IDR field. The exchange rate is a presentation
+    choice: converting inside the pipeline would fix each batch to whatever rate
+    was in ``.env`` when it ran, so a sweep split across batches would produce
+    costs that cannot be compared. Reporting converts instead, with the rate the
+    operator supplies at that time (``tools/convert_to_idr.py``).
+
+    ``kw_only=True`` matches ``CostSummary``: this class also lost IDR fields, and
+    a positional caller would silently shift every later value. Keyword-only makes
+    that an immediate TypeError instead of a wrong number in the CSV.
+    """
+
     model: str
     input_tokens: int
     cached_input_tokens: int
@@ -62,13 +75,10 @@ class CostResult:
     input_cost_usd: float
     output_cost_usd: float
     total_cost_usd: float
-    total_cost_idr: float
     cached_input_cost_usd: float
     regular_input_cost_usd: float
     peak_total_cost_usd: float
-    peak_total_cost_idr: float
     actual_cost_usd: float = 0.0
-    actual_cost_idr: float = 0.0
     window: str = "off_peak"
 
 
@@ -121,7 +131,57 @@ class PricingTable:
             "currency": "USD",
             "pricing_version": "2026-09-free",
         },
+        # Meta Model API -- CONTRIBUTOR tier. This is the sweep model as of
+        # 2026-10-09. The route is free at the point of use, but it is NOT a $0
+        # cost card: Meta publishes real per-token rates for this tier, and the
+        # thesis must report them rather than an empty cost column.
+        #
+        # Source: https://dev.meta.ai/docs/pricing-rate-limits#contributor-tier
+        #   "Contributor tier -- Models: muse-spark-1.3-contributor,
+        #    muse-spark-1.2-contributor. Heavily discounted token pricing in
+        #    exchange for permission to use your prompts and completions to train
+        #    future Meta models."
+        #   Price per 1M tokens: cached input $0.002, input $0.10, output $0.20
+        #   (Standard tier for comparison: cached $0.15, input $1.25, output $4.25)
+        #
+        # The discount is the price of training rights on our data, so this card
+        # must be paired with that disclosure wherever the cost is reported: a
+        # reader comparing this arm against the DeepSeek arm is comparing two
+        # different data arrangements, not only two models.
+        #
+        # Rate limits (same page): Contributor tier -- 100 RPM, 3,000,000 TPM; the
+        # sweep's --rate-limit 2.0 is well inside both.
+        "oc/muse-spark-1.3-contributor-free": {
+            "input_per_million": 0.10,
+            "cached_input_per_million": 0.002,
+            "output_per_million": 0.20,
+            "currency": "USD",
+            "pricing_version": "2026-10-09-meta-contributor-tier",
+        },
         "deepseek-v4-flash": {
+            "off_peak": {
+                "input_per_million": 0.22,
+                "cached_input_per_million": 0.007,
+                "output_per_million": 0.66,
+            },
+            "peak": {
+                "input_per_million": 0.44,
+                "cached_input_per_million": 0.014,
+                "output_per_million": 1.32,
+            },
+            "currency": "USD",
+            "pricing_version": "2026-08-16",
+        },
+        # The OFFICIAL DeepSeek model id, and what the sweep route actually
+        # calls. `deepseek-v4-flash` is the 9router spelling; `deepseek-flash`
+        # is the name api.deepseek.com/v1 lists. CostCalculator prices on
+        # inference.model, so without this entry every final-run row reports
+        # $0.00 and RQ3 (the cost comparison) is empty -- silently, because the
+        # readiness gate does not check rate cards. The rates are the official
+        # DeepSeek card, kept identical to `deepseek-v4-flash` above so the two
+        # spellings of one model price the same. This is a REAL charge, not the
+        # dummy/estimate card PRICING_MODEL_OVERRIDE produces.
+        "deepseek-flash": {
             "off_peak": {
                 "input_per_million": 0.22,
                 "cached_input_per_million": 0.007,
@@ -311,12 +371,10 @@ class CostCalculator:
         input_cost_usd = (regular / 1_000_000) * off["input_per_million"] + (cached / 1_000_000) * off["cached_input_per_million"]
         output_cost_usd = (comp_t / 1_000_000) * off["output_per_million"]
         total_cost_usd = input_cost_usd + output_cost_usd
-        total_cost_idr = total_cost_usd * Config.USD_IDR_RATE
 
         peak_input_usd = (regular / 1_000_000) * peak["input_per_million"] + (cached / 1_000_000) * peak["cached_input_per_million"]
         peak_output_usd = (comp_t / 1_000_000) * peak["output_per_million"]
         peak_total_usd = peak_input_usd + peak_output_usd
-        peak_total_idr = peak_total_usd * Config.USD_IDR_RATE
 
         # Window-aware actual cost: use the rate card for the window the
         # inference actually ran in (official DeepSeek peak = 01-04 & 06-10 UTC,
@@ -326,7 +384,6 @@ class CostCalculator:
         actual_input_usd = (regular / 1_000_000) * actual_card["input_per_million"] + (cached / 1_000_000) * actual_card["cached_input_per_million"]
         actual_output_usd = (comp_t / 1_000_000) * actual_card["output_per_million"]
         actual_total_usd = actual_input_usd + actual_output_usd
-        actual_total_idr = actual_total_usd * Config.USD_IDR_RATE
 
         return CostResult(
             model=inference.model,
@@ -338,13 +395,10 @@ class CostCalculator:
             input_cost_usd=input_cost_usd,
             output_cost_usd=output_cost_usd,
             total_cost_usd=total_cost_usd,
-            total_cost_idr=total_cost_idr,
             cached_input_cost_usd=(cached / 1_000_000) * off["cached_input_per_million"],
             regular_input_cost_usd=(regular / 1_000_000) * off["input_per_million"],
             peak_total_cost_usd=peak_total_usd,
-            peak_total_cost_idr=peak_total_idr,
             actual_cost_usd=actual_total_usd,
-            actual_cost_idr=actual_total_idr,
             window=window,
         )
 
@@ -352,10 +406,10 @@ class CostCalculator:
         """Sum cost across all inferences into a CostSummary."""
         from models.result import CostSummary
 
-        input_usd = output_usd = total_usd = total_idr = 0.0
+        input_usd = output_usd = total_usd = 0.0
         cached_tok = regular_tok = 0
-        cached_usd = regular_usd = peak_usd = peak_idr = 0.0
-        actual_usd = actual_idr = 0.0
+        cached_usd = regular_usd = peak_usd = 0.0
+        actual_usd = 0.0
         semantic_hit = False
         semantic_saved = 0.0
         semantic_turns = 0
@@ -375,15 +429,12 @@ class CostCalculator:
             input_usd += c.input_cost_usd
             output_usd += c.output_cost_usd
             total_usd += c.total_cost_usd
-            total_idr += c.total_cost_idr
             cached_tok += c.cached_input_tokens
             regular_tok += c.regular_input_tokens
             cached_usd += c.cached_input_cost_usd
             regular_usd += c.regular_input_cost_usd
             peak_usd += c.peak_total_cost_usd
-            peak_idr += c.peak_total_cost_idr
             actual_usd += c.actual_cost_usd
-            actual_idr += c.actual_cost_idr
             pricing = PricingTable.get(inf.model)
             if pricing:
                 version = pricing.get("pricing_version", "")
@@ -396,16 +447,13 @@ class CostCalculator:
             input_cost_usd=input_usd,
             output_cost_usd=output_usd,
             total_cost_usd=total_usd,
-            total_cost_idr=total_idr,
             pricing_version=version,
             cached_input_tokens=cached_tok,
             regular_input_tokens=regular_tok,
             cached_input_cost_usd=cached_usd,
             regular_input_cost_usd=regular_usd,
             peak_total_cost_usd=peak_usd,
-            peak_total_cost_idr=peak_idr,
             actual_cost_usd=actual_usd,
-            actual_cost_idr=actual_idr,
             semantic_cache_hit=semantic_hit,
             semantic_cache_cost_saved_usd=semantic_saved,
             semantic_cache_hit_turns=semantic_turns,

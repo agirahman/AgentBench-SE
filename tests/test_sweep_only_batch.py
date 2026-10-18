@@ -78,6 +78,22 @@ def sweep(tmp_path, monkeypatch):
 
     mod = _load_sweep_module()
     monkeypatch.setattr(mod, "ROOT", tmp_path)
+    # Pin the DEFAULT ROUTE's model to the string the savepoints below are
+    # written with. The resume key is `instance|model|thinking`, so these two
+    # MUST agree or a "done" row looks outstanding. These tests verify the
+    # batch-SELECTION mechanics, which do not depend on WHICH model the sweep
+    # uses -- pinning keeps them green when the production route changes
+    # (measured: flipping MODEL to oc/muse-spark-1.3-contributor-free broke 7
+    # of them on the key alone).
+    #
+    # Since --route was introduced, main() resolves the model from ROUTES
+    # (route["model"]), not from the module-level MODEL constant -- patching
+    # MODEL alone would no longer reach the selection logic. The bundle is
+    # copied and mutated so the test does not touch the real ROUTES dict.
+    routes = {k: dict(v) for k, v in mod.ROUTES.items()}
+    routes[mod.DEFAULT_ROUTE]["model"] = "cbai/deepseek-v4.1-flash"
+    monkeypatch.setattr(mod, "ROUTES", routes)
+    monkeypatch.setattr(mod, "MODEL", "cbai/deepseek-v4.1-flash")
     captured: list[list[str]] = []
 
     def fake_call(cmd, **kw):
@@ -881,18 +897,24 @@ def test_only_rounds_up_to_whole_issues(sweep, capsys):
     assert "issues     : 2" in out, f"issue count must be shown: {out}"
 
 
-def test_only_help_does_not_claim_a_hard_cap():
+def test_only_help_does_not_claim_a_hard_cap(tmp_path, monkeypatch):
     """The help text must not promise "at most N" -- the code cannot honour it.
 
     Kept as a test because the wrong wording survived review once already: a claim
     in --help is documentation that users act on, and this one was off by up to
     len(strategies) - 1 runs.
+
+    ``ROOT`` is redirected even though ``--help`` makes argparse exit before the
+    state write. Relying on that ordering is a fragile margin: if the help path
+    ever moved past the write, this test would overwrite the real bill window.
+    The redirect costs nothing and removes the dependency.
     """
     import contextlib
     import io
     import sys
 
     mod = _load_sweep_module()
+    monkeypatch.setattr(mod, "ROOT", tmp_path)
     old = sys.argv
     sys.argv = ["run_final_sweep.py", "--help"]
     buf = io.StringIO()
@@ -915,3 +937,167 @@ def test_only_help_does_not_claim_a_hard_cap():
     assert "rounded up" in flat.lower(), (
         "the help must state that --only rounds up to whole issues"
     )
+
+
+# --------------------------------------------------------------------------
+# --route: the model/provider/card bundle
+# --------------------------------------------------------------------------
+
+def test_build_cmd_pins_the_env_var_the_provider_reads():
+    """Each route must set the env var ITS provider reads -- not a fixed one.
+
+    The failure this pins is silent: setting OPENCODE_MODEL while selecting
+    --provider meta leaves the meta provider reading META_MODEL from .env, so
+    the sweep CALLS one model while the manifest RECORDS another, and every
+    check still passes. The two routes disagree on the variable name, so a
+    hardcoded key is wrong for one of them by construction.
+    """
+    mod = _load_sweep_module()
+    meta_cmd = " ".join(mod.build_cmd(["i"], ["direct"], True, route="meta"))
+    oc_cmd = " ".join(mod.build_cmd(["i"], ["direct"], True, route="opencode"))
+
+    assert f"META_MODEL={mod.ROUTES['meta']['model']}" in meta_cmd, meta_cmd
+    assert "OPENCODE_MODEL=" not in meta_cmd, (
+        f"the meta route must not set the opencode variable: {meta_cmd}"
+    )
+    assert f"OPENCODE_MODEL={mod.ROUTES['opencode']['model']}" in oc_cmd, oc_cmd
+    assert "META_MODEL=" not in oc_cmd, (
+        f"the opencode route must not set the meta variable: {oc_cmd}"
+    )
+
+
+def test_build_cmd_pins_the_provider_of_the_route():
+    """The --provider flag must come from the same bundle as the model."""
+    mod = _load_sweep_module()
+    meta_cmd = mod.build_cmd(["i"], ["direct"], True, route="meta")
+    oc_cmd = mod.build_cmd(["i"], ["direct"], True, route="opencode")
+
+    assert meta_cmd[meta_cmd.index("--provider") + 1] == "meta"
+    assert oc_cmd[oc_cmd.index("--provider") + 1] == "opencode"
+
+
+def test_build_cmd_pins_the_guard_card_of_the_route():
+    """COST_GUARD_MODEL must be the card for the route being run.
+
+    Using one route's card for the other's traffic misprices the $3 cap: the
+    cbai card prices output ~2.6x the muse card, so the cap would bind after
+    ~$1.17 of real spend instead of $3 and replace the turn-budget fairness
+    invariant with a dollar bound.
+    """
+    mod = _load_sweep_module()
+    meta_cmd = " ".join(mod.build_cmd(["i"], ["direct"], True, route="meta"))
+    oc_cmd = " ".join(mod.build_cmd(["i"], ["direct"], True, route="opencode"))
+
+    assert f"COST_GUARD_MODEL={mod.ROUTES['meta']['guard_model']}" in meta_cmd
+    assert f"COST_GUARD_MODEL={mod.ROUTES['opencode']['guard_model']}" in oc_cmd
+    assert mod.ROUTES["meta"]["guard_model"] != mod.ROUTES["opencode"]["guard_model"]
+
+
+def test_build_cmd_refuses_an_unknown_route():
+    """A typo must fail loudly, not fall back to the default route."""
+    import pytest as _pytest
+
+    mod = _load_sweep_module()
+    with _pytest.raises(ValueError, match="unknown route"):
+        mod.build_cmd(["i"], ["direct"], True, route="metaa")
+
+
+def test_default_route_is_deepseek():
+    """The no-flag default must be the route the sweep now runs on.
+
+    Was `meta` (oc/muse-spark); the sweep moved to DeepSeek official, whose
+    model is `deepseek-flash`. The invariant is the same either way: the
+    module-level MODEL must stay in step with the DEFAULT route.
+    """
+    mod = _load_sweep_module()
+    assert mod.DEFAULT_ROUTE == "deepseek"
+    assert mod.MODEL == mod.ROUTES["deepseek"]["model"], (
+        "the module-level MODEL must stay in step with the default route"
+    )
+
+
+def test_resume_refuses_a_route_that_disagrees_with_the_experiment(sweep, capsys):
+    """THE COSTLY TRAP: resuming across models re-runs every finished run.
+
+    The resume key is `instance|model|thinking`, so a different model makes every
+    recorded run look outstanding: the sweep would re-run (and re-PAY for) work
+    already done, and mix two models into one experiment's numbers while the
+    manifest still claims one. Measured shape: EXP-20261009-1548 was written by
+    the meta route; `--route opencode --resume` would have re-run all of it.
+
+    The guard reads the model the experiment RECORDED (experiment.yaml), because
+    that was written by the runner from the live config.
+    """
+    mod, tmp_path, captured = sweep
+    exp = tmp_path / "results" / EXP_A
+    _write_savepoint(exp, "direct", [_done("django__django-1000")])
+    (exp / "experiment.yaml").write_text(
+        "provider:\n  name: meta\n  model: oc/muse-spark-1.3-contributor-free\n",
+        encoding="utf-8",
+    )
+
+    rc = _run(mod, ["--only", "1", "--resume", "--exp-id", EXP_A,
+                    "--strategies", "direct", "--route", "opencode"])
+    assert rc == 2, "a cross-model resume must be refused, not silently re-run"
+    assert not any("run_with_env" in str(a) for c in captured for a in c), (
+        "a refused resume must not launch anything"
+    )
+    err = capsys.readouterr().err
+    assert "oc/muse-spark-1.3-contributor-free" in err, (
+        f"the error must name the recorded model: {err!r}"
+    )
+    assert "cbai/deepseek-v4.1-flash" in err, (
+        f"the error must name the model it would have run: {err!r}"
+    )
+
+
+def test_resume_accepts_the_recorded_route(sweep, capsys):
+    """The other half: the MATCHING route must still resume normally.
+
+    The savepoint is an infrastructure failure (RATE_LIMIT), so the run is
+    still OUTSTANDING and the resume has something to launch -- a "done" row
+    would make --only report "nothing to do" and the assertion below would
+    pass for the wrong reason.
+
+    The manifest is written with the model THIS test's meta route would run
+    (read from ROUTES, not hardcoded): the fixture pins the default route's
+    model, so a hardcoded string here would assert a mismatch, not a match.
+    """
+    mod, tmp_path, captured = sweep
+    exp = tmp_path / "results" / EXP_A
+    _write_savepoint(exp, "direct", [
+        {"instance_id": "django__django-1000", "strategy": "direct",
+         "model_name_or_path": mod.ROUTES["meta"]["model"], "thinking": True,
+         "patch_status": "RATE_LIMIT", "model_patch": "", "error_type": "RateLimitError"},
+    ])
+    (exp / "experiment.yaml").write_text(
+        "provider:\n  name: meta\n"
+        f"  model: {mod.ROUTES['meta']['model']}\n",
+        encoding="utf-8",
+    )
+
+    rc = _run(mod, ["--only", "1", "--resume", "--exp-id", EXP_A,
+                    "--strategies", "direct", "--route", "meta"])
+    assert rc == 0, "the matching route must resume"
+    assert any("run_with_env" in str(a) for c in captured for a in c)
+
+
+def test_resume_without_a_readable_manifest_still_runs(sweep):
+    """A corrupt/missing experiment.yaml must not strand a real experiment.
+
+    The guard is a SAFETY NET against a mismatch, not a requirement: an
+    experiment directory that carries only predictions/ (no manifest) is
+    explicitly accepted by the resume guard, and this check must not undo that.
+    """
+    mod, tmp_path, captured = sweep
+    exp = tmp_path / "results" / EXP_A
+    _write_savepoint(exp, "direct", [
+        {"instance_id": "django__django-1000", "strategy": "direct",
+         "model_name_or_path": "cbai/deepseek-v4.1-flash", "thinking": True,
+         "patch_status": "RATE_LIMIT", "model_patch": "", "error_type": "RateLimitError"},
+    ])
+    # No experiment.yaml on purpose.
+    rc = _run(mod, ["--only", "1", "--resume", "--exp-id", EXP_A,
+                    "--strategies", "direct"])
+    assert rc == 0, "an experiment without a manifest must still resume"
+    assert any("run_with_env" in str(a) for c in captured for a in c)

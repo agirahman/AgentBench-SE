@@ -1,9 +1,14 @@
-from config import Config
 from models.result import ExperimentResult
 
 
 def flatten_for_csv(result: ExperimentResult) -> dict:
     """Flatten nested ExperimentResult → flat dict for CSV export.
+
+    USD ONLY. There are no ``*_idr*`` columns: the exchange rate is a presentation
+    choice, not research data. Converting here would fix each batch to whatever
+    rate was in ``.env`` when it ran, so batches run at different times would not
+    be comparable. Conversion happens at reporting time instead, with an explicit
+    operator-supplied rate (``tools/convert_to_idr.py``).
 
     Column layout (sectioned, paired token→cost):
       1. Meta  : id, strategy, model, difficulty, inference_count,
@@ -12,17 +17,16 @@ def flatten_for_csv(result: ExperimentResult) -> dict:
                  timestamp, timestamp_wib, window, pricing_version, generated, error,
                  semantic_cache_hit, semantic_cache_cost_saved_usd,
                  semantic_cache_hit_turns
-      2. INPUT (token → cost paired, USD + IDR):
-                 input_tokens_cached, input_cost_usd_cached, input_cost_idr_cached,
-                 input_tokens_regular, input_cost_usd_regular, input_cost_idr_regular,
-                 input_tokens_total, input_cost_usd_total, input_cost_idr_total
+      2. INPUT (token → cost paired):
+                 input_tokens_cached, input_cost_usd_cached,
+                 input_tokens_regular, input_cost_usd_regular,
+                 input_tokens_total, input_cost_usd_total
       3. OUTPUT:
-                 output_tokens, output_cost_usd, output_cost_idr
+                 output_tokens, output_cost_usd
       4. TOTAL:
-                 total_tokens, cost_usd_offpeak, cost_idr_offpeak
+                 total_tokens, cost_usd_offpeak
       5. PRICING VARIANTS (total only):
-                 cost_usd_peak, cost_idr_peak, cost_usd_actual, cost_idr_actual,
-                 cost_usd_peak_total, cost_idr_peak_total
+                 cost_usd_peak, cost_usd_actual, cost_usd_peak_total
       6. PATCH (right-aligned):
                  patch_status, raw_regex_fixed, hunk_mismatch_resolved, patch_preview
     """
@@ -51,14 +55,6 @@ def flatten_for_csv(result: ExperimentResult) -> dict:
     input_cost_total_usd = input_cost_cached_usd + input_cost_regular_usd
     output_cost_usd = result.cost.output_cost_usd
     cost_usd_offpeak = result.cost.total_cost_usd
-
-    # IDR conversion (using Config rate, consistent with downstream)
-    rate = Config.USD_IDR_RATE
-    input_cost_cached_idr = input_cost_cached_usd * rate
-    input_cost_regular_idr = input_cost_regular_usd * rate
-    input_cost_total_idr = input_cost_total_usd * rate
-    output_cost_idr = output_cost_usd * rate
-    cost_idr_offpeak = cost_usd_offpeak * rate
 
     return {
         # ── Meta ──
@@ -90,31 +86,23 @@ def flatten_for_csv(result: ExperimentResult) -> dict:
         # ── INPUT (token → cost paired) ──
         "input_tokens_cached": cached_tok,
         "input_cost_usd_cached": input_cost_cached_usd,
-        "input_cost_idr_cached": input_cost_cached_idr,
         "input_tokens_regular": regular_tok,
         "input_cost_usd_regular": input_cost_regular_usd,
-        "input_cost_idr_regular": input_cost_regular_idr,
         "input_tokens_total": input_total_tok,
         "input_cost_usd_total": input_cost_total_usd,
-        "input_cost_idr_total": input_cost_total_idr,
 
         # ── OUTPUT (token → cost paired) ──
         "output_tokens": output_tok,
         "output_cost_usd": output_cost_usd,
-        "output_cost_idr": output_cost_idr,
 
         # ── TOTAL ──
         "total_tokens": total_tok,
         "cost_usd_offpeak": cost_usd_offpeak,
-        "cost_idr_offpeak": cost_idr_offpeak,
 
         # ── PRICING VARIANTS (total only) ──
         "cost_usd_peak": result.cost.peak_total_cost_usd,
-        "cost_idr_peak": result.cost.peak_total_cost_idr,
         "cost_usd_actual": result.cost.actual_cost_usd,
-        "cost_idr_actual": result.cost.actual_cost_idr,
         "cost_usd_peak_total": result.cost.peak_total_cost_usd,
-        "cost_idr_peak_total": result.cost.peak_total_cost_idr,
 
         # ── PATCH (right) ──
         "patch_status": result.patch_status,

@@ -1,11 +1,216 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-10-03 (audit dokumen + verifikasi kesiapan run bertahap)
-**Status:** **SIAP run 50 issue** — bisa **bertahap** dengan `--limit <N naik> --resume` (prefix tumbuh; `--only M` hanya untuk top-up run yang belum selesai). **THINKING ON (medium)**. Budget 200/200/200, revisi **48 (4 putaran × 2 act × 6)**. `--resume` **terbukti bekerja di run berbayar nyata**. Gate **READY 11/11**, preflight **50/50 pristine**. **653 test lulus.** Skrip: `tools/run_final_sweep.py`. **Menunggu izin user untuk 150 run.**
-**Active Branch:** `19/toolcall-commandcode`
-**Commit terakhir:** `5462f9b` (guard `--resume --exp-id`: tolak typo, jangan fork eksperimen berbayar), `9c91d6a` (reconcile dokumen dengan pengukuran), `b6abf88` (`--only N` untuk sweep bertahap), `e618b8d` (completeness-on-interrupt + attempts window), `38a1c57` (interrupt exports + preflight scope), `cf19d98` (resume opsi D)
-**Handoff sesi terakhir:** [`HANDOFF_20261002.md`](HANDOFF_20261002.md) · sebelumnya [`HANDOFF_20261001.md`](HANDOFF_20261001.md)
+**Last Updated:** 2026-10-18 (peralihan route ke DeepSeek official `deepseek-flash`; batch 3 sympy tetap 7/30 — DISTOP, lanjut sesi berikutnya)
+**Status:** ✅ **20/50 issue SELESAI** — batch 1 (django, `EXP-20261010-062`) dan batch 2 (matplotlib, `EXP-20261012-005`) keduanya **30/30 VALID**. Batch 3 (sympy, `EXP-20261015-001`) **berjalan sebagian: 7/30 tercatat** (3 VALID + 4 PROVIDER_ERROR upstream 16:15-16:30; run ke-8 dihentikan setelah ~4 jam). Riset kini beralih ke **DeepSeek official `deepseek-flash`** (sweep `DEFAULT_ROUTE = "deepseek"`): gate **ready efektif 13/13** (12/13 PASS di lane; `disk budget` hijau di checkout utama — lihat §"Status readiness terukur"), preflight **50/50 pristine**, **1263 test lulus, 3 skipped** (mode local MAUPUN `SANDBOX_MODE=docker`). Detail: §"Peralihan ke DeepSeek official" + §"SWEEP BATCH 1 & 2 SELESAI" + §"BATCH 3 (sympy)" di bawah. Handoff sesi: [`HANDOFF_20261015.md`](HANDOFF_20261015.md).
+**Active Branch:** `30/fix/docs-deepseek-final` (base `22/feat/sandbox-isolation`)
+**Commit terakhir:** 🔸 **perubahan sesi ini BELUM di-commit** (working tree modifikasi saja). Branch head = `53008a3` (Merge branch `26/fix/planner-hint-and-test` ke `22/feat/sandbox-isolation`); commit sebelumnya di branch ini: `267ab22` (Fix over-broad resume precedence), `ff84ccf` (git_diff hint hanya untuk role read-only), `8522244` (Record batch 3 partial run 7/30 sympy), `035cc7e` (Update MEMORY.md: batches 1-2 done), `8435126` (Drop agent scratch files from submitted patches, both paths), `505fc09` (`--route` bundle meta | opencode), `fa2fe4b` (Meta Responses provider + silent-failure class ditutup di kedua loop), `8446eb1` (Meta rate card)
+**Handoff sesi terakhir:** [`HANDOFF_20261015.md`](HANDOFF_20261015.md) · sebelumnya [`HANDOFF_20261006.md`](HANDOFF_20261006.md) · [`HANDOFF_20261002.md`](HANDOFF_20261002.md)
 **Detail audit:** [`AUDIT_OPS_PARTNER.md`](AUDIT_OPS_PARTNER.md) · [`AUDIT_SCALE_PARTNER.md`](AUDIT_SCALE_PARTNER.md) · [`AUDIT_PROMPTS_PARTNER.md`](AUDIT_PROMPTS_PARTNER.md) · [`AUDIT_RUN_TESTS_PARTNER.md`](AUDIT_RUN_TESTS_PARTNER.md) · [`RESEARCH_BUDGET_20260929.md`](RESEARCH_BUDGET_20260929.md)
+
+---
+
+## 🔄 Peralihan ke DeepSeek official (`deepseek-flash`) — 2026-10-18
+
+**Ringkasan:** riset beralih ke **DeepSeek official** (`https://api.deepseek.com/v1`), model
+`deepseek-flash`, **dengan tool-calling aktif**. Sweep punya route baru **`deepseek`** dan
+`DEFAULT_ROUTE = "deepseek"` (`tools/run_final_sweep.py`). Route lama `meta` dan `opencode`
+tetap ada. Perubahan kode sudah diterapkan di branch `30/fix/docs-deepseek-final`
+(**belum di-commit**), dan **run final belum dijalankan**; saldo DeepSeek belum dipakai.
+
+| Aspek | Sebelum | Sesudah |
+|---|---|---|
+| Provider default sweep | `meta` (`oc/muse-spark-1.3-contributor-free` via Responses API) | **`deepseek`** (`deepseek-flash` official) |
+| Env var model (default route) | `META_MODEL` | **`DEEPSEEK_MODEL`** (default `deepseek-flash`) |
+| Guard card (default route) | `oc/muse-spark-1.3-contributor-free` | **`deepseek-v4-flash`** |
+| `TOOLCALL_ENABLED` | terserah `.env` (default config `false`) | **di-pin `true`** oleh sweep |
+| Kartu harga `deepseek-flash` | **tidak ada** → biaya `$0.00` | **alias resmi**, tarif identik `deepseek-v4-flash` |
+
+### 🕳️ Tiga kegagalan senyap yang ditutup
+
+1. **Provider tanpa `generate_with_tools` → tool-calling mati senyap.** `DeepSeekProvider`
+   dulu tidak punya `generate_with_tools()`, padahal `src/agents/registry.py` memakai gate
+   `hasattr(provider, "generate_with_tools")` (baris 16). Tanpa method itu, gate **mematikan
+   tool-calling untuk SEMUA agent tanpa error apa pun** → semua strategi kolaps jadi
+   single-shot. Sekarang `DeepSeekProvider.generate_with_tools()` ada dan mendelegasi ke
+   `providers.tool_loop.run_tool_loop`.
+   **Pelajaran:** `hasattr`-gate **tidak pernah gagal keras** — ia hanya diam dan mengubah
+   perilaku. Tambah method = tambah jalur; pastikan gate-nya sadar, bukan senyap.
+2. **Nama model resmi tanpa kartu harga → biaya `$0.00` senyap, RQ3 kosong.** `PricingTable`
+   dulunya hanya punya `deepseek-v4-flash` (ejaan 9router), bukan `deepseek-flash` (nama resmi
+   `api.deepseek.com/v1`). `CostCalculator` mem-price dari `inference.model`, jadi setiap baris
+   run final tercatat **$0.00** dan perbandingan biaya RQ3 kosong — **dan gate tetap hijau**
+   karena tidak ada satu pun readiness check yang membaca tabel harga. Sekarang ada alias
+   `deepseek-flash` dengan tarif identik (0.22/0.007/0.66 off-peak; 0.44/0.014/1.32 peak)
+   — **charge nyata**, bukan estimasi `PRICING_MODEL_OVERRIDE`.
+   **Pelajaran:** menyelaraskan nama model **harus** disertai menyelaraskan kartu harga.
+   Nama yang salah tidak error, hanya menghasilkan biaya nol.
+3. **`TOOLCALL_ENABLED` tidak di-pin sweep.** Sebelumnya hanya `.env` yang menyalakannya,
+   padahal default `Config.TOOLCALL_ENABLED` adalah `false`. `.env` yang drift → semua strategi
+   single-shot tanpa error, dan gate tidak memeriksanya. Sekarang
+   `tools/run_final_sweep.py` mem-pass `--set TOOLCALL_ENABLED=true` eksplisit (baris 514).
+
+### 🔧 Dua gate readiness yang diperbaiki
+
+- **`network block` salah menguji.** `tools/verify_network_block.py` dulu memakai mode ambient
+  (`SANDBOX_MODE` dari environment), bukan mode eksplisit — jadi verifier-nya yang salah, bukan
+  guard-nya. Sekarang menguji **`mode="local"` DAN `mode="docker"` eksplisit**, sehingga
+  hasilnya tidak bergantung pada `SANDBOX_MODE` ambient.
+- **Test live `test_live_single_call_returns_text` FAIL.** Kini **skip** pada HTTP **410**
+  (model-deprecated) dan **404** (model-not-found) — kontraknya memang "skipped, never failed",
+  sedangkan 5xx/429/400 tetap naik sebagai kegagalan nyata.
+
+### ✅ Status readiness terukur
+
+- **12/13 gate PASS** di lane ini. Gate ke-13 (`disk budget`) **exit 0 di checkout utama** —
+  ia hanya FAIL di lane karena `results/EXP-*` gitignored (lane kosong → `IndexError`).
+  Jadi **13/13 efektif**.
+- **Suite: 1263 passed, 3 skipped** (test live kini skip, bukan FAIL).
+
+### 🚧 Batasan (tetap berlaku)
+
+- **Saldo DeepSeek $1 belum dipakai.** Provider sudah disiapkan, belum ada panggilan berbayar.
+- **CommandCode belum siap** (tidak ada API key / belum subs) — hanya disiapkan, tidak diuji.
+- **Run final belum dijalankan.** Batch 3 (7/30 sympy) adalah uji pipeline, **tidak di-resume**.
+
+---
+
+## 🎉 SWEEP BATCH 1 & 2 SELESAI (2026-10-15) — 20/50 issue, 100% VALID
+
+**Ringkasan terpenting sejak 2026-10-06. Kedua batch berjalan penuh, semua run VALID.**
+
+| Batch | EXP | Repo | Issue | Run | Hasil | Biaya (CSV) | Selesai |
+|---|---|---|---|---|---|---|---|
+| **Batch 1** | `EXP-20261010-062` | django | 10 | 30 | **30/30 VALID** | $3,0665 | 11 Okt |
+| **Batch 2** | `EXP-20261012-005` | matplotlib | 10 | 30 | **30/30 VALID** | $2,5992 | 15 Okt 01:40 |
+| **TOTAL** | | | **20** | **60** | **60/60 VALID** | **~$5,67** | |
+
+**Sisa 30 issue untuk batch berikutnya:** sympy (10) + scikit-learn (10) + requests (6) + seaborn (4).
+Issue django & matplotlib yang sudah selesai terdaftar di CSV masing-masing batch.
+
+**Catatan penting:** VALID = patch well-formed + lolos `git apply` (lihat jebakan #10).
+**Resolved** hanya bisa ditentukan lewat evaluasi Modal SWE-bench harness — **belum dijalankan** untuk kedua batch ini. Langkah berikutnya setelah semua batch selesai: evaluasi Modal.
+
+### 🔀 Perubahan jalur: `--route` bundle (commit `505fc09`)
+
+Sweep kini punya flag **`--route {meta|opencode}`** yang membundel **model + provider + env + guard card** menjadi satu pilihan, plus **guard anti-campur resume** (resume dengan route berbeda dari yang tercatat di `sweep_started.json` → ditolak). Ini mencegah eksperimen tercampur dua model.
+
+- Batch 1 dijalankan dengan route **meta** (`muse-spark`) — **distop di 18/30** karena **free tier habis** (`FreeUsageLimitError`).
+- Batch 1 (lanjutan) & batch 2 memakai route **opencode** (`cbai/deepseek-v4.1-flash`, berbayar).
+
+### 🐛 Insiden & perbaikan selama kedua batch
+
+1. **Batch 1 — scratch files lolos ke patch (SEDANG, sudah diperbaiki, commit `8435126`).**
+   17 file scratch agent (`_exp6.py`, `_t1.txt`, dll) lolos ke patch `11019 review` (82 KB).
+   Filter lama tidak menangkap penamaan itu. Perbaikan final: **suffix-digit + root-only guard**
+   (worker menolak usul awal orchestrator karena akan menghapus file nyata seperti `_discretization.py`
+   — terbukti benar: 5-10 checkout nyata punya file itu). Verifikasi: 18→1 file, 17 dropped,
+   **0 false positive di 133.029 file** (scan reviewer independen), 6 mutasi survivor putaran 1
+   semuanya KILLED setelah tes restriksi ditambahkan. **Fix menyentuh DUA jalur**:
+   `capture_diff` + fallback `runner.py:1238-1245` (jalur fallback dulu melewati filter).
+2. **Batch 1 — 1 run hilang (11283 review) ditolak karena repo kotor** (`__pycache__` terkunci
+   Windows). Resume setelah `clean_repos.py` → **VALID**. Batch 1 jadi 30/30.
+3. **Batch 2 — mesin sleep ~3,8 jam** (19:32→23:18) → 1 API timeout → retry otomatis → sweep
+   lanjut sendiri. **Tidak ada data rusak.** Pelajaran: **matikan sleep/suspend saat sweep malam**.
+4. **Batch 2 — wifi putus (~17:40-17:57)** → 3 run `23563` jadi `PROVIDER_ERROR`
+   (`503 fetch failed ENOTFOUND www.codebuddy.ai`). Wifi pulih → sweep lanjut otomatis.
+   **`PROVIDER_ERROR` selalu retryable** — resume berikutnya hanya mengerjakan 3 run yang gagal
+   (27 VALID di-skip, tidak ada pembayaran ganda).
+5. **Batch 2 — issue `23563` adalah yang terberat**: direct ~130 menit, planning ~114 menit,
+   review ~85 menit — ketiganya akhirnya **VALID** setelah retry. Run direct-nya 540+ toolcall
+   eksplorasi; keputusan "tidak intervensi" terbukti benar.
+6. **Run matplotlib jauh lebih lambat dari django**: ~30-130 menit/run (compile C extension
+   `_qhull_wrapper.cpp` + test suite besar) vs django ~15 menit/run. Ini ekspektasi baru untuk
+   estimasi biaya/waktu batch berikutnya.
+
+### ⏭️ Cara melanjutkan (batch 3)
+
+```powershell
+# 1. Bersihkan checkout (runner membersihkan SEBELUM tiap strategi, tidak sesudah)
+.venv\Scripts\python.exe tools\clean_repos.py
+
+# 2. Verifikasi preflight (Docker harus hidup!)
+.venv\Scripts\python.exe tools\preflight_repos.py
+
+# 3. Launch batch 3 (contoh: 10 issue berikutnya)
+.venv\Scripts\python.exe tools\run_final_sweep.py --route opencode --issues <daftar 10 issue>
+```
+
+**Urutan issue yang direkomendasikan:** sympy → scikit-learn → requests → seaborn.
+**Estimasi per 10-issue batch:** ~$2,5-4 (opencode route), durasi 8-48 jam tergantung repo
+(scikit-learn/sympy lebih cepat dari matplotlib, tapi lebih lambat dari django).
+
+### 🧰 Tool monitoring sesi (di `logs/`, tidak di-commit)
+
+`_loop_progress.py` (ringkasan progres), `_health.py` (status + kesegaran log), `_retry_verify.py`,
+`_logtail.py` (toolcall terakhir + strip ANSI), `_procs.py` (rantai proses), `_current_run.py`
+(4 lapis: artifact, savepoint, checkout dirty, docker container). Semua membaca log **mana pun
+yang terbaru** (sequencer/resume/retry) — penting karena setiap sesi resume menulis log baru.
+
+---
+
+## ⚠️ BATCH 3 (sympy) — BERJALAN SEBAGIAN, DISTOP 2026-10-15 20:45 WIB
+
+**EXP `EXP-20261015-001` · route opencode · 10 issue sympy · distop di 7/30 setelah run ke-8
+(planning·sym-11897) berjalan ~4 JAM tanpa selesai.**
+
+### Hasil tercatat (7 run)
+
+| # | Run | Status |
+|---|---|---|
+| 1-3 | sym-11400 × direct/planning/review | ✅ **VALID** (semua — issue pertama tuntas ~30 menit) |
+| 4-7 | sym-11870 × 3 + sym-11897 direct | ⚠️ **PROVIDER_ERROR** |
+
+**Penyebab 4 PROVIDER_ERROR**: gangguan upstream `codebuddy.ai` pukul **16:15-16:30**
+(`503 - [403]: <!DOCTYPE html>...` — halaman HTML dari upstream, bukan wifi seperti batch 2).
+Provider pulih ~16:19 dan run berikutnya normal. **Semua 4 run akan di-retry otomatis saat resume.**
+
+### 🔴 Pelajaran BARU: sympy + masking git = agent bingung (run ke-8, ~4 jam)
+
+**Fakta terukur dari log run ke-8 (`planning · sym-11897`):**
+- **314+ toolcall, turn ~126/200** — agent eksplorasi ekstrem.
+- **Agent mencoba `umount /work/.git`** (19:17) untuk membuka masking git → **DITOLAK**
+  (`must be superuser to unmount` — sandbox non-root). ✅ **Sandbox terbukti tahan** (diverifikasi
+  mandiri dengan `docker run` probe).
+- **Agent lalu `find / -xdev -name "refs"` dan `find / -name "index" -path "*git*"`** — mencari
+  git history alternatif. **Sia-sia** (di-mask), tapi memakan banyak turn.
+- Agent juga mencari tarball sympy (`find / -iname "sympy*.tar.gz"`) — kemungkinan mencari
+  solusi upstream dari sumber lain (juga gagal — sandbox bersih).
+- Retry provider **menumpuk di turn 80→85→91→104→116→126** (masing-masing attempt 1/3,
+  auto-recover). Kemungkinan request timeout karena konteks sangat panjang.
+
+**Diagnosis:** masking git **bekerja terlalu baik** — agent tidak menemukan `.git` dan
+menghabiskan waktu mencari jalur alternatif alih-alih menyelesaikan issue. Ini **efek samping
+tak terduga** dari pertahanan keamanan yang perlu ditangani untuk batch berikutnya.
+
+**🔧 Rekomendasi perbaikan (untuk sesi berikutnya):** tambahkan kalimat eksplisit di system
+prompt: *"Git history is intentionally unavailable in this sandbox. Do not search for .git
+directories or git repositories — they are masked by design. Solve the issue from the source
+code alone."* Ini menghilangkan pencarian sia-sia tanpa membuka kebocoran.
+
+**Keputusan operator (2026-10-15 20:45):** distop karena terlalu lama; lanjut besok.
+Run ke-8 dihentikan di tengah (belum tercatat) — resume akan mengulangnya dari awal.
+Checkout sudah dibersihkan (`clean_repos.py` → 2 sympy checkout di-reset).
+
+### ⏭️ Cara resume batch 3
+
+```powershell
+# 1. Bersihkan (runner bersihkan SEBELUM tiap strategi, tidak sesudah)
+.venv\Scripts\python.exe tools\clean_repos.py
+
+# 2. Preflight (Docker WAJIB hidup)
+.venv\Scripts\python.exe tools\preflight_repos.py
+
+# 3. Resume — otomatis skip 3 VALID, kerjakan 4 PROVIDER_ERROR + sisanya
+.venv\Scripts\python.exe tools\run_final_sweep.py --route opencode --resume `
+  --exp-id EXP-20261015-001 --issues `
+  sympy__sympy-11400 sympy__sympy-11870 sympy__sympy-11897 sympy__sympy-12171 `
+  sympy__sympy-12236 sympy__sympy-12419 sympy__sympy-12454 sympy__sympy-12481 `
+  sympy__sympy-13031 sympy__sympy-13043
+```
+
+**Estimasi sisa**: 23 run (4 retry + 19 baru). **Perhatian**: sympy bisa sangat lambat kalau
+agent bingung soal git (lihat pelajaran di atas) — pertimbangkan menambahkan hint prompt dulu
+sebelum resume.
 
 ---
 
@@ -290,7 +495,7 @@ dipakai `--resume`. Kalau diimplementasikan ulang, keduanya bisa berbeda pendapa
 dan ukuran batch jadi tidak bermakna sama dengan yang benar-benar dijalankan.
 
 **Verifikasi:** 10 test (`tests/test_sweep_only_batch.py`), **7 MERAH** saat
-perbaikannya dimatikan. Suite **508 lulus saat itu** (kini **653**), gate **READY 11/11**.
+perbaikannya dimatikan. Suite **508 lulus saat itu** (kini **1245 lulus, 1 skipped**), gate **READY 13/13**.
 
 ---
 
@@ -551,6 +756,105 @@ daemon Docker **mati** (harus dinyalakan tiap batch); WSL `memory=3GB` di host 7
 Preseden Opsi A sudah ada di mesin: user `CodexSandboxOffline/Online` + firewall rule per-user, dan
 `New-NetFirewallRule` punya `-LocalUser` (terverifikasi).
 
+### 🐳 Implementasi Penuh: Docker Sandbox (Layer-2) (2026-10-06)
+
+Mengimplementasikan isolasi kontainer sejati untuk menutup seluruh 10 bypass jaringan dan 7 jalur filesystem:
+
+1. **Image Sandbox (`docker/sandbox.Dockerfile` → `agentbench-sandbox:latest`):**
+   - Base `python:3.9-slim`, ukuran ringkas **211 MB** (build time ~14 detik).
+   - User non-root `sandbox` (`uid=1000`).
+   - Hanya terinstall `pytest 8.4.2`. Paket target repositori (`django`, `sympy`, `requests`, dll.) **tidak diinstall** (mencegah oracle).
+   - **Git binary SENGAJA tidak diinstall** — dan **tidak boleh ditambahkan**: karena `.git` di-mask (lihat #2), git binary pun tidak akan berguna (bukan repo). Ini juga menghapus jalur `git log`/`git show` sebagai vektor kebocoran.
+
+2. **Eksekusi Kontainer di `src/agents/tools.py:run_tests`:**
+   - Parameter isolasi: `--rm --network=none --memory=2g --cpus=2 --tmpfs /tmp`.
+   - **Masking `.git` via `--tmpfs /work/.git`:** Menutup celah pembacaan packfile `.git/objects` dan `packed-refs` via Python zlib murni. Kontainer melihat `.git` sebagai tmpfs kosong, sementara working tree checkout `/work` tetap bisa dibaca/diedit.
+     - **Terukur:** tanpa mask, `packed-refs` **terbaca** dan packfile **4.121.121 byte** bisa dibuka dengan Python murni. Dengan mask: `packed-refs exists: False`, `packfiles found: 0`.
+     - **Git binary tidak membantu:** tanpa mask, `git log` tetap gagal karena binary tidak ada (`git: not found`) — jadi mask adalah penutup yang sebenarnya, bukan ketiadaan binary.
+   - **Ekstraksi patch di host:** Host git tetap memegang `.git` asli; tool `git_diff` dan ekstraksi final berjalan di host. Editan kontainer tembus langsung ke host via mount 9p drvfs.
+   - **Translasi Path Otomatis (`_translate_paths_to_container`):** Path absolut Windows ke dalam checkout diubah menjadi `/work/...`. Path di luar checkout dibiarkan mentah agar otomatis gagal di kontainer (fail-closed).
+   - `_guess_test_command` menggunakan POSIX `python` (bukan path Windows host).
+
+3. **Prompt Penyesuaian Lingkungan (`src/providers/system_prompts.py`):**
+   - Saat `SANDBOX_MODE=docker`, `TOOL_SYSTEM_PROMPT` memuat hint: *"The execution sandbox is POSIX (Linux): use grep/ls/cat, not findstr/dir/type. Absolute Windows paths are not valid there. Git is not installed in the sandbox — use the git_diff tool (runs on host) to inspect changes."*
+   - Kalimat git itu **wajib**: tanpa itu agent membuang turn mencoba `git log`/`git show` yang **pasti** gagal (binary tidak ada + `.git` di-mask), lalu menyimpulkan sandbox-nya rusak.
+
+4. **Gate Preflight & Verifikasi (`tools/readiness_report.py` & `tools/verify_docker_sandbox.py`):**
+   - Gate preflight diperluas menjadi **12 checks** (tambah `docker sandbox`).
+   - Status gate: **READY: all 12 checks pass**.
+
+5. **Uji Regresi Kebocoran (`tools/probe_sandbox_escape.py`):**
+   - **21 probe** escape (B1–B10 jaringan, F1–F7 filesystem, ORA oracle, GIT masking, GITBIN binary, PACK pure-Python read) — **seluruhnya 100% BLOCKED (PASS)** di bawah Docker.
+   - **Terbukti bisa MERAH:** dengan `DOCKER_MASK_GIT=0`, probe `GIT` dan `PACK` **GAGAL** (exit 1) dan melaporkan `found_git_history` / `found_packed_refs`. Jadi probe ini bukan tautologi.
+   - **Uji integrasi Docker nyata** (`tests/test_docker_sandbox.py::TestRealDockerIntegration`, 5 test, bukan mock): memverifikasi git **tidak ada**, **tidak ada paket target** yang importable (7 paket), `.git` ter-mask tapi working tree tetap terbaca, network terblok, dan host FS tidak ter-mount. Kalau daemon mati, test **SKIP** — tidak pernah "lulus palsu".
+
+6. **⚠️ PELAJARAN: test wajib di-scope ke mode yang diuji (2026-10-06).**
+   Dua test lama **GAGAL** saat suite dijalankan dengan `SANDBOX_MODE=docker` (2 failed, 677 passed) — **bukan** karena implementasinya salah, tapi karena test-nya **tidak menyatakan mode yang diuji**:
+   - `test_run_tests_blocks_python_network_probe` hanya menerima pesan `[blocked] ...` dari **sitecustomize** (mode local). Di docker, network diblokir **OS-level** (`Temporary failure in name resolution`) — pesan berbeda, isolasi **lebih kuat**, tapi assertion-nya tunggal.
+   - `test_uses_project_interpreter_not_bare_python` menuntut `sys.executable` ada di command. Itu benar di **local**, tapi di **docker** justru **salah**: path Windows `D:\...\python.exe` tidak ada di kontainer (terukur: exit 127) — `python` POSIX polos yang benar.
+   **Perbaikan:** kedua test dipecah per mode (bukan dilemahkan). Assertion mode-independent yang menangkap kegagalan **kedua** lapisan: `"[exit code 0]" not in res` — kalau isolasi hilang, probe **berhasil** dan test MERAH. Ditambah test docker eksplisit `test_docker_mode_uses_bare_posix_python`.
+   **Bukti tetap bisa MERAH (4/4, di mode yang benar):** hapus `--network=none` → RED (docker); hapus injeksi sitecustomize → RED (local); docker pakai `sys.executable` → RED (docker); local pakai `python` polos → RED (local). Pemulihan byte-for-byte terverifikasi SHA256.
+   **Aturan:** suite harus lulus di **kedua** mode; kalau menyentuh sandbox, jalankan **dua kali** (default + `SANDBOX_MODE=docker`).
+
+7. **🔴 BLOCKER: kebocoran lewat SYMLINK + `grep` (2026-10-06) — DIPERBAIKI.**
+
+   **Rantai serangan (terbukti, bukan teoretis):**
+   1. Agen menjalankan `ln -sf ../../../../../.env /work/zz_v_env` **di dalam container**.
+   2. Karena `/work` di-bind-mount **rw**, symlink itu **mendarat di checkout HOST**
+      (terukur: 2 junction nyata — `pw -> /etc/passwd`, `rootlink -> /`).
+   3. Agen memanggil tool HOST `grep(pattern="API_KEY", path=".")`.
+   4. `grep()` membaca tiap file hasil `os.walk` **tanpa `_safe_path` per-file** →
+      symlink diikuti → isi file di **luar repo** dikembalikan.
+
+   **Bukti terukur (dengan kunci PALSU di temp dir, bukan kunci asli):**
+   ```
+   read_file('zz_v_env')  -> [error] Path ... is outside the allowed repo directory   (BENAR)
+   grep('FAKE_KEY...', '.') -> zz_v_env:1: GEMINI_API_KEY=FAKE_KEY_FOR_TESTING_NOT_REAL_12345   (BOCOR)
+   ```
+   Jadi `_safe_path` **sudah benar**; yang bocor adalah **walker**-nya (`grep`, dan
+   `list_files` yang menampilkan link seolah file biasa).
+
+   **Perbaikan (BLOCKER 1):** guard **per-file** di `grep()` —
+   `_is_reparse_point(fp) or not _resolves_inside_root(fp)` — dievaluasi **sebelum**
+   file dibuka. `list_files()` menandai link sebagai `[link->outside]`. Jumlah link
+   yang dilewati dilaporkan ke agen (tidak diam-diam kosong).
+
+   **⚠️ Jebakan API yang mahal:** untuk junction (yang dibuat container di host Windows),
+   `Path.is_symlink()` → **False** dan `Path.exists()` → **OSError WinError 1920**.
+   Detektor yang benar = `os.lstat().st_file_attributes & 0x400`
+   (terukur: junction 1056 = 0x420, file biasa 32 = 0x20).
+
+   **Gate bisa dilewati (BLOCKER 2):** `preflight_repos.py` mengandalkan
+   `git status --porcelain`, tapi symlink bernama `*.pyc` (atau di `build/`) cocok
+   `.gitignore` checkout → **tak terlihat git**, padahal link-nya ada dan bisa dibaca.
+   Terukur: `zz_hidden.pyc` → `git status` **buta**, scanner **melihat**.
+   **Perbaikan:** `tools/repo_link_scan.py` + `tools/scan_repo_links.py` (check gate
+   baru, independen git), diintegrasikan ke `preflight_repos.py` dan
+   `readiness_report.py` (**13 check**). Pesan kegagalan memuat perintah pembersihan,
+   karena `git clean` **tidak** menghapus junction.
+
+   **Bukti test bisa MERAH (4/4, pulih byte-for-byte via SHA256):** hapus guard
+   per-file `grep` → RED; hapus penandaan `list_files` → RED; buat scanner buta pada
+   cabang reparse-attribute → RED; matikan **kedua** guard `grep` → RED.
+   Catatan penting: mematikan **satu** guard saja **tidak** terdeteksi, karena
+   guard-nya **berlapis** (`_resolves_inside_root` menangkap junction walau cabang
+   reparse dimatikan) — itu defense-in-depth yang bekerja, bukan test yang lemah.
+
+   **BLOCKER 3 (belum diputuskan — butuh keputusan user):** mencegah symlink mendarat
+   di host. Terukur: `-v ...:/work:ro` **menutup vektor ini total**
+   (`ln: failed to create symbolic link: Read-only file system`), dan **tool edit
+   tetap berfungsi** karena `edit_file`/`write_file`/`git_diff`/`capture_diff`
+   semuanya **host-side** (container hanya untuk menjalankan tes). Biayanya:
+   **6,1%** panggilan `run_tests` (102/1674, dari 329 file `tool_calls.jsonl`)
+   melakukan tulis ke checkout (kebanyakan file scratch) → akan gagal di bawah `:ro`.
+   Alternatif: mount rw + **sapu reparse point setelah setiap `run_tests`** (murah,
+   tapi ada jendela waktu antar panggilan).
+
+   **BLOCKER 4 (lapor saja, keputusan user):** `.env` berada 5 level di atas checkout,
+   sehingga jadi target mudah bagi symlink relatif. Rekomendasi: pindahkan kredensial
+   **keluar pohon proyek** (mis. `%USERPROFILE%\.agentbench\env`), supaya `../../../..`
+   tidak pernah mencapainya.
+
 ---
 
 ## ✅ VERIFIKASI END-TO-END DI RUN BERBAYAR NYATA (2026-10-03) — `EXP-20261002-542`
@@ -773,14 +1077,14 @@ tapi bisa dikutip ke tesis):
 
 ---
 
-**Satu perintah memverifikasi semuanya:** `python tools/readiness_report.py` → **READY, 9/9**.
+**Satu perintah memverifikasi semuanya:** `python tools/readiness_report.py` → **READY, 12/12**.
 Ia **menjalankan unit test suite juga** (versi pertamanya tidak, dan itu blocker: gate bisa
 hijau sementara suite merah). Terbukti **bisa gagal**: `tools/_prove_gate_fails.py`
 menyuntikkan test rusak → gate melaporkan **NOT READY**, exit 1.
 
 | Verifikasi | Hasil |
 |---|---|
-| Unit test | **653 lulus** |
+| Unit test | **1245 lulus, 1 skipped** (mode local **dan** `SANDBOX_MODE=docker`) |
 | Preflight repo | **50/50 pristine** |
 | Fairness budget | **FAIR** — 200/200/200 |
 | Putaran revisi | Setiap act revisi **6+6** (kebutuhan terukur: 6) |
@@ -818,7 +1122,7 @@ Sweep **tidak** mengulang dari nol; savepoint per run dibaca dan yang sudah sele
 | **Budget tool-turn** | ✅ Done | `agents/budget.py` — total sama per strategi, sekarang **200** (skala referensi) |
 | **Pre-flight validator** | ✅ Done | `tools/preflight_modal.py` — replikasi kontrak Modal secara lokal |
 | **Rate-limit handling** | ✅ Done | Backoff 429 + circuit breaker |
-| **Test suite** | ✅ Done | **653 lulus** (dari 426). **Lulus di env bersih MAUPUN env kotor** |
+| **Test suite** | ✅ Done | **1245 lulus, 1 skipped** (dari 426). **Lulus di env bersih MAUPUN env kotor**, dan di **mode local MAUPUN `SANDBOX_MODE=docker`** |
 | **Thinking mode** | ✅ **ON** | `deepseek` thinking + effort `medium`; `*_reasoning.md` ditulis per role |
 | **MAX_TOKENS** | ✅ **65536** | Naik dari 32768; reasoning + jawaban berbagi anggaran ini |
 | **Rate card cbai** | ✅ **FIXED** | Diukur dari key yang BENAR (`…da2fe1`), bukan `…b04880` |
@@ -870,6 +1174,24 @@ Sweep **tidak** mengulang dari nol; savepoint per run dibaca dan yang sudah sele
 ---
 
 ## 📊 Hasil Eksperimen Terakhir
+
+### 🎉 `EXP-20261010-062` (batch 1, django) & `EXP-20261012-005` (batch 2, matplotlib) — **60/60 VALID**
+
+**Dua batch pertama dari sweep final. Thinking ON medium, budget 200/200/200, Docker sandbox.**
+
+| Batch | Repo | Issues | Runs | VALID | Biaya (CSV) |
+|---|---|---|---|---|---|
+| `EXP-20261010-062` | django | 10 | 30 | **30** | $3,0665 |
+| `EXP-20261012-005` | matplotlib | 10 | 30 | **30** | $2,5992 |
+| **TOTAL** | | **20** | **60** | **60 (100%)** | **~$5,67** |
+
+**⚠️ Belum dievaluasi Modal** — VALID ≠ resolved. Perlu evaluasi SWE-bench harness untuk skor RQ1.
+Detail lengkap (insiden, durasi, pelajaran): lihat §"SWEEP BATCH 1 & 2 SELESAI" di header dokumen ini.
+
+**Durasi terukur:** batch 1 ~2,5 hari (dengan interrupt rate-limit meta), batch 2 ~2,5 hari (dengan
+resume + retry). Run matplotlib **jauh lebih lambat** (30-130 menit/run) dari django (~15 menit/run).
+
+---
 
 ### `EXP-20260927-010` — 3 issue, budget 20/40/60
 
@@ -1744,9 +2066,10 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 | Key | Nilai | Catatan |
 |---|---|---|
+| `DEEPSEEK_MODEL` | `deepseek-flash` | **model resmi DeepSeek official** (`https://api.deepseek.com/v1`) yang dipakai route `deepseek`. Sweep mem-pin ini lewat env var route (`--set DEEPSEEK_MODEL=deepseek-flash`). Ejaan 9router `deepseek-v4-flash` **bukan** nama model di endpoint resmi |
 | `OPENCODE_MODEL` | `oc/space-bunny-free` | **model gratis** — untuk smoke test. **Sweep meng-override ke `cbai/deepseek-v4.1-flash` (berbayar) lewat `--set`**; RQ3 butuh yang berbayar |
 | `OPENCODE_BASE_URL` | `http://localhost:20128/v1` | 9router harus hidup |
-| `TOOLCALL_ENABLED` | `true` | edit-then-diff |
+| `TOOLCALL_ENABLED` | `true` | edit-then-diff. **Sweep kini mem-pin `true` eksplisit** (`--set TOOLCALL_ENABLED=true`); sebelumnya hanya `.env` yang menyalakannya padahal default config `false` |
 | `TOTAL_TOOL_TURNS` | `200` | pool per strategi: direct 200; planning 190+10; review 152+48 |
 | `MAX_TOOL_TURNS` | `20` | fallback per-act, hanya jika TOTAL=0 |
 | `BUDGET_MODE` | `per_task` | **eksplisit** (dulu tidak diset → default `per_act`, beda dari sweep) |
@@ -1754,7 +2077,7 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 | `REVISION_TOOL_TURNS` | `48` | = 4 putaran × 2 act × 6 turn (kebutuhan terukur: 6) |
 | `MAX_REVISION_TURNS` | `4` | batas ronde revisi; **sweep mem-pass ini eksplisit** |
 | `COST_LIMIT_USD` | `3.0` | pengaman dolar per task (referensi SWE-agent $3) |
-| `ACT_TIMEOUT_SECONDS` | `3600` | **per act**. Dulu tidak ada di `.env` → default 1800, padahal sweep pass 3600 |
+| `ACT_TIMEOUT_SECONDS` | `3600` → **0** (2026-10-06, DIHAPUS) | **per act**. Bound wall-clock dihapus setelah batch 1 run 11 menghasilkan NO_DIFF (executor dibunuh 3600 s saat sehat). Sweep mem-pass 0 eksplisit; default interaktif tetap 1800. Run berhenti oleh budget turn/COST_LIMIT_USD/retry/agen selesai. |
 | `TOOL_OUTPUT_MAX_CHARS` | `2000` | cap per hasil tool, head+tail |
 | `API_TIMEOUT` | `600` | dinaikkan dari 180 |
 | `PROMPT_CACHE_LAYOUT` | `true` | prefix caching terbukti nyata (~90% hit) |
@@ -1764,7 +2087,7 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 | Key | Default | Kenapa tidak diset |
 |---|---|---|
-| `PRICING_MODEL_OVERRIDE` | `""` | diisi hanya saat mau menghargai token model gratis dengan rate card berbayar (**estimasi**) |
+| `PRICING_MODEL_OVERRIDE` | `""` | diisi hanya saat mau menghargai token model gratis dengan rate card berbayar (**estimasi**). **Tetap kosong** untuk route `deepseek`: kartu harga `deepseek-flash` sudah jadi alias resmi di `PricingTable` (`src/evaluation/cost.py`), jadi biaya dihitung **langsung** dari kartu resmi — bukan override/estimasi |
 
 > **Catatan:** `tools/run_final_sweep.py` mem-pass **semua** nilai di atas lewat
 > `run_with_env.py --set`, jadi sweep tidak bergantung pada `.env`. Nilai di `.env`
@@ -1807,6 +2130,12 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 23. **Token pipeline ≠ token yang ditagih (beda ~5×).** `input_tokens_total` mencatat token **baru per turn**; provider menagih **konteks penuh yang dikirim ulang tiap request**. Terukur `EXP-20261002-279`: pipeline 1,20 juta vs bill **6,33 juta** = **5,25×**. Ini **bukan** bug dan **bukan** pencemaran sesi agent — terverifikasi karena rasio konteks kumulatif (12,5 juta char `review` vs 1,5 juta `direct`) cocok, sedangkan rasio request hanya 1,53×. **Implikasi:** biaya naik **lebih cepat daripada jumlah turn** (konteks menumpuk **per act**, jadi `total_turns` bukan prediktor yang baik); **turn adalah variabel biaya utama, bukan token**. Untuk angka biaya, **bill yang menang**. Eksponen persisnya **belum terkalibrasi** — jangan kutip satu angka. Lihat §"Koreksi penting: token" di atas.
 24. **Hitung request dari turn assistant, bukan dari entri trajectory.** Tool call dieksekusi **lokal** oleh harness (provider hanya menyediakan model), jadi eksekusi tool **gratis** — tapi hasilnya dikirim balik sebagai `tool_result` dan itu **request baru yang ditagih penuh**. `review` punya **162 entri** trajectory tapi hanya **54 request**; 108 sisanya hasil tool. Menghitung dari total entri → **over-count 3×**. Field yang benar: `type == "assistant"`. Penyebab mudah salah: saya sempat memakai `kind` yang tidak ada (fieldnya `type`), sehingga hitungannya kacau dua kali.
 25. **Jangan menguji flag baru pada direktori eksperimen nyata.** Saat menguji `--only`, saya menjalankannya pada `EXP-20261002-279` **tanpa `--dry-run`** → **2 run berbayar tak sengaja** (~$0,019), dan CSV pilot itu bertambah dari 3 → 5 baris. **Uji dengan `--dry-run` dulu**, atau pada salinan sekali pakai. Flag yang memicu run adalah **destruktif**: ia menulis ke direktori yang ditunjuk, bukan ke tempat aman. Gate tidak menahannya karena preflight hanya memeriksa **repo pristine**, bukan "apakah kamu yakin menjalankan ini".
+26. **`reset_working_tree` dipanggil di AWAL tiap run, BUKAN di akhir** (`direct_strategy.py:36` dll). Jadi setelah sweep selesai/di-stop, checkout ditinggal **kotor** → preflight sweep berikutnya **menolak start**. **Selalu `tools/clean_repos.py` sebelum launch batch berikutnya** — ini terukur 3× (11283 batch 1, resume batch 2, retry 23563).
+27. **Mesin sleep/suspend memutus sweep.** Terukur batch 2: gap 226 menit (19:32→23:18) → 1 API timeout → retry otomatis → sweep lanjut sendiri (tidak ada data rusak, tapi waktu terbuang). **Matikan sleep/suspend saat sweep malam.**
+28. **Wifi putus = `PROVIDER_ERROR`, dan itu SELALU retryable.** Terukur batch 2: 3 run gagal `503 fetch failed ENOTFOUND` saat wifi putus (~17 menit). Resume berikutnya **otomatis hanya mengerjakan run yang gagal** (yang VALID di-skip, tanpa pembayaran ganda). **Jangan panik, jangan relaunch eksperimen baru** — cukup resume.
+29. **Durasi run sangat bergantung repo.** matplotlib **30-130 menit/run** (compile C extension + test suite besar) vs django ~15 menit/run. Jangan intervensi run yang "lama" selama log tumbuh + aktivitas fresh — budget 200 turn + COST_LIMIT_USD akan menghentikannya sendiri. Terukur: run direct 23563 ~130 menit dengan 540+ toolcall **tetap VALID**.
+30. **Scratch-file leak bisa lewat DUA jalur.** Filter di `capture_diff` saja **tidak cukup** — fallback `runner.py` (Item 8a) mengambil teks mentah `patch.response` yang melewati filter. Fix commit `8435126` menutup **keduanya** (`drop_scratch_files` dipanggil juga di runner sebelum `strip_test_files`). Pelajaran umum: kalau memperbaiki sebuah filter, **cari semua jalur yang menghasilkan output yang sama**.
+31. **Masking git bisa MEMBUAT AGEN BINGUNG — biaya waktu, bukan kebocoran (terukur batch 3, 2026-10-15).** Di run `planning·sym-11897` (~4 jam, dihentikan), agent mencoba **`umount /work/.git`** (ditolak, non-root — sandbox tahan ✅) lalu **`find / -xdev -name "refs"`** + `find / -name "index" -path "*git*"` untuk mencari git history alternatif. Sia-sia (di-mask) tapi memakan **puluhan turn**. Agent juga mencari tarball sympy (`find / -iname "sympy*.tar.gz"`) — kemungkinan mencari solusi upstream. **Implikasi:** pertahanan keamanan yang "bekerja terlalu baik" mengubah perilaku agent secara tidak terduga. **⚠️ Hint saat ini TIDAK CUKUP**: `system_prompts.py:33-34` sudah bilang *"Git is not installed in the sandbox — use the git_diff tool (runs on host)"*, tapi agent **tetap** mencoba umount + find. **Rekomendasi:** perkuat jadi eksplisit: *"Do NOT search for .git directories, git repositories, or git history — they are masked by design and searching wastes turns. Solve from the source code alone."* Perbaikan ini **belum diimplementasikan** — pertimbangkan sebelum resume batch 3.
 
 ---
 
@@ -1820,11 +2149,14 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 | `src/agents/tools.py` | Definisi tool + guard (termasuk `[tests unavailable]`) |
 | `tools/run_with_env.py` | **Wrapper wajib** — membuat `.env` menang |
 | `tools/run_final_sweep.py` | **Entry point run 50 issue** — gate preflight, pass semua config eksplisit |
-| `tools/preflight_repos.py` | Cek 50 repo pristine; sweep **gagal** kalau tidak |
+| `tools/preflight_repos.py` | Gate preflight: **Docker dulu** (daemon + image + container uji, GAGAL-KERAS), lalu 50 repo pristine; sweep **gagal** kalau tidak |
 | `tools/clean_repos.py` | Bersihkan checkout yang kotor |
 | `tools/sanitize_git_history.py` | **Sanitasi git timesafe** SWE-bench PR #471 (`--dry-run`/`--apply`/`--check`) |
 | `tools/verify_network_block.py` | **Verifikasi blok jaringan**: sitecustomize & command filter aktif |
-| `tools/probe_sandbox_escape.py` | **Probe 6 vektor escape nyata** (semua wajib PASS/BLOCKED) |
+| `tools/verify_docker_sandbox.py` | **Verifikasi sandbox Docker**: daemon, image, network block, git masking |
+| `tools/scan_repo_links.py` | **Gate anti-symlink**: deteksi reparse point di checkout (git status BUTA untuk ini) |
+| `tools/repo_link_scan.py` | Helper deteksi symlink/junction via `st_file_attributes` (bukan `Path.is_symlink`) |
+| `tools/probe_sandbox_escape.py` | **Probe 19 vektor escape nyata** (jaringan, filesystem, oracle, git history) |
 | `tools/check_semantic_cache.py` | **Gate integritas**: deteksi response-cache hit (exit 1 bila ada) |
 | `tools/verify_revision_rounds.py` | Apakah reserve membiayai **setiap** putaran revisi? |
 | `tools/audit_revision_rounds.py` | Berapa putaran revisi yang **benar-benar** jalan? |
@@ -1865,32 +2197,23 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 ---
 
-**Last working state:** commit `7c5642a` + mitigasi kebocoran layer-1 — **653 test lulus**, gate **READY 11/11**. **Sweep final DIHENTIKAN** di `EXP-20261004-034` (batch 1–4 selesai: **40/50 issue = 120/150 run**, $7,37; batch-5 dihentikan setelah 3 run / $0,15). **Alasan stop: vektor kebocoran solusi** — lihat [`FINDINGS_LEAK_20261005.md`](FINDINGS_LEAK_20261005.md). Layer-1 (sanitasi git + sitecustomize + filter perintah) **SELESAI & TERVERIFIKASI** — tapi **validasi orchestrator membuktikan layer-1 TIDAK CUKUP** (10 bypass jaringan + 7 jalur filesystem; lihat [`VALIDATION_SANDBOX_20261005.md`](VALIDATION_SANDBOX_20261005.md)). **Keputusan: isolasi Docker (utama), isolasi proses (cadangan).**
+**Last working state (2026-10-15):** commit `8435126` — **1245 test lulus, 1 skipped** (angka **historis** 2026-10-15; angka terkini **1263 lulus, 3 skipped**, lihat header), gate **READY 13/13** saat itu. **20/50 issue SELESAI** dengan isolasi Docker: batch 1 django (`EXP-20261010-062`, 30/30 VALID) + batch 2 matplotlib (`EXP-20261012-005`, 30/30 VALID). Isolasi Docker (layer-2) **TERPASANG & TERVERIFIKASI** (21 probe escape 100% BLOCKED, lihat §"Implementasi Penuh: Docker Sandbox").
 
 **Langkah berikutnya (prioritas):**
 
-0. **⏭️ ISOLASI SEJATI (Docker) — blocker sebelum run berbayar apa pun:**
-   - **Keputusan user:** Docker sebagai utama; isolasi proses Windows (user + ACL + firewall `-LocalUser`) sebagai cadangan.
-   - **Wajib:** kalau Docker dipakai, **seluruh 150 run dijalankan di Docker** — tidak boleh dicampur dengan batch 1–4 (Windows), karena 8,7% perintah Windows-specific dan rasionya tidak merata antar strategi (direct 10,7% vs planning 5,8%) → perbandingan RQ1 akan bias.
-   - Bersihkan dulu (gratis, tanpa admin): hapus `_hits.txt` + `_difft.txt` (berisi `model_patch`), dan 51 `.git/FETCH_HEAD` pre-existing (higiene; terverifikasi menunjuk base_commit, bukan bocor).
-   - Perluas probe regresi: setiap bypass di `VALIDATION_SANDBOX_20261005.md` harus jadi test yang bisa MERAH.
-   - Preflight gate: sweep menolak start kalau isolasi tidak aktif (Docker mati / user sandbox tidak ada).
+0. **⏭️ RUN FINAL — route `deepseek` (DeepSeek official `deepseek-flash`):**
+   - Sweep kini default ke route **`deepseek`** (`DEFAULT_ROUTE = "deepseek"`), model resmi
+     `deepseek-flash` via `https://api.deepseek.com/v1`, dengan tool-calling aktif.
+   - **Saldo DeepSeek $1 BELUM dipakai** — provider sudah disiapkan, **belum ada panggilan
+     berbayar**. Menunggu keputusan user sebelum run final dijalankan.
+   - **Run final belum dijalankan.** Batch 3 (7/30 sympy) adalah uji pipeline, **tidak
+     di-resume**.
+   - Resep bila dijalankan: `clean_repos.py` → `preflight_repos.py` (Docker WAJIB hidup) →
+     `tools/run_final_sweep.py` (route default `deepseek`). Estimasi biaya mengacu kartu
+     resmi `deepseek-flash` (0.22/0.007/0.66 off-peak; 0.44/0.014/1.32 peak per 1M token).
+   - **CommandCode belum siap** (tidak ada API key / belum subs) — hanya disiapkan, tidak diuji.
 
-1. **Setelah isolasi terpasang: run ulang sweep dari nol (150 run) di lingkungan Docker** — karena komparabilitas, batch 1–4 (Windows) **tidak bisa dilanjutkan** kalau shell berubah. Estimasi ~$10–15, 20+ jam.
-   Eksperimen: **buat baru** (jangan lanjutkan `EXP-20261004-034` yang Windows). Resep per batch:
-   ```
-   python tools/clean_repos.py          # WAJIB antar-batch
-   python tools/run_final_sweep.py --limit <N naik> --resume --exp-id <EXP-id>
-   python tools/check_semantic_cache.py --exp <EXP-id>   # verdict nyata
-   ```
-   ⚠️ **`--limit` diukur dalam ISSUE dari awal dataset**, jadi tiap batch **naikkan N**
-   (10 → 20 → 30 → 40 → 50). `--limit 10` di batch ke-2 dst = "Nothing to do".
-   ⚠️ **`--only M` TIDAK BISA menambah issue baru** — hanya menambal run yang belum
-   selesai di issue yang sudah terekam. Untuk menambah issue, **naikkan `--limit`**.
-   ⚠️ **Re-run issue terdampak TIDAK otomatis** — `--resume` men-skip run yang selesai;
-   perlu hapus baris savepoint mereka dulu, atau eksperimen baru.
-
-2. **Setelah sweep selesai:**
+1. **Setelah semua batch selesai: evaluasi Modal** — ini yang menentukan **resolved rate** (RQ1).
    - `python tools/check_sweep_state.py --exp <EXP-id>` — setiap run hadir?
    - Evaluasi Modal → `python tools/eval_modal.py ...`
    - `python tools/read_actual_bill.py --since ... --until ... --model cbai/deepseek-v4.1-flash --compare results/<EXP-id>` — RQ3, cross-check biaya.
@@ -1898,17 +2221,17 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
      Keduanya beda ~5× dan mengukur hal berbeda — lihat §"Koreksi penting: token".
      Jendela bill ada di `logs/sweep_started.json` → `attempts` (satu per attempt).
 
-3. **Masalah validitas review (78% → 12,5%)** — **sudah dikoreksi**, tidak perlu keputusan lagi. Angka sebenarnya: **1 dari 8 (12,5%)** penolakan yang bergantung pada file test. Lihat §"Koreksi" baris 276-304.
+2. **Masalah validitas review (78% → 12,5%)** — **sudah dikoreksi**, tidak perlu keputusan lagi. Angka sebenarnya: **1 dari 8 (12,5%)** penolakan yang bergantung pada file test. Lihat §"Koreksi" baris 276-304.
 
-4. **Ablation reviewer (opsional, untuk tesis):** `review` tanpa ronde review = `planning`. Kalau ketiga strategi seri di 50 issue, ablation ini memisahkan "review berguna" dari "review tidak berpengaruh".
+3. **Ablation reviewer (opsional, untuk tesis):** `review` tanpa ronde review = `planning`. Kalau ketiga strategi seri di 50 issue, ablation ini memisahkan "review berguna" dari "review tidak berpengaruh".
 
-5. **`11019`** sudah dijawab — **tapi jawabannya bergantung regime.** Tanpa thinking:
+4. **`11019`** sudah dijawab — **tapi jawabannya bergantung regime.** Tanpa thinking:
    **batas kapabilitas** (0 truncation, act berhenti di ~20% anggaran, patch VALID tapi
    salah semantik). Dengan thinking **ON** (yang dipakai sweep final): **resolved di
    ketiga strategi**. Jadi **jangan** laporkan sebagai "tidak bisa diselesaikan" —
    menyelesaikannya adalah **temuan RQ1**. Tidak perlu run tambahan.
 
-6. **M3 — SELESAI** (commit berikutnya). Jalankan sweep **bertahap** dengan
+5. **M3 — SELESAI** (commit berikutnya). Jalankan sweep **bertahap** dengan
    **prefix `--limit` yang tumbuh**:
    ```
    # staging: lanjut ke issue baru — naikkan --limit tiap batch
@@ -1922,5 +2245,5 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
    Wajib didampingi `--resume`. Scope `--only` dibatasi ke issue yang sudah ada di EXP.
    Lihat §"M3 — Sweep bertahap: `--limit <N naik> --resume`".
 
-7. **⚠️ Kalau menguji flag baru: pakai `--dry-run` DULU.** Jangan jalankan pada
+6. **⚠️ Kalau menguji flag baru: pakai `--dry-run` DULU.** Jangan jalankan pada
    direktori eksperimen nyata — lihat pelajaran #25.

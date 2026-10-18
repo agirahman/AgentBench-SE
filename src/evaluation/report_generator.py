@@ -7,19 +7,16 @@ Usage:
 """
 
 import json
-import os
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 
-# Keep IDR figures consistent with the rest of the pipeline (Config.USD_IDR_RATE).
-# This module is runnable standalone (`python -m src.evaluation.report_generator`),
-# so resolve the rate from the environment instead of importing src.config.
-from dotenv import load_dotenv  # noqa: E402
-
-load_dotenv()
-USD_IDR_RATE = float(os.getenv("USD_IDR_RATE", "16500"))
+# No exchange rate here. This module used to read USD_IDR_RATE from the environment
+# at import time, which made it a SECOND, independent source of the rate (it
+# disagreed with Config's default, 16500 vs 17828.10) and let a report carry a
+# different rate than the pipeline. The pipeline is USD-only now, and any IDR
+# figure is produced explicitly by tools/convert_to_idr.py --rate <kurs>.
 
 # Cost columns were renamed across schema generations
 # (``cost_usd`` → ``cost_usd_offpeak`` → ``cost_usd_actual``). Every consumer
@@ -141,12 +138,17 @@ def generate_reports(df: pd.DataFrame, exp_dir: Path) -> Path:
     cost_actual_col = _pick_col(df, *_COST_ACTUAL) or cost_offpeak_col
 
     # 1. results.csv — raw per instance
+    #
+    # No IDR column. Legacy CSVs do contain ``cost_idr_*``, but those figures were
+    # converted with whatever rate .env held when that batch ran, so carrying them
+    # into a report would mix rates across batches. The USD columns are the source
+    # of truth; IDR is produced by tools/convert_to_idr.py --rate.
     raw_cols = [
         "instance_id", "strategy", "model", "difficulty", "resolved",
         "patch_applied", "failure_reason",
         "inference_count", "execution_time",
         "input_tokens_total", "output_tokens", "total_tokens",
-        cost_actual_col, cost_offpeak_col, "cost_idr_offpeak", "patch_preview",
+        cost_actual_col, cost_offpeak_col, "patch_preview",
     ]
     raw_cols = list(dict.fromkeys(c for c in raw_cols if c in df.columns))
     results_df = df[raw_cols].copy()
@@ -193,9 +195,8 @@ def generate_reports(df: pd.DataFrame, exp_dir: Path) -> Path:
     tradeoff["cost_per_success_usd"] = (
         tradeoff["total_cost_usd"] / tradeoff["resolved_count"].replace(0, float("nan"))
     ).round(6)
-    tradeoff["cost_per_success_idr"] = (
-        tradeoff["cost_per_success_usd"] * USD_IDR_RATE
-    ).round(2)
+    # No cost_per_success_idr column: USD only, converted explicitly at reporting
+    # time by tools/convert_to_idr.py so every batch uses the same rate.
     tradeoff.to_csv(eval_dir / "tradeoff_summary.csv", index=False)
 
     # 5. summary.md — narrative report
