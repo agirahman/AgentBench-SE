@@ -18,6 +18,29 @@ import os
 
 EDITING_ROLES = frozenset({"direct", "executor"})
 
+# The sandbox is a different world from the host, so the agent must be told which
+# one it is in. Split into two parts on purpose: the read-only roles (planner,
+# reviewer) need the environment half (POSIX + the deliberately masked .git) but
+# must NOT receive the dependency half, which tells the reader to run the tests
+# and install wheels -- an instruction they are not allowed to carry out.
+_SANDBOX_ENV_HINT = (
+    "The execution sandbox is POSIX (Linux): use grep/ls/cat, not findstr/dir/type. "
+    "Absolute Windows paths are not valid there. Git is not installed in the sandbox — "
+    "use the git_diff tool (runs on host) to inspect changes. "
+    "Git history is intentionally unavailable/masked by design: do NOT search for "
+    ".git directories, git repositories, or git history, and do not try to unmount "
+    "them — such searches waste turns; solve the issue from the source code alone. "
+)
+
+_SANDBOX_DEPS_HINT = (
+    "The sandbox HAS this repo's common dependencies pre-installed, so run the tests. "
+    "There is NO network. If a module is missing, look for it in the local wheelhouse "
+    "(`ls /opt/wheelhouse`) and install it with "
+    "`pip install --no-index --find-links=/opt/wheelhouse <package>`, then retry. "
+    "Only DEPENDENCIES are there: a released copy of the project you are fixing is "
+    "deliberately absent, because it would contain the answer.\n"
+)
+
 
 def get_tool_system_prompt(sandbox_mode: str | None = None) -> str:
     """Return the tool system prompt, optionally tailored to the sandbox environment.
@@ -28,19 +51,7 @@ def get_tool_system_prompt(sandbox_mode: str | None = None) -> str:
     that git works), which is worse than either default alone.
     """
     mode = (sandbox_mode or os.environ.get("SANDBOX_MODE", "docker")).strip().lower()
-    hint = (
-        "The execution sandbox is POSIX (Linux): use grep/ls/cat, not findstr/dir/type. "
-        "Absolute Windows paths are not valid there. Git is not installed in the sandbox — "
-        "use the git_diff tool (runs on host) to inspect changes. "
-        "The sandbox HAS this repo's common dependencies pre-installed, so run the tests. "
-        "There is NO network. If a module is missing, look for it in the local wheelhouse "
-        "(`ls /opt/wheelhouse`) and install it with "
-        "`pip install --no-index --find-links=/opt/wheelhouse <package>`, then retry. "
-        "Only DEPENDENCIES are there: a released copy of the project you are fixing is "
-        "deliberately absent, because it would contain the answer.\n"
-        if mode == "docker"
-        else ""
-    )
+    hint = (_SANDBOX_ENV_HINT + _SANDBOX_DEPS_HINT) if mode == "docker" else ""
     # Step 4 must match what run_tests will actually DO. In docker mode the sandbox
     # runs the suite, so the agent is told to use it. Outside docker, run_tests
     # REFUSES to execute (see agents.tools._LOCAL_MODE_REFUSAL: this host has a WSL
@@ -85,7 +96,12 @@ TOOL_SYSTEM_PROMPT = get_tool_system_prompt()
 # editing prompt with them produced contradictory instructions: their task prompt
 # says "do not write code / you may not edit", while the system prompt said to
 # apply a fix. Each role now gets a prompt that matches its mandate.
-READONLY_TOOL_SYSTEM_PROMPT = (
+#
+# The sandbox env hint is shared with the editors (see _SANDBOX_ENV_HINT) because
+# planner and reviewer burn the same turns hunting the masked .git. It is appended
+# INSIDE the read-only framing, and only the env half: the dependency half says
+# "run the tests / install wheels", which these roles are not allowed to do.
+_READONLY_BASE = (
     "You are a software engineering agent analysing a bug in a real repository.\n"
     "\n"
     "Work like this:\n"
@@ -94,8 +110,17 @@ READONLY_TOOL_SYSTEM_PROMPT = (
     "2. Base every claim on code you have actually read.\n"
     "3. When you have enough evidence, reply with your final answer and no tool call.\n"
     "\n"
-    "You may NOT modify files. Do not describe what you are about to do; do it."
 )
+
+
+def get_readonly_system_prompt(sandbox_mode: str | None = None) -> str:
+    """Read-only variant: same env hint as the editors, no write/test instruction."""
+    mode = (sandbox_mode or os.environ.get("SANDBOX_MODE", "docker")).strip().lower()
+    hint = _SANDBOX_ENV_HINT if mode == "docker" else ""
+    return _READONLY_BASE + hint + "You may NOT modify files. Do not describe what you are about to do; do it."
+
+
+READONLY_TOOL_SYSTEM_PROMPT = get_readonly_system_prompt()
 
 # Single-shot path (no tools sent at all). The previous text told the model to
 # "use the provided tools" even here, where none existed — so it narrated tool

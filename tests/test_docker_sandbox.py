@@ -22,7 +22,9 @@ from agents.tools import (
     set_repo_root,
 )
 from providers.system_prompts import (
+    READONLY_TOOL_SYSTEM_PROMPT,
     TOOL_SYSTEM_PROMPT,
+    get_readonly_system_prompt,
     get_tool_system_prompt,
 )
 import tools.verify_docker_sandbox as vrf_docker
@@ -229,11 +231,69 @@ class TestSystemPromptsDocker:
         assert "Git is not installed in the sandbox" in prompt
         assert "git_diff" in prompt
 
+    def test_prompt_forbids_hunting_the_masked_git_dir_in_docker(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The masked .git must be declared OFF LIMITS, not merely mentioned.
+
+        An agent that is only told "git is not installed" still tries to reach
+        history another way: measured, one run spent ~4 hours on `umount
+        /work/.git` and `find / -name refs`. The prompt must say the absence is by
+        design and that searching for it wastes turns.
+        """
+        monkeypatch.setenv("SANDBOX_MODE", "docker")
+        prompt = get_tool_system_prompt()
+        assert "intentionally unavailable/masked by design" in prompt
+        assert "do NOT search for .git directories" in prompt
+        assert "do not try to unmount them" in prompt
+        assert "solve the issue from the source code alone" in prompt
+
     def test_prompt_does_not_mention_git_absence_in_local_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """In local mode git IS available (host shell), so the hint must not appear."""
         monkeypatch.setenv("SANDBOX_MODE", "local")
         prompt = get_tool_system_prompt()
         assert "Git is not installed in the sandbox" not in prompt
+        assert "intentionally unavailable/masked by design" not in prompt
+
+
+class TestReadonlySystemPromptsDocker:
+    """planner / reviewer get the sandbox env hint too, or they hunt .git as well.
+
+    Read-only roles were previously given a prompt with NO sandbox content at all,
+    so the .git-hunting failure mode was open to them too. They must receive the
+    environment half of the hint -- and must NOT receive the dependency half, which
+    tells the reader to run tests and install wheels.
+    """
+
+    def test_readonly_prompt_carries_the_masked_git_hint_in_docker(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SANDBOX_MODE", "docker")
+        prompt = get_readonly_system_prompt()
+        assert "intentionally unavailable/masked by design" in prompt
+        assert "do NOT search for .git directories" in prompt
+        assert "POSIX (Linux)" in prompt
+
+    def test_readonly_prompt_stays_read_only_and_needs_no_test_run(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The env hint is inside the read-only framing, without the test/wheel text."""
+        monkeypatch.setenv("SANDBOX_MODE", "docker")
+        prompt = get_readonly_system_prompt()
+        assert "You may NOT modify files" in prompt
+        assert "run_tests" not in prompt
+        assert "pip install" not in prompt
+
+    def test_readonly_prompt_omits_sandbox_hint_when_local(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SANDBOX_MODE", "local")
+        prompt = get_readonly_system_prompt()
+        assert "intentionally unavailable/masked by design" not in prompt
+        assert "POSIX (Linux)" not in prompt
+        assert "You may NOT modify files" in prompt
+
+    def test_module_level_readonly_constant_matches_the_helper(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The imported constant is built at import time; pin it against the helper.
+
+        A test that only called the helper could pass while the shipped constant
+        (what the agents actually receive) was stale or hand-edited.
+        """
+        monkeypatch.setenv("SANDBOX_MODE", "docker")
+        assert READONLY_TOOL_SYSTEM_PROMPT == get_readonly_system_prompt()
+        assert "intentionally unavailable/masked by design" in READONLY_TOOL_SYSTEM_PROMPT
 
 
 class TestSandboxCanRunTests:
