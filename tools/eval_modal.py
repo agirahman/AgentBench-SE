@@ -24,15 +24,22 @@ import json
 from pathlib import Path
 from typing import Optional
 
-# Fix Windows console encoding for Unicode (Modal rich output).
-# Only applied when running as a script so imports (e.g. from tests) are side-effect free.
-if sys.platform == "win32" and __name__ == "__main__":
+# `resource` is POSIX-only, but swebench.harness.modal_eval imports it
+# unconditionally below. On Windows that made ANY import of this module fail with
+# ModuleNotFoundError, so the tests that need build_run_id()/classify_summary()
+# could not even be collected -- the shim used to be installed only under
+# __main__, which never runs when a test imports the module.
+if sys.platform == "win32" and "resource" not in sys.modules:
     import types
     resource = types.ModuleType("resource")
     setattr(resource, "getrlimit", lambda *_: (0, 0))
     setattr(resource, "setrlimit", lambda *_: None)   # jaga-jaga kalau dipanggil juga
     setattr(resource, "RLIMIT_NOFILE", 0)
     sys.modules["resource"] = resource
+
+# Fix Windows console encoding for Unicode (Modal rich output).
+# Only applied when running as a script so imports (e.g. from tests) are side-effect free.
+if sys.platform == "win32" and __name__ == "__main__":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 

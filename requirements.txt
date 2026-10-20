@@ -16,5 +16,10 @@ pytest==9.1.1
 swebench==4.1.0
 datasets==5.0.0
 pandas==3.0.3
+# scipy is a HARD dependency: src/evaluation/significance.py imports it at module
+# level, so anything that touches the significance report fails to import without
+# it. It was missing here while the experiments ran, which means a fresh venv
+# built from this file could not even collect the tests that import that module.
+scipy==1.18.1
 pyright==1.1.411
 modal==1.5.2
