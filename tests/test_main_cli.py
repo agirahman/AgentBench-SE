@@ -172,3 +172,60 @@ def test_save_experiment_config_unknown_provider_exits(tmp_path):
             agents=[],
         )
     assert exc.value.code == 1
+
+
+def _drive_main_with_run(monkeypatch, tmp_path, df):
+    """Run main() with the provider, agent team and runner all stubbed."""
+    import main as main_mod
+    import sys as _sys
+
+    class _Provider:
+        model = "test-model"
+
+    issue = types.SimpleNamespace(
+        instance_id="django__django-1", repo="django/django", difficulty="easy")
+
+    monkeypatch.setattr(main_mod, "GeminiProvider", _Provider)
+    monkeypatch.setattr(main_mod, "select_issues", lambda *a, **k: [issue])
+    monkeypatch.setattr(main_mod, "build_agent_team", lambda p: {})
+    for name in ("DirectStrategy", "PlanningStrategy", "ReviewStrategy"):
+        # One factory for all three: main() only stores them by name, and a shared
+        # sentinel keeps the stub from depending on the real constructors.
+        monkeypatch.setattr(main_mod, name, lambda provider: object())
+    monkeypatch.setattr(main_mod, "run_experiments", lambda *a, **k: (df, "EXP-test"))
+    monkeypatch.setattr(main_mod, "_save_experiment_config", lambda *a, **k: None)
+    monkeypatch.setattr(_sys, "argv", [
+        "main.py", "--provider", "gemini", "--output", str(tmp_path / "out")])
+    return main_mod.main()
+
+
+def _summary_frame(stopped: bool):
+    import pandas as pd
+
+    df = pd.DataFrame([{
+        "instance_id": "django__django-1", "strategy": "direct",
+        "model": "test-model", "execution_time": 1.0, "inference_count": 1,
+        "total_tokens": 10,
+    }])
+    df.attrs["rate_limit_stopped"] = stopped
+    return df
+
+
+def test_main_returns_1_when_the_run_stopped_on_a_rate_limit(monkeypatch, tmp_path):
+    """A rate-limit early stop must reach the shell as a non-zero rc.
+
+    The runner records rc=1 in MERGE_LOG and writes INCOMPLETE.json, but main()
+    ignored the frame's marker and returned None -- so the process exited 0 and
+    sweep_started.json recorded rc=0 for a run that had actually stopped short.
+    """
+    rc = _drive_main_with_run(monkeypatch, tmp_path, _summary_frame(stopped=True))
+    assert rc == 1, (
+        f"a rate-limit early stop must exit 1, got {rc!r}; without this the shell "
+        f"cannot tell it apart from a completed sweep"
+    )
+
+
+def test_main_returns_none_when_the_run_finished(monkeypatch, tmp_path):
+    """Control: a clean run must NOT be turned into a failure."""
+    rc = _drive_main_with_run(monkeypatch, tmp_path, _summary_frame(stopped=False))
+    assert rc is None, f"a completed run must not return an rc, got {rc!r}"

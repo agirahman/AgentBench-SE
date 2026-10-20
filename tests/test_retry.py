@@ -141,8 +141,13 @@ def _issue(i):
     )
 
 
-def _run_with_failing_strategy(monkeypatch, tmp_path, exc, n_issues=4, limit=2):
-    """Drive run_experiments with a strategy whose run() always raises."""
+def _run_with_failing_strategy(monkeypatch, tmp_path, exc, n_issues=4, limit=2,
+                               frame=None):
+    """Drive run_experiments with a strategy whose run() always raises.
+
+    ``frame`` (a list), when given, receives the returned DataFrame so a caller
+    can assert on the marker the runner puts there.
+    """
     from experiments import runner as runner_mod
 
     # Patch the Config *object runner holds*, not a fresh `from config import
@@ -166,7 +171,7 @@ def _run_with_failing_strategy(monkeypatch, tmp_path, exc, n_issues=4, limit=2):
             raise exc
 
     issues = [_issue(i) for i in range(n_issues)]
-    runner_mod.run_experiments(
+    df, _ = runner_mod.run_experiments(
         issues=issues,
         strategies={"direct": FailingStrategy()},
         base_dir=str(tmp_path),
@@ -174,6 +179,8 @@ def _run_with_failing_strategy(monkeypatch, tmp_path, exc, n_issues=4, limit=2):
         rate_limit_seconds=0.0,
         model="m",
     )
+    if frame is not None:
+        frame.append(df)
     return calls["n"]
 
 
@@ -190,3 +197,51 @@ def test_runner_continues_on_non_rate_limit_errors(monkeypatch, tmp_path):
         monkeypatch, tmp_path, ConnectionError("reset"), n_issues=4, limit=2,
     )
     assert calls == 4  # ordinary failures never trip the breaker
+
+
+def test_merge_log_session_rc_reflects_the_early_stop(monkeypatch, tmp_path):
+    """A breaker-stopped session must not be logged as a clean (rc=0) one.
+
+    ``session_rc`` was hardcoded to 0, so the merge log claimed the session
+    finished normally even when the usage window was exhausted -- the exact case
+    the field exists to distinguish. Also pins the runner->main seam: the frame
+    the runner returns must carry ``rate_limit_stopped``, because main() reads
+    that marker (not the MERGE_LOG) to decide its own rc. A manual df.attrs
+    injection elsewhere would not catch the marker being dropped here.
+    """
+    import json
+
+    frame: list = []
+    calls = _run_with_failing_strategy(
+        monkeypatch, tmp_path, _StatusError("429 too many requests", status_code=429),
+        n_issues=10, limit=2, frame=frame,
+    )
+    assert calls == 2, "precondition: the breaker must have stopped the run"
+
+    lines = [
+        line for line in (tmp_path / "EXP-test" / "MERGE_LOG.jsonl")
+        .read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(lines) == 1
+    assert json.loads(lines[0])["session_rc"] == 1, (
+        "a rate-limit early stop was logged as a clean session"
+    )
+    assert frame[0].attrs.get("rate_limit_stopped") is True, (
+        "the runner dropped the marker main() needs to exit 1, so the shell would "
+        "see rc=0 for a stopped sweep"
+    )
+
+
+def test_a_clean_run_leaves_the_marker_false(monkeypatch, tmp_path):
+    """Control for the seam: ordinary failures must NOT set the marker.
+
+    Without this, a marker hardcoded True would satisfy the test above while
+    making every run exit 1.
+    """
+    frame: list = []
+    _run_with_failing_strategy(
+        monkeypatch, tmp_path, ConnectionError("reset"), n_issues=4, limit=2,
+        frame=frame,
+    )
+    assert frame[0].attrs.get("rate_limit_stopped") is False

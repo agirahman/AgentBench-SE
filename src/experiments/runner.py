@@ -45,6 +45,17 @@ class StrategyProtocol(Protocol):
     def run(self, issue: Issue) -> tuple[Patch, ExperimentResult]: ...
 
 
+def _agent_role_names(agents) -> list[str] | None:
+    """Role names from the experiment's agent list, or None when unknown.
+
+    ``agents`` is ``[{"name": ..., "prompt_file": ...}]`` (built by main()). A
+    caller that passes nothing keeps the old behaviour -- no role cleanup --
+    rather than guessing which names are safe to delete.
+    """
+    names = [str(a.get("name")) for a in (agents or []) if a.get("name")]
+    return names or None
+
+
 def _save_artifacts(
     output_dir: str,
     instance_id: str,
@@ -52,6 +63,7 @@ def _save_artifacts(
     inferences,
     final_patch: str,
     messages=None,
+    known_roles: list[str] | None = None,
 ) -> None:
     """Simpan artifact per-agent ke ``<exp_dir>/artifacts/<instance_id>/<strategy_name>/``.
 
@@ -67,13 +79,25 @@ def _save_artifacts(
     * ``<role>.md`` -- respons FINAL agen tersebut. Nama berkas per-role berarti act
       berikutnya MENIMPA act sebelumnya (review punya dua act executor), jadi berkas
       ini hanya bertahan untuk act terakhir; trajectory.jsonl menyimpan semuanya.
+
+    Every record file is written on EVERY run, as an empty file when the run
+    produced nothing. Skipping the write left the PREVIOUS run's contents in
+    place, so a retry with no tool calls read back as if it had made them -- the
+    reader cannot tell "no data" from "old data" (ticket 31c, item 2).
+
+    ``known_roles`` names the roles the experiment uses. When given, role files
+    for a role ABSENT from this run are deleted, so one directory never mixes two
+    different runs. Deletion is restricted to those names: the folder itself is
+    inside ``artifacts/<iid>/<strategy>/`` and nothing else there is touched.
     """
     art_dir = Path(f"{output_dir}/artifacts/{instance_id}/{strategy_name}")
     art_dir.mkdir(parents=True, exist_ok=True)
 
+    present_roles: set[str] = set()
     for inf in inferences:
         if not inf.role:
             continue
+        present_roles.add(inf.role)
         (art_dir / f"{inf.role}.md").write_text(inf.response, encoding="utf-8")
 
     # The reasoning channel, per role. Two sources, and the trajectory comes first
@@ -85,6 +109,7 @@ def _save_artifacts(
     #
     # Keeping the filename means existing tooling keeps working; the content is now
     # every turn's reasoning rather than only the last one's.
+    reasoned_roles: set[str] = set()
     for inf in inferences:
         if not inf.role:
             continue
@@ -105,18 +130,32 @@ def _save_artifacts(
             (art_dir / f"{inf.role}_reasoning.md").write_text(
                 header + "\n\n".join(blocks), encoding="utf-8"
             )
+            reasoned_roles.add(inf.role)
         elif (getattr(inf, "reasoning_content", "") or "").strip():
             # Non-tool path: no turns to iterate, so the single response is the record.
             (art_dir / f"{inf.role}_reasoning.md").write_text(
                 inf.reasoning_content, encoding="utf-8"
             )
+            reasoned_roles.add(inf.role)
+
+    # Ghost files from an earlier run: a role that is not part of this run must
+    # not leave its response behind, or the directory describes a run that never
+    # happened. Names come from the caller's known role list, and only within
+    # this strategy folder, so trajectory.md / patch.txt / summary.json cannot be
+    # reached by this cleanup.
+    if known_roles:
+        for role in known_roles:
+            if role not in present_roles:
+                (art_dir / f"{role}.md").unlink(missing_ok=True)
+            if role not in reasoned_roles:
+                (art_dir / f"{role}_reasoning.md").unlink(missing_ok=True)
 
     (art_dir / "patch.txt").write_text(final_patch, encoding="utf-8")
 
-    if messages:
-        with (art_dir / "messages.jsonl").open("w", encoding="utf-8") as f:
-            for msg in messages:
-                f.write(json.dumps(msg.to_dict(), ensure_ascii=False) + "\n")
+    # Always written: an absent record and an empty record are different claims.
+    with (art_dir / "messages.jsonl").open("w", encoding="utf-8") as f:
+        for msg in messages or []:
+            f.write(json.dumps(msg.to_dict(), ensure_ascii=False) + "\n")
 
     # Full trajectory: one line per event, in order, across every act of the run.
     # Written for ALL acts (not just the last of each role), which is the gap that
@@ -133,13 +172,12 @@ def _save_artifacts(
             enriched["act_role"] = inf.role
             traj_lines.append(enriched)
 
-    if traj_lines:
-        with (art_dir / "trajectory.jsonl").open("w", encoding="utf-8") as f:
-            for entry in traj_lines:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        (art_dir / "trajectory.md").write_text(
-            _render_trajectory(traj_lines), encoding="utf-8"
-        )
+    with (art_dir / "trajectory.jsonl").open("w", encoding="utf-8") as f:
+        for entry in traj_lines:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    (art_dir / "trajectory.md").write_text(
+        _render_trajectory(traj_lines), encoding="utf-8"
+    )
 
     # Per-agent tool-call log: which tool, how many times, by which agent.
     # Each inference carries tool_calls (empty for non-tool agents).
@@ -156,10 +194,9 @@ def _save_artifacts(
                     "result_preview": (call.get("result") or "")[:2000],
                 }
             )
-    if tool_lines:
-        with (art_dir / "tool_calls.jsonl").open("w", encoding="utf-8") as f:
-            for line in tool_lines:
-                f.write(json.dumps(line, ensure_ascii=False) + "\n")
+    with (art_dir / "tool_calls.jsonl").open("w", encoding="utf-8") as f:
+        for line in tool_lines:
+            f.write(json.dumps(line, ensure_ascii=False) + "\n")
 
 
 def _render_trajectory(entries: list[dict]) -> str:
@@ -764,7 +801,91 @@ def _write_csv_atomically(df, csv_path: str) -> None:
     os.replace(tmp, target)
 
 
-def _check_completeness(exp_dir, pred_dir, strategies, issues, all_predictions, skipped) -> None:
+def _known_instance_ids(csv_path: str, pred_dir: Path, strategies) -> set[str]:
+    """Instance ids this experiment already had on disk before this session.
+
+    The CSV is preferred because it is the merged artefact; the savepoints are the
+    fallback for the case the merge exists for (a crash before the first export).
+    Best-effort: this only feeds the merge log's ``extended_with`` field.
+    """
+    ids: set[str] = set()
+    try:
+        if os.path.exists(csv_path):
+            old = pd.read_csv(csv_path)
+            old.columns = [str(c).lstrip("[") for c in old.columns]
+            ids |= {str(v) for v in list(old["instance_id"]) if str(v)}
+            return ids
+    except Exception:  # noqa: BLE001 - bookkeeping only
+        pass
+    for strat_name in strategies:
+        for entry in _read_jsonl_entries(str(pred_dir / f"{strat_name}.jsonl")):
+            iid = entry.get("instance_id")
+            if iid:
+                ids.add(iid)
+    return ids
+
+
+def _append_merge_log(exp_dir, exp_id: str, batch_ids: list[str],
+                      extended_with: list[str], runs: int,
+                      session_rc: int | None) -> None:
+    """Append one line per invocation to ``MERGE_LOG.jsonl``.
+
+    Without it, reconstructing "which batch added which issues" means reading five
+    terminal logs. The file is append-only and best-effort: bookkeeping must never
+    fail a sweep that has already spent money.
+    """
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "exp_id": exp_id,
+        "batch_ids": list(batch_ids),
+        "runs": runs,
+        "extended_with": list(extended_with),
+        "session_rc": session_rc,
+    }
+    try:
+        with open(Path(exp_dir) / "MERGE_LOG.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError as exc:
+        logger.warning(f"Could not append MERGE_LOG.jsonl: {exc}")
+
+
+def _experiment_dataset_ids(exp_dir, merged_rows: list[dict],
+                            batch_ids: list[str]) -> list[str]:
+    """The experiment's whole id set: earlier batches first, then this one.
+
+    Sources, in order: the CSV/merged rows, ``experiment.yaml`` (ids a batch
+    planned but maybe never ran), then this batch. Deduped, order preserved.
+
+    ``manifest.dataset.n_issues`` and the completeness denominator both use this,
+    so a 1-issue batch resumed into a 10-issue experiment reports 10, not 1.
+    """
+    ids: list[str] = []
+    seen: set[str] = set()
+
+    def add(iid) -> None:
+        if iid and str(iid) not in seen:
+            seen.add(str(iid))
+            ids.append(str(iid))
+
+    for row in merged_rows:
+        add(row.get("instance_id"))
+    yaml_path = Path(exp_dir) / "experiment.yaml"
+    if yaml_path.is_file():
+        try:
+            import yaml
+
+            cfg = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+            for iid in ((cfg.get("dataset") or {}).get("instance_ids") or []):
+                add(iid)
+        except Exception:  # noqa: BLE001 - the manifest must still be written
+            pass
+    for iid in batch_ids:
+        add(iid)
+    return ids
+
+
+def _check_completeness(exp_dir, pred_dir, strategies, issues, all_predictions, skipped,
+                        extra_ids: list[str] | None = None) -> None:
     """Compare finished runs against the number planned; alarm if short.
 
     Nothing used to compare the two, so a sweep that silently lost runs still
@@ -797,9 +918,16 @@ def _check_completeness(exp_dir, pred_dir, strategies, issues, all_predictions, 
     the same code instead of a second copy that could drift.
     """
     expected_keys: set[str] = set()
+    # The denominator is the experiment's whole id set, not this batch: a resume
+    # with fewer issues than the folder holds used to compare a small expected
+    # against a large completed and write a false INCOMPLETE.json.
+    expected_ids = [issue.instance_id for issue in issues]
+    for iid in extra_ids or []:
+        if iid not in expected_ids:
+            expected_ids.append(iid)
     for strat_name in strategies:
-        for issue in issues:
-            expected_keys.add(f"{strat_name}:{issue.instance_id}")
+        for iid in expected_ids:
+            expected_keys.add(f"{strat_name}:{iid}")
     for strat_name in strategies:
         for entry in _read_jsonl_entries(str(pred_dir / f"{strat_name}.jsonl")):
             if entry.get("instance_id"):
@@ -1140,6 +1268,13 @@ def run_experiments(
     effective_model = model or provider_name
     exp_id = experiment_id or generate_experiment_id()
     exp_dir = create_experiment_dir(base_dir, exp_id)
+    batch_ids = [issue.instance_id for issue in issues]
+    # Snapshot what the experiment already held BEFORE this session writes
+    # anything: this is the merge log's "what did this batch add" baseline.
+    prior_ids = _known_instance_ids(
+        f"{exp_dir}/generation_result.csv", Path(f"{exp_dir}/predictions"),
+        list(strategies),
+    )
     if on_experiment_start is not None:
         try:
             on_experiment_start(exp_dir, exp_id)
@@ -1389,6 +1524,7 @@ def run_experiments(
                     result.execution.inferences,
                     patch.response,
                     result.execution.run.messages,
+                    known_roles=_agent_role_names(agents),
                 )
 
                 logger.success(
@@ -1578,6 +1714,21 @@ def run_experiments(
                 _check_completeness_quietly(
                     exp_dir, pred_dir, list(strategies), issues, all_predictions, skipped
                 )
+                # The merge log promises one line per invocation, and an interrupt
+                # is the invocation most in need of a record -- it is where a
+                # reader needs to know which batch was in flight. Best-effort:
+                # bookkeeping must not replace the operator's Ctrl-C with a
+                # traceback.
+                try:
+                    _append_merge_log(
+                        exp_dir, exp_id, batch_ids,
+                        extended_with=[i for i in batch_ids if i not in prior_ids],
+                        runs=len(all_predictions),
+                        session_rc=130,  # 128 + SIGINT: canonical/logical, not the
+                                         # Windows exit code (which is 0xC000013A)
+                    )
+                except Exception as exc:  # noqa: BLE001 - never mask the interrupt
+                    logger.warning(f"Could not append MERGE_LOG.jsonl: {exc}")
                 raise
 
             if rate_limit_stopped:
@@ -1612,6 +1763,11 @@ def run_experiments(
     # the CSV contains -- the "shipping receipt" disagreeing with the shipment.
     manifest_results = _results_from_flat_rows(merged_rows)
 
+    # The experiment's whole id set -- earlier batches plus this one -- so a
+    # 1-issue resume into a 10-issue folder reports 10 in both the manifest's
+    # dataset block and the completeness denominator.
+    dataset_ids = _experiment_dataset_ids(exp_dir, merged_rows, batch_ids)
+
     stats_path = f"{exp_dir}/generation_statistics.json"
     model_name = df["model"].iloc[0] if len(df) else provider_name
     pricing = PricingTable.get(model_name) if model_name else None
@@ -1633,10 +1789,24 @@ def run_experiments(
         output_dir=str(exp_dir),
         results=manifest_results,
         agents=agents,
+        dataset_ids=dataset_ids,
     )
     manifest_path = f"{exp_dir}/manifest.json"
     Path(manifest_path).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     logger.success(f"Experiment manifest exported: {manifest_path}")
+
+    _append_merge_log(
+        exp_dir, exp_id, batch_ids,
+        extended_with=[i for i in dataset_ids if i not in prior_ids],
+        runs=len(all_predictions),
+        # ``rate_limit_stopped`` is the only early-stop marker run_experiments
+        # sets (the breaker is the sole ``break``), so the rc is derived from it
+        # instead of being hardcoded to 0: a sweep that stopped on an exhausted
+        # usage window must not be logged as a clean session. Ceiling: this runs
+        # before _check_completeness, so a shortfall it would report does not yet
+        # contribute here -- add that only if a reader needs the two folded.
+        session_rc=1 if rate_limit_stopped else 0,
+    )
 
     # Log per-strategy counts
     for strat_name in strategies:
@@ -1644,7 +1814,8 @@ def run_experiments(
         count = sum(1 for _ in open(strat_jsonl, "r", encoding="utf-8") if _.strip())
         logger.success(f"Per-strategy predictions: {strat_jsonl} ({count} entries)")
 
-    _check_completeness(exp_dir, pred_dir, strategies, issues, all_predictions, skipped)
+    _check_completeness(exp_dir, pred_dir, strategies, issues, all_predictions, skipped,
+                        extra_ids=dataset_ids)
 
     if skipped:
         logger.info(f"Resume: skipped {skipped} already-completed entries")
@@ -1691,6 +1862,11 @@ def run_experiments(
     if norm:
         logger.info(f"  Normalized: {norm} (hunk header corrected, still valid)")
     logger.info("=" * 60)
+
+    # Carry the early-stop flag out to the caller on the frame's ``attrs`` rather
+    # than widening the return tuple: every caller and test unpacks
+    # ``(df, exp_id)``, and main() is what must turn this into a non-zero exit.
+    df.attrs["rate_limit_stopped"] = rate_limit_stopped
 
     logger.remove(_sink_id)
     return df, exp_id

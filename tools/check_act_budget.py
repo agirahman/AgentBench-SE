@@ -125,6 +125,22 @@ def report(exp_dir: Path, label: str) -> int:
     return starved
 
 
+def _has_messages(exp_dir: Path) -> bool:
+    """True when some ``messages.jsonl`` under the experiment is NON-EMPTY.
+
+    A bare ``rglob`` match also selects folders holding only empty files, which
+    the artifact writer now creates for a run that produced nothing -- those say
+    "no act data", not "artifacts exist", so they must not count here.
+    """
+    for path in exp_dir.rglob("messages.jsonl"):
+        try:
+            if path.stat().st_size > 0:
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--exp", action="append", default=None,
@@ -136,7 +152,7 @@ def main() -> None:
     if args.all:
         targets = [
             (d.name, d) for d in sorted((ROOT / "results").glob("EXP-*"))
-            if any(d.rglob("messages.jsonl"))
+            if _has_messages(d)
         ]
     elif args.exp:
         targets = [(e, ROOT / "results" / e) for e in args.exp]

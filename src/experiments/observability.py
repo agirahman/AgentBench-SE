@@ -56,12 +56,17 @@ def build_experiment_manifest(
     output_dir: str,
     results: list[ExperimentResult],
     agents: list[dict[str, str]] | None = None,
+    dataset_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build a machine-readable execution manifest (shipping receipt).
 
     Mencatat metadata hasil eksekusi: ringkasan, hasil per-issue, dan lokasi
     artefak. Config input (blueprint) ada di ``experiment.yaml`` — tidak
     diduplikasi di sini.
+
+    ``dataset_ids`` is the experiment's WHOLE id set (earlier batches plus this
+    one). Without it, ``dataset.n_issues`` was this batch's size, so a resumed
+    1-issue batch described a 10-issue experiment as a 1-issue one.
     """
     difficulty_counts = {"easy": 0, "medium": 0, "hard": 0, "unknown": 0}
     repo_counts: dict[str, int] = {}
@@ -147,7 +152,7 @@ def build_experiment_manifest(
         },
         "dataset": {
             "name": "SWE-bench/SWE-bench_Lite",
-            "n_issues": len(issues),
+            "n_issues": len(dataset_ids) if dataset_ids is not None else len(issues),
             "repo_counts": repo_counts,
             "difficulty_counts": {k: v for k, v in difficulty_counts.items() if v > 0},
         },

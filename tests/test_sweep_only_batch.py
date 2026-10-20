@@ -1,4 +1,4 @@
-"""`--only N`: run about N still-INCOMPLETE runs (rounded up to whole issues).
+"""`--only N`: a CAP on this session's runs (rounded up to whole issues).
 
 Why this exists. A 150-run sweep is ~21 hours (thinking ON), so it gets run in stages: 30 runs,
 check the output, continue. `--limit` cannot express that, because it is measured
@@ -10,21 +10,25 @@ means "look at the first 20 issues", and if 33 of the 50 issues are already done
 then almost nothing runs -- the skip logic removes them. The user asked for "20
 runs of work", not "the first 20 issues", and there was no way to say that.
 
-`--only N` counts RUNS REMAINING (after resume has skipped the finished ones), so
-the batch size is what was asked for regardless of how far the sweep got.
+`--only N` is a CEILING in runs, not a quota. Who decides what is already done is
+`--resume` (``experiments.runner._load_existing_ids``); the wrapper only truncates
+the candidate list to ``ceil(N / len(strategies))`` issues. That division of
+responsibility is the point of this file: an earlier version re-implemented the
+finished-run predicate here (``done_per_strategy`` / ``outstanding``), which both
+duplicated the owner of that logic (F22) and locked the scope to already-recorded
+issues, so a full experiment could never continue into the dataset tail.
 
 Design decisions pinned here:
-  * `--only` without `--resume` is an ERROR (exit 2). "Runs remaining" is undefined
-    without an experiment directory to measure against, so silently running the
-    first N issues would be a different meaning under the same flag.
-  * `--only` may need MORE issues than N to yield N runs, because an issue whose
-    direct run is done still contributes its planning and review runs.
-  * `--only` ROUNDS UP to whole issues, so it is not a hard cap: `--only 4` with 3
+  * `--only` without `--resume` is an ERROR (exit 2). The cap is defined against
+    an experiment, so it is refused without one.
+  * `--resume` without `--only` is an ERROR: an unbounded resume re-runs every
+    unfinished run (up to 150).
+  * `--only` ROUNDS UP to whole issues, so it is not exact: `--only 4` with 3
     strategies selects 2 issues = 6 runs. The overshoot is at most
     len(strategies) - 1 runs, and --dry-run prints the exact count beforehand.
-  * `runs_planned` records THIS session's runs; `runs_planned_cumulative` records
-    the experiment total. Reporting only one of them misstates either the work
-    about to happen or the experiment's size.
+  * a session can run FEWER than N runs, because --resume skips the finished ones
+    among the selected issues. The wrapper does NOT top the batch up to N.
+  * `runs_planned` records THIS session's ceiling.
 """
 import json
 
@@ -101,10 +105,15 @@ def sweep(tmp_path, monkeypatch):
         return 0
 
     monkeypatch.setattr(subprocess, "call", fake_call)
-    monkeypatch.setattr(
-        mod, "select_issues",
-        lambda limit: [f"django__django-{1000+i}" for i in range(limit if limit else 5)],
-    )
+
+    def fake_select(limit=None, instance_ids=None):
+        # Validation mode: --issues ids must look known or main() exits 2 before
+        # any of the selection behaviour below can be observed.
+        if instance_ids is not None:
+            return list(instance_ids)
+        return [f"django__django-{1000+i}" for i in range(limit if limit else 5)]
+
+    monkeypatch.setattr(mod, "select_issues", fake_select)
     return mod, tmp_path, captured
 
 
@@ -141,40 +150,38 @@ def _ids_in(cmd):
 # Guard rails
 # --------------------------------------------------------------------------
 
-def test_only_never_pulls_in_issues_outside_the_experiment(sweep, capsys):
-    """THE REGRESSION (measured, cost real money).
+def test_only_caps_but_does_not_lock_the_scope_to_the_experiment(sweep, capsys):
+    """F22, reversed: a full experiment must be able to continue into the dataset.
 
-    `--only` must CONTINUE an experiment, not extend it. An earlier version chose
-    from all 50 candidates, so running `--only 2` against a 1-issue pilot picked
-    two unrelated issues (10924, 11001) and actually ran them, spending money and
-    writing rows into the pilot's CSV.
+    The old version of this test pinned the OPPOSITE: `--only` could never select an
+    id that was not already recorded, so a finished experiment always printed
+    "nothing to do" and the next batch could not start. The scope is now
+    ``recorded + dataset tail``; `--resume` skips whatever is already done.
 
-    With only 1 issue in the experiment there is at most 1 issue to continue, so
-    the batch can never contain an id that is not already recorded.
+    With 1 recorded issue and a cap of 5 runs (1 strategy), the batch is 5 issues:
+    the recorded one first, then the next four from the dataset.
     """
     mod, tmp_path, captured = sweep
     exp = tmp_path / "results" / EXP_A
     _write_savepoint(exp, "direct", [_done("django__django-1000")])
 
-    _run(mod, ["--only", "5", "--resume", "--exp-id", EXP_A,
-               "--strategies", "direct"])
-    # Every run in the experiment is done, so NOTHING may run and no id may be
-    # invented from the candidate pool.
-    assert not any("run_with_env" in str(a) for c in captured for a in c), (
-        f"an experiment with no outstanding runs must not launch anything: {captured}"
-    )
-    out = capsys.readouterr().out
-    assert "django__django-1001" not in out, (
-        "an issue outside the experiment was pulled in"
-    )
+    rc = _run(mod, ["--only", "5", "--resume", "--exp-id", EXP_A,
+                    "--strategies", "direct"])
+    assert rc == 0
+    ids = _ids_in(_sweep_cmd(captured))
+    assert ids == [
+        "django__django-1000", "django__django-1001", "django__django-1002",
+        "django__django-1003", "django__django-1004",
+    ], f"the cap must select the recorded issue first, then the dataset tail: {ids}"
 
 
-def test_only_continues_the_next_issue_in_order(sweep):
-    """'resume and do the next N' -- continuing, not re-selecting.
+def test_only_is_a_cap_not_a_quota(sweep):
+    """`--resume` does the skipping, so the wrapper must NOT top the batch up.
 
-    Issues 1000 and 1001 are both recorded for `direct`; 1000 is done. `--only 1`
-    must take the NEXT outstanding run, which belongs to 1001, and must not touch
-    the finished 1000.
+    Issues 1000 and 1001 are recorded and 1000 is done. `--only 1` (1 strategy)
+    selects exactly ONE issue -- the first recorded one -- and does not look further
+    to find a run that is still outstanding. The real session then runs zero runs
+    because --resume skips 1000. That is the documented meaning of a ceiling.
     """
     mod, tmp_path, captured = sweep
     exp = tmp_path / "results" / EXP_A
@@ -189,16 +196,22 @@ def test_only_continues_the_next_issue_in_order(sweep):
                     "--strategies", "direct"])
     assert rc == 0
     ids = _ids_in(_sweep_cmd(captured))
-    assert ids == ["django__django-1001"], (
-        f"expected to continue with the next outstanding issue, got {ids}"
+    assert ids == ["django__django-1000"], (
+        f"the cap selected {ids}; it must not skip ahead to find an unfinished run"
     )
 
 
 def test_only_without_resume_is_an_error(sweep):
-    """'Runs remaining' is undefined without an experiment to measure."""
+    """The cap is defined against an experiment, so it is refused without one."""
     mod, _, _ = sweep
     rc = _run(mod, ["--only", "5"])
     assert rc == 2, "an undefined request must fail loudly, not run something else"
+
+
+def test_resume_without_only_is_an_error(sweep):
+    """A bare --resume re-runs every unfinished run -- up to 150 of them."""
+    mod, _, _ = sweep
+    assert _run(mod, ["--resume", "--exp-id", EXP_A]) == 2
 
 
 def test_only_still_requires_exp_id_via_resume_rule(sweep):
@@ -471,30 +484,20 @@ def test_resume_symlink_loop_is_refused_without_a_traceback(sweep, capsys, tmp_p
     )
 
 
-def test_exp_id_without_resume_is_dropped_by_build_cmd(sweep):
-    """ROUND-3 T4: `--exp-id` WITHOUT `--resume` is DISCARDED, not honoured.
+def test_exp_id_without_resume_is_refused_by_argparse_guard(sweep):
+    """ROUND-3 T4, REVERSED: `--exp-id` without `--resume` is now an ERROR.
 
-    An earlier comment claimed this was the documented "re-run into that directory"
-    path. Measured, that path does not exist in this tool: build_cmd appends --exp-id
-    only inside `if resume:`, so without --resume the id never reaches main.py. The
-    old test asserted exit 0 and called that "the re-run path works" -- it passed for
-    the wrong reason (the flag was thrown away). This test pins the real behaviour:
-    exit 0 AND the built command does NOT contain --exp-id.
+    The old version asserted exit 0 and that build_cmd dropped the flag -- i.e. it
+    pinned a flag being silently discarded (F24). The guard refuses the combination
+    instead, so nothing is built and nothing runs.
 
-    (Do not "fix" build_cmd to forward it: a bare --exp-id would re-run everything INTO
-    an existing experiment and overwrite it, which this staged-sweep wrapper does not
-    want.)
+    ``build_cmd`` is deliberately unchanged: a bare --exp-id would re-run everything
+    INTO an existing experiment and overwrite it.
     """
     mod, _, captured = sweep
-    # NOT --dry-run: a dry run returns before build_cmd is executed, so there would be
-    # no command to inspect. subprocess.call is stubbed by the fixture, so this still
-    # executes nothing real.
     rc = _run(mod, ["--exp-id", "EXP-20991231-999", "--issues", "django__django-10914"])
-    assert rc == 0
-    cmd = _sweep_cmd(captured)
-    assert "--exp-id" not in cmd, (
-        f"--exp-id must NOT reach the runner without --resume, but it did: {cmd}"
-    )
+    assert rc == 2, "a discarded flag must be refused, not accepted silently"
+    assert not captured, f"a refused invocation must build no command: {captured}"
 
 
 def test_resume_with_existing_exp_id_dir_still_works(sweep):
@@ -549,11 +552,12 @@ def test_negative_or_zero_limit_is_an_error(sweep, bad_limit):
 # --------------------------------------------------------------------------
 
 def test_only_with_issues_on_a_fresh_experiment_uses_the_issues(sweep, capsys):
-    """A fresh experiment: --issues IS the candidate pool, so it is used silently.
+    """A fresh experiment: --issues IS the candidate pool.
 
-    select_batch_for_only does `candidates = args.issues or select_issues(None)`, so
-    with no savepoints yet, `--only 3 --issues X Y Z` means "work 3 runs from this
-    set". Refusing the combination (an earlier round) rejected this legitimate use.
+    select_batch_for_only does ``recorded + [c for c in candidates...]`` and
+    ``candidates = args.issues or select_issues(None)``, so with no savepoints yet
+    the batch is exactly the given ids (capped by ``--only``). Refusing the
+    combination (an earlier round) rejected this legitimate use.
     """
     mod, tmp_path, captured = sweep
     _make_experiment(tmp_path, EXP_A)          # predictions/ exists, no savepoints
@@ -571,12 +575,13 @@ def test_only_with_issues_on_a_fresh_experiment_uses_the_issues(sweep, capsys):
     )
 
 
-def test_only_with_issues_on_an_existing_experiment_warns(sweep, capsys):
-    """An existing experiment: the batch comes from its savepoints, so --issues is inert.
+def test_only_extends_an_existing_experiment_with_the_issues_tail(sweep, capsys):
+    """REVERSED: `--issues` now EXTENDS the batch, so no "inert flag" warning.
 
-    Measured on EXP-20261002-279: `--only 3 --issues django__django-9999` ran the
-    experiment's OWN outstanding issues, not 9999. That is not an error -- it is the
-    documented scope of --only -- but the user must be told the id list has no effect.
+    The old test pinned the opposite -- `--issues` silently ignored on an existing
+    experiment, with a warning. Under the cap semantics the experiment's recorded
+    ids come first and `--issues` supplies the tail, so the named id genuinely
+    reaches the batch. Nothing is inert, so nothing warrants a WARNING.
     """
     mod, tmp_path, captured = sweep
     _write_savepoint(tmp_path / "results" / EXP_A, "direct", [
@@ -584,35 +589,30 @@ def test_only_with_issues_on_an_existing_experiment_warns(sweep, capsys):
          "model_name_or_path": "cbai/deepseek-v4.1-flash", "thinking": True,
          "patch_status": "RATE_LIMIT", "model_patch": "", "error_type": "RateLimitError"},
     ])
-    # NOT --dry-run, so build_cmd runs and the batch is inspectable; subprocess.call is
-    # stubbed by the fixture, so nothing real launches.
     rc = _run(mod, ["--resume", "--exp-id", EXP_A, "--only", "3",
-                    "--issues", "django__django-9999"])
+                    "--issues", "django__django-9999", "--strategies", "direct"])
     assert rc == 0, "--only + --issues must run, not be refused"
     err = capsys.readouterr().err
-    assert "WARNING" in err and "--issues" in err, (
-        f"the inert --issues flag must be warned about clearly: {err!r}"
+    assert "WARNING" not in err, (
+        f"--issues is now part of the candidate pool, so it is not inert: {err!r}"
     )
-    # And the batch must be the experiment's own issue, NOT the named 9999.
     ids = _ids_in(_sweep_cmd(captured))
-    assert "django__django-9999" not in ids, (
-        f"--issues must not leak into the batch of an existing experiment: {ids}"
+    assert ids == ["django__django-1000", "django__django-9999"], (
+        f"recorded ids come first, then the --issues tail: {ids}"
     )
-    assert ids == ["django__django-1000"], f"expected the experiment's own issue: {ids}"
 
 
 # --------------------------------------------------------------------------
 # Reading savepoints is best-effort: a corrupt jsonl must not crash (round-6 H1)
 # --------------------------------------------------------------------------
-# Both `recorded_ids` (inside select_batch_for_only) and `_experiment_has_savepoints`
-# open predictions/<strategy>.jsonl. Before the guard, three shapes made main() die
-# with a raw traceback (rc=1) instead of deciding a batch:
+# `select_batch_for_only` opens predictions/<strategy>.jsonl to learn the
+# experiment's OWN ids (order only -- status is --resume's business). Before the
+# guard, three shapes made main() die with a raw traceback (rc=1) instead of
+# deciding a batch:
 #   * the jsonl path is a DIRECTORY          -> PermissionError [WinError 5]
 #   * the jsonl has invalid UTF-8            -> UnicodeDecodeError (raised on READ,
 #                                               i.e. while iterating the handle)
 #   * a line is valid JSON but not an object -> AttributeError from entry.get
-# The same shapes also reach `_load_existing_ids` (runner.py:373/382) through the
-# call site in select_batch_for_only, so one test below drives that path too.
 
 def _assert_no_crash(rc, err):
     assert rc in (0, 2), f"a corrupt savepoint must not crash; got rc={rc}"
@@ -653,8 +653,8 @@ def test_jsonl_with_a_non_object_line_does_not_crash(sweep, capsys):
     _assert_no_crash(rc, capsys.readouterr().err)
 
 
-def test_corrupt_jsonl_reaches_the_issues_warning_check(sweep, capsys):
-    """`--only --issues` calls _experiment_has_savepoints on the SAME file; same guard."""
+def test_corrupt_jsonl_does_not_crash_when_issues_are_given(sweep, capsys):
+    """`--only --issues` still reads the same savepoint for its recorded ids."""
     mod, tmp_path, captured = sweep
     exp = tmp_path / "results" / EXP_A
     (exp / "predictions" / "direct.jsonl").mkdir(parents=True, exist_ok=True)
@@ -664,14 +664,12 @@ def test_corrupt_jsonl_reaches_the_issues_warning_check(sweep, capsys):
     _assert_no_crash(rc, capsys.readouterr().err)
 
 
-def test_corrupt_jsonl_on_the_load_existing_ids_path_does_not_crash(sweep, capsys):
-    """A READABLE savepoint makes select_batch_for_only call _load_existing_ids for
-    EVERY strategy -- so a corrupt jsonl in another strategy must be tolerated there
-    too (that loader is in runner.py and is unguarded; the call site wraps it)."""
+def test_corrupt_jsonl_in_another_strategy_does_not_crash(sweep, capsys):
+    """Every selected strategy's savepoint is read, so all of them must tolerate
+    the same corrupt shapes -- one bad file must not take the batch down."""
     mod, tmp_path, captured = sweep
     exp = tmp_path / "results" / EXP_A
-    # direct.jsonl is readable and holds a savepoint -> recorded_ids() is non-empty
-    # -> the _load_existing_ids branch runs; planning.jsonl is a DIRECTORY.
+    # direct.jsonl is readable and holds a savepoint, planning.jsonl is a DIRECTORY.
     _write_savepoint(exp, "direct", [
         {"instance_id": "django__django-1000", "strategy": "direct",
          "model_name_or_path": "cbai/deepseek-v4.1-flash", "thinking": True,
@@ -707,18 +705,15 @@ def test_corrupt_bill_window_state_file_does_not_crash(sweep, capsys):
 # The core behaviour
 # --------------------------------------------------------------------------
 
-def test_only_runs_that_many_incomplete_runs(sweep):
-    """THE POINT: N runs of work, measured after the skip.
+def test_only_caps_the_batch_at_that_many_runs(sweep):
+    """THE POINT: N is a ceiling in RUNS, enforced by truncating the issue list.
 
-    The experiment holds 3 issues; issue 1000 is done. `--only 2` must plan 2
-    runs -- issues 1001 and 1002 -- not "the first 2 issues" (which would be 1
-    skipped + 1 run).
+    The experiment records 3 issues; `--only 2` with one strategy means at most 2
+    runs, i.e. 2 issues -- taken in order from the experiment's own list. Which of
+    them `--resume` then skips is not the wrapper's business.
     """
     mod, tmp_path, captured = sweep
     exp = tmp_path / "results" / EXP_A
-    for iid in ("django__django-1000", "django__django-1001", "django__django-1002"):
-        _write_savepoint(exp, "direct", [_done(iid)])
-    # Re-write without 1000 being done, to leave 2 outstanding.
     _write_savepoint(exp, "direct", [
         _done("django__django-1000"),
         {"instance_id": "django__django-1001", "strategy": "direct",
@@ -733,37 +728,27 @@ def test_only_runs_that_many_incomplete_runs(sweep):
                     "--strategies", "direct"])
     assert rc == 0
     ids = _ids_in(_sweep_cmd(captured))
-    assert ids == ["django__django-1001", "django__django-1002"], (
-        f"expected exactly 2 still-incomplete runs, got {ids}"
+    assert ids == ["django__django-1000", "django__django-1001"], (
+        f"a 2-run cap with 1 strategy must select the first 2 issues, got {ids}"
     )
 
 
 def test_only_counts_runs_not_issues(sweep):
-    """One issue can contribute MORE than one run.
+    """One issue can contribute MORE than one run, so the cap divides by strategies.
 
-    With 3 strategies and an issue whose `direct` is done, that issue still has 2
-    outstanding runs -- so `--only 3` needs only 2 issues, not 3.
+    With 3 strategies, `--only 3` is exactly one issue = 3 runs. An issue-based
+    reading would have selected three issues (9 runs), so this pins the units.
     """
     mod, tmp_path, captured = sweep
     exp = tmp_path / "results" / EXP_A
     _write_savepoint(exp, "direct", [_done("django__django-1000")])
-    _write_savepoint(exp, "planning",
-                     [_done("django__django-1000", strategy="planning")])
-    # Record 1001 so the experiment covers it (scope is the recorded set).
-    _write_savepoint(exp, "review",
-                     [_done("django__django-1001", strategy="review"),
-                      {"instance_id": "django__django-1000", "strategy": "review",
-                       "model_name_or_path": "cbai/deepseek-v4.1-flash",
-                       "thinking": True, "patch_status": "RATE_LIMIT",
-                       "model_patch": "", "error_type": "RateLimitError"}])
 
     rc = _run(mod, ["--only", "3", "--resume", "--exp-id", EXP_A,
                     "--strategies", "direct", "planning", "review"])
     assert rc == 0
     ids = _ids_in(_sweep_cmd(captured))
-    # 1000: review outstanding = 1 run. 1001: direct + planning = 2 runs. Total 3.
-    assert ids == ["django__django-1000", "django__django-1001"], (
-        f"expected 2 issues to yield 3 incomplete runs, got {ids}"
+    assert ids == ["django__django-1000"], (
+        f"3 runs with 3 strategies is ONE issue, got {ids}"
     )
 
 
@@ -788,26 +773,36 @@ def test_only_never_exceeds_the_available_runs(sweep):
     )
 
 
-def test_only_returns_cleanly_when_nothing_remains(sweep, capsys):
-    """A fully complete experiment must exit 0 with a clear message, running nothing."""
+def test_only_returns_cleanly_when_there_are_no_candidates(sweep, capsys, monkeypatch):
+    """Zero issues selected is a success with a clear message, running nothing.
+
+    Under the cap semantics "nothing to do" is no longer about a full experiment
+    (that continues into the dataset tail). It is about a cap that selects zero
+    issues, which only happens when there is no candidate at all.
+    """
     mod, tmp_path, captured = sweep
-    exp = tmp_path / "results" / EXP_A
-    _write_savepoint(exp, "direct", [
-        _done(f"django__django-{1000+i}") for i in range(5)
-    ])
+    _make_experiment(tmp_path, EXP_A)          # a REAL experiment, so the guard passes
+    monkeypatch.setattr(mod, "select_issues",
+                        lambda limit=None, instance_ids=None: [])
 
     rc = _run(mod, ["--only", "3", "--resume", "--exp-id", EXP_A,
                     "--strategies", "direct"])
     assert rc == 0, "nothing to do is a success, not a failure"
     assert not any("run_with_env" in str(a) for c in captured for a in c), (
-        "no sweep should be launched when nothing remains"
+        "no sweep should be launched when there is nothing to select"
     )
     out = capsys.readouterr().out
     assert "nothing" in out.lower()
 
 
-def test_failed_runs_still_count_as_remaining(sweep):
-    """An infrastructure death must be retried, so it is NOT 'done'."""
+def test_resume_owns_the_retry_predicate_not_the_wrapper(sweep):
+    """A rate-limited run is retried by `--resume`, not by `--only`'s selection.
+
+    The wrapper truncates the issue list and stops there. It does NOT inspect
+    patch_status to decide that a finished issue should be skipped and a failed one
+    re-included -- that predicate lives in ``_load_existing_ids`` and is exactly what
+    F22 was about (two owners of "is this run done?").
+    """
     mod, tmp_path, captured = sweep
     exp = tmp_path / "results" / EXP_A
     _write_savepoint(exp, "direct", [
@@ -822,8 +817,8 @@ def test_failed_runs_still_count_as_remaining(sweep):
                     "--strategies", "direct"])
     assert rc == 0
     ids = _ids_in(_sweep_cmd(captured))
-    assert ids == ["django__django-1001"], (
-        f"the rate-limited run must be retried and the finished one skipped; got {ids}"
+    assert ids == ["django__django-1000", "django__django-1001"], (
+        f"the wrapper must hand over both issues and let --resume decide: {ids}"
     )
 
 
@@ -831,13 +826,12 @@ def test_failed_runs_still_count_as_remaining(sweep):
 # Reporting
 # --------------------------------------------------------------------------
 
-def test_session_and_cumulative_run_counts_are_both_reported(sweep, capsys):
-    """One number cannot serve both purposes.
+def test_runs_planned_records_this_sessions_ceiling(sweep, capsys):
+    """`runs_planned` is THIS session's cap, and the banner says so.
 
-    The experiment records 5 issues x 1 strategy, one of them finished: this
-    session runs 2, and the experiment holds 4 outstanding runs. Note "cumulative"
-    counts the RECORDED instances, not the candidate pool -- an issue that was
-    never part of this experiment is not its work.
+    ``runs_planned_cumulative`` was removed with the duplicated resume predicate:
+    it counted "outstanding runs in the experiment", a number only the resume
+    predicate can compute -- and the wrapper no longer computes it.
     """
     mod, tmp_path, _ = sweep
     exp = tmp_path / "results" / EXP_A
@@ -852,29 +846,30 @@ def test_session_and_cumulative_run_counts_are_both_reported(sweep, capsys):
     _run(mod, ["--only", "2", "--resume", "--exp-id", EXP_A,
                "--strategies", "direct"])
     out = capsys.readouterr().out
-    assert "2" in out, "this session's run count must be visible before starting"
+    assert "runs       : 2" in out, (
+        f"this session's run ceiling must be visible before starting: {out}"
+    )
+    assert "cap 2 run(s)" in out, f"the banner must state that --only is a cap: {out}"
 
     state = json.loads((tmp_path / "logs" / "sweep_started.json").read_text(encoding="utf-8"))
     assert state["runs_planned"] == 2, (
-        f"runs_planned should be this session's work, got {state['runs_planned']}"
+        f"runs_planned should be this session's cap, got {state['runs_planned']}"
     )
-    assert state.get("runs_planned_cumulative") == 4, (
-        "the experiment's outstanding runs must also be recorded: "
-        f"got {state.get('runs_planned_cumulative')}"
+    assert "runs_planned_cumulative" not in state, (
+        "the cumulative count duplicated the resume predicate and was removed"
     )
 
 
 def test_only_rounds_up_to_whole_issues(sweep, capsys):
-    """`--only` counts RUNS but selects ISSUES, so it rounds UP -- it is not a cap.
+    """`--only` counts RUNS but selects ISSUES, so the ceiling rounds UP.
 
     A brand-new experiment with the default 3 strategies: `--only 4` cannot run
     exactly 4, because one issue yields 3 runs. It takes 2 whole issues = 6 runs.
 
     This is deliberate (the runner takes issue ids, not (issue, strategy) pairs, so
-    a partial issue could not be evaluated), and the overshoot is at most
-    len(strategies) - 1 runs. What was WRONG was the help text saying "at most N
-    runs" -- false by up to 2 runs. This test pins the real behaviour so the wording
-    cannot drift back to a claim the code does not honour.
+    a partial issue could not be evaluated), and the ceiling can overshoot by at
+    most len(strategies) - 1 runs. This test pins the real behaviour so the banner
+    cannot drift back to an exact number the code does not produce.
 
     "Brand-new experiment" means what a real batch-1 (`--limit`) run leaves on disk:
     the directory exists WITH a predictions/ folder (the runner mkdirs it before the

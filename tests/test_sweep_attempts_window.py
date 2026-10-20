@@ -46,7 +46,7 @@ def sweep_state(tmp_path, monkeypatch):
     mod = _load_sweep_module()
     monkeypatch.setattr(mod, "ROOT", tmp_path)
     monkeypatch.setattr(subprocess, "call", lambda cmd, **kw: 0)
-    monkeypatch.setattr(mod, "select_issues", lambda limit: ["inst-1"])
+    monkeypatch.setattr(mod, "select_issues", lambda limit=None, instance_ids=None: ["inst-1"])
     monkeypatch.setattr(mod, "build_cmd", lambda *a, **k: ["python", "-c", "pass"])
     # The resume tests below pass `--resume --exp-id EXP-20260101-001`. The guard
     # requires a REAL experiment: an experiment marker (predictions/ or
@@ -127,7 +127,7 @@ def test_two_attempts_are_both_recorded(sweep_state, monkeypatch):
     first_started = first["started_utc"]
 
     _advance_clock(mod, monkeypatch, 3600)          # an hour later, like a real resume
-    _run(mod, ["--limit", "1", "--resume", "--exp-id", EXP_ID])
+    _run(mod, ["--only", "3", "--resume", "--exp-id", EXP_ID])
     state = json.loads(state_path.read_text(encoding="utf-8"))
 
     attempts = state.get("attempts") or []
@@ -147,9 +147,9 @@ def test_the_attempt_is_not_recorded_twice_on_repeated_resume(sweep_state, monke
     mod, state_path = sweep_state
     _run(mod, ["--limit", "1"])
     _advance_clock(mod, monkeypatch, 3600)
-    _run(mod, ["--limit", "1", "--resume", "--exp-id", EXP_ID])
+    _run(mod, ["--only", "3", "--resume", "--exp-id", EXP_ID])
     _advance_clock(mod, monkeypatch, 3600)
-    _run(mod, ["--limit", "1", "--resume", "--exp-id", EXP_ID])
+    _run(mod, ["--only", "3", "--resume", "--exp-id", EXP_ID])
 
     state = json.loads(state_path.read_text(encoding="utf-8"))
     starts = [a["started_utc"] for a in (state.get("attempts") or [])]
@@ -166,7 +166,7 @@ def test_attempts_in_the_same_second_collapse_to_one(sweep_state):
     """
     mod, state_path = sweep_state
     _run(mod, ["--limit", "1"])
-    _run(mod, ["--limit", "1", "--resume", "--exp-id", EXP_ID])
+    _run(mod, ["--only", "3", "--resume", "--exp-id", EXP_ID])
 
     state = json.loads(state_path.read_text(encoding="utf-8"))
     starts = [a["started_utc"] for a in (state.get("attempts") or [])]
