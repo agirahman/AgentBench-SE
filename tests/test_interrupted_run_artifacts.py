@@ -97,6 +97,10 @@ def test_interrupt_still_propagates(tmp_path):
     "manifest.json",
     "generation_statistics.json",
     "generation_report.md",
+    # ``_append_merge_log`` documents "one line per invocation", and an interrupt
+    # is an invocation. It used to be skipped on this path, so a Ctrl-C left no
+    # record of which batch was in flight.
+    "MERGE_LOG.jsonl",
 ])
 def test_interrupt_writes_the_artifact(tmp_path, artifact):
     """Every artefact a completed run produces must also exist after Ctrl-C.
@@ -129,6 +133,28 @@ def test_interrupted_run_keeps_the_finished_runs_accounting(tmp_path):
     interrupted = df[df["instance_id"] == "django__django-3"]
     assert len(interrupted) == 1
     assert interrupted.iloc[0]["patch_status"] == "INTERRUPTED"
+
+
+def test_interrupt_records_a_merge_log_entry(tmp_path):
+    """The MERGE_LOG line after Ctrl-C must carry the batch and a non-zero rc.
+
+    ``session_rc`` was hardcoded to 0, so an interrupted session was logged as a
+    clean one -- the opposite of what the field is for. 130 is the shell's
+    convention for "killed by SIGINT" (128 + 2).
+    """
+    exp_dir, _ = _interrupt(tmp_path, [_issue(1), _issue(2), _issue(3)], "django__django-3")
+    lines = [
+        line for line in (exp_dir / "MERGE_LOG.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(lines) == 1, f"expected one line per invocation, got {lines}"
+    entry = json.loads(lines[0])
+    assert entry["session_rc"] == 130, (
+        f"an interrupted session must not be logged as rc=0: {entry}"
+    )
+    assert entry["batch_ids"] == [
+        "django__django-1", "django__django-2", "django__django-3",
+    ]
 
 
 def test_interrupted_manifest_lists_what_ran(tmp_path):

@@ -78,8 +78,14 @@ def captured_preflight(monkeypatch, tmp_path):
     # MUST come after _load_sweep_module(): the module computes ROOT at import
     # time, so patching before the load would be undone by it.
     monkeypatch.setattr(mod, "ROOT", tmp_path)
-    # Do not depend on the dataset cache for the gate test.
-    monkeypatch.setattr(mod, "select_issues", lambda limit: [f"inst-{i}" for i in range(limit or 3)])
+    # Do not depend on the dataset cache for the gate test. ``instance_ids`` must be
+    # accepted because main() validates --issues through the same function.
+    monkeypatch.setattr(
+        mod, "select_issues",
+        lambda limit=None, instance_ids=None: [
+            f"inst-{i}" for i in range(limit or 3)
+        ],
+    )
 
     def run(*argv):
         seen.clear()
@@ -121,10 +127,26 @@ def test_explicit_issue_list_is_not_silently_limited(captured_preflight):
     )
 
 
-def test_smoke_run_is_not_silently_limited(captured_preflight):
-    """--smoke runs 1 issue; --limit would be a different 1 only by coincidence."""
-    cmd = captured_preflight("--limit", "5", "--smoke")
-    assert "--limit" not in cmd
+def test_smoke_run_is_not_silently_limited(tmp_path, monkeypatch):
+    """--smoke runs 1 issue, and --limit is now REFUSED next to it.
+
+    The old version asserted only that --limit did not reach the preflight, which
+    left ``--smoke --limit 5`` silently discarding the limit. The combination is
+    rejected outright now: exit 2 and no preflight at all.
+    """
+    import subprocess as _sp
+
+    mod = _load_sweep_module()
+    monkeypatch.setattr(mod, "ROOT", tmp_path)
+    seen: list[list[str]] = []
+    monkeypatch.setattr(_sp, "call", lambda cmd, **kw: seen.append(list(cmd)) or 0)
+    monkeypatch.setattr(mod, "select_issues",
+                        lambda limit=None, instance_ids=None: ["inst-0"])
+    monkeypatch.setattr(sys, "argv",
+                        ["run_final_sweep.py", "--limit", "5", "--smoke"])
+
+    assert mod.main() == 2
+    assert seen == [], f"a refused combination must not gate or launch: {seen}"
 
 
 def test_preflight_accepts_the_limit_flag():
@@ -510,6 +532,7 @@ def test_every_sweep_test_redirects_root_before_calling_main():
         "test_sweep_preflight_scope.py",
         "test_sweep_attempts_window.py",
         "test_sweep_only_batch.py",
+        "test_sweep_flag_guards.py",
         "test_docker_gate_and_stall_watchdog.py",
     }
 
@@ -972,7 +995,9 @@ def _drive_main(tmp_path, monkeypatch, argv, seed_reconstructed=True):
 
     monkeypatch.setattr(mod, "ROOT", root)
     monkeypatch.setattr(mod, "select_issues",
-                        lambda limit: [f"inst-{i}" for i in range(limit or 3)])
+                        lambda limit=None, instance_ids=None: [
+                            f"inst-{i}" for i in range(limit or 3)
+                        ])
     monkeypatch.setattr(subprocess, "call", lambda cmd, **kw: 0)
     monkeypatch.setattr(sys, "argv", ["run_final_sweep.py", *argv])
 
@@ -994,7 +1019,7 @@ def test_resume_preserves_a_reconstruction(tmp_path, monkeypatch):
     marked copy at all.
     """
     rc, state, archives = _drive_main(
-        tmp_path, monkeypatch, ["--resume", "--exp-id", "EXP-TEST", "--limit", "1"])
+        tmp_path, monkeypatch, ["--resume", "--exp-id", "EXP-TEST", "--only", "3"])
 
     assert rc == 0, f"main() failed: rc={rc}"
     marked = [a for a in archives if "reconstructed_archived" in a]
@@ -1034,7 +1059,7 @@ def test_a_live_window_on_resume_is_still_folded_not_archived(tmp_path, monkeypa
     case entirely.
     """
     rc, state, archives = _drive_main(
-        tmp_path, monkeypatch, ["--resume", "--exp-id", "EXP-TEST", "--limit", "1"],
+        tmp_path, monkeypatch, ["--resume", "--exp-id", "EXP-TEST", "--only", "3"],
         seed_reconstructed=False)
 
     assert rc == 0, f"main() failed: rc={rc}"

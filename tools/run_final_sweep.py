@@ -86,6 +86,14 @@ Usage
     python tools/run_final_sweep.py --smoke       # 1 issue x 1 strategy
     python tools/run_final_sweep.py --limit 5     # first 5 issues (15 runs)
     python tools/run_final_sweep.py               # the full 150 runs
+    python tools/run_final_sweep.py --resume --exp-id EXP-X --only 30
+                                                  # at most 30 runs; --resume
+                                                  # skips the completed ones
+
+Flag contract: `--resume` always travels with `--exp-id` AND `--only`.
+`--resume` is the only owner of the "is this run finished?" predicate;
+`--only N` is a CAP on this session's runs (counted in RUNS, rounded up to
+whole issues), not a quota that has to be filled.
 
 The start timestamp is written to logs/sweep_started.json so the bill window is
 recoverable even if the shell that launched the run is gone, and so
@@ -259,12 +267,19 @@ REASONING_EFFORT = "medium"
 MAX_TOKENS = 65536
 
 
-def select_issues(limit: int | None) -> list[str]:
+def select_issues(
+    limit: int | None = None, instance_ids: list[str] | None = None
+) -> list[str]:
     """Pick the instances that have a local checkout, deterministically.
 
     Ordered by instance id so the selection is reproducible and a `--limit` run
     covers the same instances every time; an arbitrary order would make two
     partial runs incomparable.
+
+    ``instance_ids`` switches to VALIDATION mode: every id must exist in the
+    dataset, and the known ones come back in dataset order. The checkout filter is
+    not applied there -- "does this id exist" is a different question from "can
+    this id run here", and the caller only wants the unknown-id ValueError.
 
     Resolution checks the two documented layouts DIRECTLY rather than calling
     agents.tools.resolve_repo_root. That function's last resort is an os.walk over
@@ -279,11 +294,23 @@ def select_issues(limit: int | None) -> list[str]:
     sys.path.insert(0, str(ROOT / "src"))
     from config import Config
 
+    ds = load_dataset("SWE-bench/SWE-bench_Lite", split="test")
+
+    if instance_ids is not None:
+        wanted = list(dict.fromkeys(instance_ids))
+        known = {row["instance_id"] for row in ds}
+        missing = [i for i in wanted if i not in known]
+        if missing:
+            raise ValueError(
+                f"unknown instance_id(s): {', '.join(missing)}. Pass ids exactly "
+                f"as they appear in SWE-bench Lite (e.g. django__django-11001)."
+            )
+        order = {row["instance_id"]: i for i, row in enumerate(ds)}
+        return sorted(wanted, key=lambda i: order[i])
+
     base = Path(Config.TOOLCALL_REPO_DIR)
     if not base.is_absolute():
         base = ROOT / base
-
-    ds = load_dataset("SWE-bench/SWE-bench_Lite", split="test")
 
     usable: list[str] = []
     for row in sorted(ds, key=lambda r: r["instance_id"]):
@@ -300,60 +327,44 @@ def select_issues(limit: int | None) -> list[str]:
 def select_batch_for_only(
     only: int, exp_id: str, strategies: list[str], candidates: list[str],
     model: str = MODEL,
-) -> tuple[list[str], int, int]:
-    """Take the next ``only`` still-incomplete RUNS, in order, from this experiment.
+) -> list[str]:
+    """CAP the batch at ``only`` RUNS worth of issues; ``--resume`` does the skip.
 
-    Returns ``(issues, runs_this_session, runs_outstanding_in_experiment)``.
+    Returns the issues to hand the runner: the experiment's own ids first (in
+    savepoint order), then the dataset tail, truncated to
+    ``ceil(only / len(strategies))`` issues.
 
-    The intended use is a staged sweep: run some issues, then continue with the
-    next batch -- "resume, do 5 more issues" -- WITHOUT redoing what is finished
-    and WITHOUT pulling in issues that were never part of this experiment.
+    ``--only`` is deliberately NOT a second implementation of "is this run
+    finished?" -- that predicate belongs to ``--resume``
+    (``experiments.runner._load_existing_ids``). Duplicating it here is what
+    caused F22: with the scope restricted to ids already recorded, an experiment
+    whose recorded runs were all complete could never continue into new issues.
 
-    ``--limit`` cannot express that, because it counts ISSUES from the start of the
-    dataset: after a partial sweep, "the first 20 issues" may already be done, so
-    almost nothing runs while the command looks like it asked for 20 runs of work.
+    Consequences, intended:
 
-    Scope is deliberately restricted to instances ALREADY PRESENT in the
-    experiment's savepoints. An earlier version selected from all 50 candidates and
-    therefore ADDED new issues to an existing experiment -- measured on a 1-issue
-    pilot (`EXP-20261002-279`), where `--only 2` quietly ran two unrelated issues
-    (10924, 11001) for real money. Continuing an experiment must continue it, not
-    extend it.
+    * a real session may run FEWER than ``only`` runs when ``--resume`` skips
+      some of the selected issues -- a cap means "no more than", not a quota;
+    * ``--issues`` is an alternative candidate pool (the dataset tail by
+      default), not a requirement.
 
-    Within that scope the batch is the next ``only`` outstanding runs in order. An
-    issue is included whole even if its last strategy overshoots the budget,
-    because the runner takes issue ids, not (issue, strategy) pairs.
-
-    The "is it finished?" answer comes from ``experiments.runner._load_existing_ids``,
-    the SAME predicate --resume uses. Reimplementing it would let the two disagree,
-    so a run that --resume skips could still be counted here (or the reverse).
+    ``model`` is unused: selection no longer reads resume keys. It stays in the
+    signature so callers (and tests) that pass a model keep working.
     """
-    sys.path.insert(0, str(ROOT / "src"))
-    from experiments.runner import _load_existing_ids, _resume_key
+    del model
+    pred_dir = ROOT / "results" / exp_id / "predictions"
 
-    exp_dir = ROOT / "results" / exp_id
-    pred_dir = exp_dir / "predictions"
-
-    def recorded_ids() -> list[str]:
-        """Instances this experiment already knows about, in first-seen order."""
-        seen: list[str] = []
-        if not pred_dir.is_dir():
-            return seen
+    seen: list[str] = []
+    if pred_dir.is_dir():
         for s in strategies:
             jsonl = pred_dir / f"{s}.jsonl"
             if not jsonl.exists():
                 continue
-            # Reading a savepoint is BEST-EFFORT: a jsonl that cannot be read must
-            # never kill the tool while it is deciding what to run. Three shapes
-            # crashed with a raw traceback before this wrap (measured):
-            #   * jsonl is a DIRECTORY -> open() raises PermissionError [WinError 5]
-            #   * jsonl has invalid UTF-8 -> the read raises UnicodeDecodeError
-            #     (raised during ITERATION, not at open(), so the try must wrap the
-            #     whole `with`, not just the open call)
-            #   * a line is valid JSON but not an object (e.g. `[1,2,3]` or `"s"`)
-            #     -> entry.get raises AttributeError
-            # An unreadable file simply contributes no ids (treated as empty); a
-            # non-object line is skipped like any other unparseable line.
+            # BEST-EFFORT: deciding what to run must never die on a corrupt
+            # savepoint. Three shapes used to crash with a raw traceback:
+            #   * jsonl is a DIRECTORY -> PermissionError [WinError 5]
+            #   * invalid UTF-8 -> UnicodeDecodeError (raised while ITERATING,
+            #     so the try must wrap the whole `with`, not just open())
+            #   * a line is valid JSON but not an object -> AttributeError
             try:
                 with open(jsonl, "r", encoding="utf-8") as f:
                     for line in f:
@@ -371,115 +382,35 @@ def select_batch_for_only(
                             seen.append(iid)
             except (OSError, UnicodeDecodeError):
                 continue
-        # Deterministic: savepoint order is the run order, but sort to be safe
-        # against a partially written file.
-        return sorted(seen)
+    # Deterministic: savepoint order is the run order, but sort to be safe
+    # against a partially written file.
+    recorded = sorted(seen)
 
-    in_experiment = recorded_ids()
-
-    if not in_experiment:
-        # A brand-new experiment: every candidate is outstanding, so the first
-        # ``only`` runs come from the first issues, rounded UP because one issue
-        # yields len(strategies) runs.
-        per_issue = max(1, len(strategies))
-        n_issues = min(len(candidates), -(-only // per_issue))
-        chosen = candidates[:n_issues]
-        return chosen, len(chosen) * len(strategies), len(candidates) * len(strategies)
-
-    def _safe_existing_ids(path: Path) -> set[str]:
-        """``_load_existing_ids`` that never raises on a corrupt jsonl.
-
-        ``_load_existing_ids`` (src/experiments/runner.py:342) reads the file with no
-        guard, so the same corrupt shapes that crashed the two functions above crash
-        HERE too -- reached once the experiment has at least one savepoint, via this
-        call site. Measured: predictions/planning.jsonl as a DIRECTORY -> PermissionError
-        at runner.py:373, rc=1; and a valid-JSON-but-non-object line -> AttributeError
-        from ``entry.get`` at runner.py:382, rc=1. runner.py must not be touched, so
-        the guard lives at the call site. Any of these yields the empty set, the
-        conservative reading ("nothing known done" -> the run is retried rather than
-        silently skipped). AttributeError is caught narrowly because the only ``.get``
-        calls in that loader are on parsed JSON rows, so a non-dict row is its sole
-        cause here.
-        """
-        try:
-            return _load_existing_ids(str(path))
-        except (OSError, UnicodeDecodeError, AttributeError):
-            return set()
-
-    done_per_strategy = {
-        s: _safe_existing_ids(pred_dir / f"{s}.jsonl") for s in strategies
-    }
-    # ``model`` is a parameter, not the module constant: the resume key embeds
-    # the model, so counting outstanding runs with the WRONG model would report
-    # every finished run as still to do -- and then run them again for money.
-    key = _resume_key("", model, THINKING == "true")
-
-    def outstanding(iid: str) -> int:
-        # Reuse the same key construction as the loader: strip the leading '|'
-        # that the empty instance id leaves behind.
-        k = _resume_key(iid, model, THINKING == "true")
-        return sum(1 for s in strategies if k not in done_per_strategy[s])
-
-    cumulative = sum(outstanding(i) for i in in_experiment)
-
-    chosen: list[str] = []
-    budget = only
-    for iid in in_experiment:
-        if budget <= 0:
-            break
-        n = outstanding(iid)
-        if n == 0:
-            continue                      # fully done; --resume will skip it
-        chosen.append(iid)
-        budget -= n
-
-    return chosen, sum(outstanding(i) for i in chosen), cumulative
+    ordered = recorded + [c for c in candidates if c not in set(recorded)]
+    n_issues = min(len(ordered), -(-only // max(1, len(strategies))))
+    return ordered[:n_issues]
 
 
-def _experiment_has_savepoints(exp_id: str | None, strategies: list[str]) -> bool:
-    """True if the experiment already records at least one instance.
+def validate_instance_ids(ids: list[str]) -> str | None:
+    """Return an error message, or None when every id exists in the dataset.
 
-    This mirrors the ``recorded_ids()`` predicate inside ``select_batch_for_only``:
-    an experiment "has savepoints" when any of its ``predictions/<strategy>.jsonl``
-    files holds a row with an ``instance_id``. It decides whether ``--issues`` still
-    does something under ``--only`` (see the warning in ``main``): with no savepoints
-    the candidate pool IS ``--issues``, so the flag is used; with savepoints the batch
-    comes from the experiment's own records and ``--issues`` is inert.
-
-    Kept as a small standalone check so ``select_batch_for_only`` itself is not
-    touched (its batch-sizing logic must not change).
+    Uses the dataset's own lookup, whose ``ValueError`` names the unknown ids.
+    A dataset that cannot be reached is NOT a failure: ``--dry-run`` must work
+    offline, so the caller warns and passes the ids through unverified.
     """
-    if not exp_id:
-        return False
-    pred_dir = ROOT / "results" / exp_id / "predictions"
-    if not pred_dir.is_dir():
-        return False
-    for s in strategies:
-        jsonl = pred_dir / f"{s}.jsonl"
-        if not jsonl.exists():
-            continue
-        # Same best-effort read as recorded_ids() above: an unreadable jsonl (a
-        # DIRECTORY -> PermissionError, or invalid UTF-8 -> UnicodeDecodeError, which
-        # surfaces while ITERATING the handle) must not crash the tool. Such a file
-        # simply contributes no savepoint. A valid-JSON-but-non-object line would make
-        # entry.get raise AttributeError, so it is skipped too.
-        try:
-            with open(jsonl, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(entry, dict):
-                        continue
-                    if entry.get("instance_id"):
-                        return True
-        except (OSError, UnicodeDecodeError):
-            continue
-    return False
+    try:
+        select_issues(instance_ids=ids)
+    except ValueError as exc:
+        return str(exc)
+    except Exception as exc:  # noqa: BLE001 - a preview must not need the network
+        # Any dataset failure (offline, missing cache, an SDK error) degrades to a
+        # warning: --dry-run is the read-only preview and must stay usable offline.
+        print(
+            "WARNING: could not validate --issues offline; ids are passed "
+            f"through unverified ({type(exc).__name__}: {exc})",
+            file=sys.stderr,
+        )
+    return None
 
 
 def build_cmd(
@@ -489,6 +420,7 @@ def build_cmd(
     resume: bool = False,
     exp_id: str | None = None,
     route: str = DEFAULT_ROUTE,
+    allow_config_change: bool = False,
 ) -> list[str]:
     # Resolve the bundle FIRST, so a typo fails here rather than producing a
     # command that silently mixes one route's model with another's provider.
@@ -571,6 +503,12 @@ def build_cmd(
         if not exp_id:
             raise ValueError("--resume needs --exp-id: there is no directory to resume")
         cmd += ["--resume", "--exp-id", exp_id]
+        # Forwarded, not invented here: main.py owns the guard and the flag. Without
+        # this passthrough the wrapper could tell an operator to "re-run with
+        # --allow-config-change" for 95 legacy experiments (savepoints, no
+        # run_identity block) that the wrapper itself had no way to allow.
+        if allow_config_change:
+            cmd.append("--allow-config-change")
     if dry_run:
         cmd.append("--dry-run")
     return cmd
@@ -663,6 +601,10 @@ def archive_previous_window(state_path: Path) -> str:
         return ""
 
 
+#: The strategies the sweep runs when ``--strategies`` is not given.
+DEFAULT_STRATEGIES = ["direct", "planning", "review"]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Final 50-issue sweep (sequential).")
     ap.add_argument("--dry-run", action="store_true",
@@ -672,19 +614,28 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=None,
                     help="use only the first N usable issues (for a pilot run)")
     ap.add_argument("--only", type=int, default=None,
-                    help="run about N still-INCOMPLETE runs (requires --resume "
-                         "--exp-id). Counts runs, not issues, so it can drive a "
-                         "staged sweep: 'do 30 runs, then check'. Rounded UP to "
-                         "whole issues, so N can yield up to N+len(strategies)-1 "
-                         "runs; --dry-run prints the exact count.")
-    ap.add_argument("--strategies", nargs="*", default=["direct", "planning", "review"])
+                    help="CAP on this session's runs (requires --resume --exp-id). "
+                         "Counts runs, not issues, and is rounded up to whole "
+                         "issues, so it can yield up to len(strategies)-1 extra "
+                         "runs; --dry-run prints the exact count. --resume is what "
+                         "decides which runs are skipped, so the session may run "
+                         "fewer than N.")
+    ap.add_argument("--strategies", nargs="*", default=None,
+                    choices=list(DEFAULT_STRATEGIES),
+                    help="strategies to run (default: all three). A bare flag "
+                         "with no value is refused.")
     ap.add_argument("--issues", nargs="*", default=None,
                     help="explicit instance ids (overrides --limit)")
     ap.add_argument("--resume", action="store_true",
                     help="continue an interrupted sweep instead of starting a new one; "
-                         "requires --exp-id")
+                         "requires --exp-id and --only")
     ap.add_argument("--exp-id", default=None,
-                    help="the experiment directory to continue (e.g. EXP-20261001-001)")
+                    help="the experiment directory to continue (e.g. EXP-20261001-001); "
+                         "requires --resume")
+    ap.add_argument("--allow-config-change", action="store_true",
+                    help="resume even though the experiment was recorded with a "
+                         "different provider/model/thinking, or with none recorded "
+                         "(legacy experiments). Passed through to src/main.py.")
     ap.add_argument("--route", default=DEFAULT_ROUTE, choices=sorted(ROUTES),
                     help="which model/provider bundle to run: "
                          f"{', '.join(sorted(ROUTES))} (default: {DEFAULT_ROUTE})")
@@ -696,10 +647,61 @@ def main() -> int:
     route = ROUTES[args.route]
     model = route["model"]
 
+    # --- Guards. All exit 2 and fire under --dry-run too: previewing a typo is
+    # what a dry run is for, so a green dry-run must mean the command is runnable.
+    if args.exp_id and not args.resume:
+        # build_cmd appends --exp-id ONLY inside `if resume:`, so today the id is
+        # silently discarded. Refuse instead of pretending it did something.
+        print("ERROR: --exp-id needs --resume. Without it the id has no effect; "
+              "to START an experiment use --limit N.", file=sys.stderr)
+        return 2
     if args.resume and not args.exp_id:
         print("ERROR: --resume needs --exp-id, otherwise there is nothing to continue.",
               file=sys.stderr)
         return 2
+    if args.resume and args.only is None:
+        # A bare --resume re-runs everything the resume predicate considers
+        # unfinished -- up to 150 runs. The batch must be bounded explicitly.
+        print("ERROR: --resume needs --only N (a cap on this session's runs).",
+              file=sys.stderr)
+        return 2
+    if args.smoke and args.limit is not None:
+        print("ERROR: --smoke already fixes the batch to 1 issue; drop --limit.",
+              file=sys.stderr)
+        return 2
+    if args.smoke and args.strategies is not None:
+        print("ERROR: --smoke already fixes the strategy to direct; "
+              "drop --strategies.", file=sys.stderr)
+        return 2
+    if args.smoke and args.only is not None:
+        # Same class as `--smoke --limit`: --smoke fixes the batch to 1 issue, so a
+        # run cap alongside it would be half-dead -- the strategies would still flip
+        # to direct while --only changed nothing observable.
+        print("ERROR: --smoke already fixes the batch to 1 issue; drop --only.",
+              file=sys.stderr)
+        return 2
+    if args.strategies is not None and not args.strategies:
+        print("ERROR: --strategies needs at least one name (or omit the flag for "
+              f"all: {', '.join(DEFAULT_STRATEGIES)}).", file=sys.stderr)
+        return 2
+    if args.issues is not None and not args.issues:
+        # `--issues` with no value parses to [], which is FALSY: every later use is
+        # `args.issues or ...`, so the empty list was silently ignored and the
+        # selection fell through to select_issues(None) -- the WHOLE dataset. That
+        # is F41's failure mode (a flag that looks like it did something while the
+        # sweep runs something else entirely).
+        print("ERROR: --issues needs at least one instance id (or drop the flag to "
+              "select from the dataset).", file=sys.stderr)
+        return 2
+
+    # One source of truth for the strategy list. `--strategies=None` means the
+    # flag was not given; an empty list is refused above.
+    if args.smoke:
+        strategies = ["direct"]
+    elif args.strategies:
+        strategies = args.strategies
+    else:
+        strategies = list(DEFAULT_STRATEGIES)
 
     # --resume pointing at something that is not a REAL experiment is a TYPO, and it
     # used to succeed silently. Round 1 only closed the LITERAL case (EXP-TYPO-XXXX);
@@ -747,14 +749,13 @@ def main() -> int:
     # Deliberately fires under --dry-run too: previewing a typo is what a dry run is
     # for, so refusing here catches the mistake BEFORE money leaves.
     #
-    # It does NOT need to fire without --resume, but NOT for the reason an earlier
-    # comment gave. That comment said `--exp-id X` alone re-runs into that directory;
-    # measured, that path does not exist in this tool -- build_cmd (defined below)
-    # appends `--exp-id` ONLY inside `if resume:`, so without --resume the id is
-    # DISCARDED and never reaches main.py. So the guard is simply moot there: the
-    # flag has no effect on what runs. (Do not "fix" build_cmd to pass it: a bare
-    # --exp-id would re-run everything INTO an existing experiment, overwriting it,
-    # which this staged-sweep wrapper does not want.)
+    # The guard above already REFUSES `--exp-id` without `--resume`, so this branch
+    # is only reached with both flags. That is deliberate: `build_cmd` (defined
+    # below) appends `--exp-id` ONLY inside `if resume:`, so a bare `--exp-id` was
+    # silently DISCARDED -- and "fixing" build_cmd to forward it would re-run
+    # everything INTO an existing experiment and overwrite it, which this
+    # staged-sweep wrapper does not want. Refusing the combination is the honest
+    # outcome: a flag that has no effect must not look like it had one.
     if args.resume and args.exp_id:
         exp_id = args.exp_id
         # Un-resolved on purpose: this is the exact path the user would look at, and
@@ -882,83 +883,62 @@ def main() -> int:
               "would run nothing.", file=sys.stderr)
         return 2
 
-    # --only counts runs REMAINING, which is undefined without an experiment to
-    # measure against. Running "the first N issues" instead would silently give the
-    # flag a second meaning, so refuse rather than guess.
+    # --only is a CAP on this session's runs. Without --resume there is no
+    # experiment to cap (and no skip predicate), so the combination is refused.
     if args.only is not None and not args.resume:
-        print("ERROR: --only needs --resume --exp-id. It counts runs that are still "
-              "INCOMPLETE, which cannot be known without an experiment to read.",
-              file=sys.stderr)
+        print("ERROR: --only needs --resume --exp-id. It caps this session's runs "
+              "against an experiment.", file=sys.stderr)
         return 2
+    if args.allow_config_change and not args.resume:
+        print("ERROR: --allow-config-change only has meaning with --resume "
+              "--exp-id: there is no recorded identity to relax.", file=sys.stderr)
+        return 2
+
     if args.only is not None and args.only <= 0:
         print("ERROR: --only must be a positive number of runs.", file=sys.stderr)
         return 2
     if args.only is not None and args.limit is not None:
         print("ERROR: --only and --limit both bound the batch differently "
-              "(runs remaining vs first N issues). Pick one.", file=sys.stderr)
+              "(runs this session vs first N issues). Pick one.", file=sys.stderr)
         return 2
 
-    # --only + --issues is NOT an error -- its meaning depends on whether the
-    # experiment already has savepoints, and both readings are legitimate:
-    #
-    #   * fresh experiment (no savepoints): select_batch_for_only uses `candidates =
-    #     args.issues or select_issues(None)`, so `--only 3 --issues X Y Z` means
-    #     "work the next 3 runs from THIS set" -- the issues are USED.
-    #   * existing experiment (savepoints present): the batch comes from the
-    #     experiment's own recorded issues, and `candidates` is not consulted at all
-    #     (select_batch_for_only only uses it in its fresh-experiment branch), so
-    #     `--issues` has no effect. Measured: `--resume --exp-id EXP-20261002-279
-    #     --only 3 --issues django__django-9999 --dry-run` ran the experiment's own
-    #     10924/11001, not the named 9999.
-    #
-    # An earlier round refused the combination outright. That was too strong: it
-    # rejected the fresh case, which is meaningful. So warn only where the flag is
-    # inert (the existing-experiment case), and stay silent where it does something.
-    if args.only is not None and args.issues:
-        strategies_for_check = ["direct"] if args.smoke else args.strategies
-        if _experiment_has_savepoints(args.exp_id, strategies_for_check):
-            print(
-                "WARNING: --issues is set, but this experiment already has savepoints. "
-                "--only counts the experiment's own still-INCOMPLETE runs, so the "
-                "batch comes from those, not from --issues -- the id list has no "
-                "effect here. Continuing anyway.",
-                file=sys.stderr,
-            )
-
-    strategies_preview = ["direct"] if args.smoke else args.strategies
+    # Validate --issues BEFORE the banner, so a --dry-run that goes green really
+    # means the command can run. Offline it degrades to a warning: a preview must
+    # not require the network.
+    if args.issues:
+        error = validate_instance_ids(args.issues)
+        if error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 2
 
     if args.only is not None:
-        # Consider every runnable issue: the still-incomplete ones are not
-        # necessarily the first N, so the candidate pool must be the full set.
+        # The candidate pool is the experiment's own ids plus the dataset tail;
+        # --issues, when given, replaces the tail.
         candidates = args.issues or select_issues(None)
-        issues, runs, runs_cumulative = select_batch_for_only(
-            args.only, args.exp_id, strategies_preview, candidates, model=model
+        issues = select_batch_for_only(
+            args.only, args.exp_id, strategies, candidates, model=model
         )
         if not issues:
             print("=" * 78)
             print("  FINAL SWEEP")
             print("=" * 78)
-            print(f"  Nothing to do: all {runs_cumulative} run(s) in {args.exp_id} "
-                  f"are already complete.")
-            print("  (--only counts runs that are still INCOMPLETE; there are none.)")
+            print(f"  Nothing to do: the --only {args.only} cap selected no issue "
+                  f"for {args.exp_id}.")
             print("=" * 78)
             return 0
     elif args.issues:
         issues = args.issues
-        runs_cumulative = None
     elif args.smoke:
         issues = select_issues(1)
-        runs_cumulative = None
     else:
         issues = select_issues(args.limit)
-        runs_cumulative = None
+        if args.limit is not None and args.limit > len(issues):
+            print(f"WARNING: --limit {args.limit} exceeds the {len(issues)} usable "
+                  f"issues; running all of them.", file=sys.stderr)
 
-    strategies = strategies_preview
-    # ``runs`` means THIS session's runs. For --only it was computed from the
-    # incomplete set; otherwise it is simply the whole batch.
-    if args.only is None:
-        runs = len(issues) * len(strategies)
-        runs_cumulative = runs
+    # ``runs`` means THIS session's runs. With --only it is a ceiling: --resume
+    # decides how many of the selected runs are actually still outstanding.
+    runs = len(issues) * len(strategies)
 
     print("=" * 78)
     print("  FINAL SWEEP")
@@ -975,9 +955,8 @@ def main() -> int:
         print(f"               {issues[0]} ... {issues[-1]}")
     print(f"  strategies : {', '.join(strategies)}")
     print(f"  runs       : {runs}  (this session)")
-    if runs_cumulative is not None and runs_cumulative != runs:
-        print(f"  experiment : {runs_cumulative} run(s) total; "
-              f"{runs_cumulative - runs} already done")
+    if args.only is not None:
+        print(f"  only       : cap {args.only} run(s); --resume skips completed runs")
     print(f"  budget     : per_task, total {TOTAL_TURNS} turns per strategy")
     print(f"               direct {TOTAL_TURNS} | planning {TOTAL_TURNS} | "
           f"review {TOTAL_TURNS - REVISION_TURNS}+{REVISION_TURNS} = {TOTAL_TURNS}")
@@ -1040,7 +1019,8 @@ def main() -> int:
         print()
 
     cmd = build_cmd(issues, strategies, args.dry_run, args.resume, args.exp_id,
-                    route=args.route)
+                    route=args.route,
+                    allow_config_change=args.allow_config_change)
     if args.dry_run:
         print("Command:")
         print("  " + " ".join(cmd[1:]))
@@ -1057,10 +1037,6 @@ def main() -> int:
         "issues": issues,
         "strategies": strategies,
         "runs_planned": runs,
-        # The experiment's total, which for a staged `--only` sweep is larger than
-        # this session's work. Reporting only `runs_planned` would understate the
-        # experiment; reporting only this would overstate what is about to happen.
-        "runs_planned_cumulative": runs_cumulative,
         "started_utc": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "started_iso": started.isoformat(),
         "total_tool_turns": TOTAL_TURNS,
@@ -1202,7 +1178,12 @@ def main() -> int:
     # the meta model. The window was right, the model was wrong, and a wrong model
     # in read_actual_bill.py silently compares against the wrong rate card.
     print(f"      --model {model} --compare results/<EXP-id>")
-    return rc
+    # Normalise: the child's rc already records the real outcome (a rate-limit
+    # early stop makes main.py return 1). Returning the raw rc let a non-zero
+    # value be RECORDED above while the process still exited 0, because only
+    # run_with_env turns a return into an exit code. Collapse it to 0/1 so this
+    # wrapper's own exit code matches the outcome it printed.
+    return 1 if rc else 0
 
 
 if __name__ == "__main__":
