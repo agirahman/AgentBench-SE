@@ -1,9 +1,9 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-10-18 (peralihan route ke DeepSeek official `deepseek-flash`; batch 3 sympy tetap 7/30 — DISTOP, lanjut sesi berikutnya)
-**Status:** ✅ **20/50 issue SELESAI** — batch 1 (django, `EXP-20261010-062`) dan batch 2 (matplotlib, `EXP-20261012-005`) keduanya **30/30 VALID**. Batch 3 (sympy, `EXP-20261015-001`) **berjalan sebagian: 7/30 tercatat** (3 VALID + 4 PROVIDER_ERROR upstream 16:15-16:30; run ke-8 dihentikan setelah ~4 jam). Riset kini beralih ke **DeepSeek official `deepseek-flash`** (sweep `DEFAULT_ROUTE = "deepseek"`): gate **ready efektif 13/13** (12/13 PASS di lane; `disk budget` hijau di checkout utama — lihat §"Status readiness terukur"), preflight **50/50 pristine**, **1263 test lulus, 3 skipped** (mode local MAUPUN `SANDBOX_MODE=docker`). Detail: §"Peralihan ke DeepSeek official" + §"SWEEP BATCH 1 & 2 SELESAI" + §"BATCH 3 (sympy)" di bawah. Handoff sesi: [`HANDOFF_20261015.md`](HANDOFF_20261015.md).
-**Active Branch:** `30/fix/docs-deepseek-final` (base `22/feat/sandbox-isolation`)
-**Commit terakhir:** 🔸 **perubahan sesi ini BELUM di-commit** (working tree modifikasi saja). Branch head = `53008a3` (Merge branch `26/fix/planner-hint-and-test` ke `22/feat/sandbox-isolation`); commit sebelumnya di branch ini: `267ab22` (Fix over-broad resume precedence), `ff84ccf` (git_diff hint hanya untuk role read-only), `8522244` (Record batch 3 partial run 7/30 sympy), `035cc7e` (Update MEMORY.md: batches 1-2 done), `8435126` (Drop agent scratch files from submitted patches, both paths), `505fc09` (`--route` bundle meta | opencode), `fa2fe4b` (Meta Responses provider + silent-failure class ditutup di kedua loop), `8446eb1` (Meta rate card)
+**Last Updated:** 2026-10-20 (hardening flag sweep §3–§9 + audit "seamless" `results/<exp-id>`; uji 3 batch × 1 issue × 3 strategi pada `EXP-20261020-097` = **9/9 VALID, 3/3 resume bersih**)
+**Status:** ✅ **20/50 issue SELESAI** — batch 1 (django, `EXP-20261010-062`) dan batch 2 (matplotlib, `EXP-20261012-005`) keduanya **30/30 VALID**. Batch 3 (sympy, `EXP-20261015-001`) **berjalan sebagian: 7/30 tercatat** (3 VALID + 4 PROVIDER_ERROR upstream 16:15-16:30; run ke-8 dihentikan setelah ~4 jam). Riset kini beralih ke **DeepSeek official `deepseek-flash`** (sweep `DEFAULT_ROUTE = "deepseek"`): gate **ready efektif 13/13** (12/13 PASS di lane; `disk budget` hijau di checkout utama — lihat §"Status readiness terukur"), preflight **50/50 pristine**, **1307 test lulus, 22 skipped** (mode local MAUPUN `SANDBOX_MODE=docker`; naik dari 1263/3 setelah 4 file test baru di §"Hardening flag sweep"). Detail: §"Peralihan ke DeepSeek official" + §"SWEEP BATCH 1 & 2 SELESAI" + §"BATCH 3 (sympy)" + §"HARDENING FLAG SWEEP & RESUME SEAMLESS" di bawah. Handoff sesi: [`HANDOFF_20261015.md`](HANDOFF_20261015.md).
+**Active Branch:** `22/feat/sandbox-isolation` (merge target; lane `31/feat/sweep-flag-hardening` sudah di-merge lalu dihapus)
+**Commit terakhir:** ✅ **sudah di-commit & di-push.** `47aa819` (Fix two environment gaps a fresh venv could not survive: `scipy` di requirements + shim `resource` Windows) · `e462a5f` (Merge branch `31/feat/sweep-flag-hardening` ke `22/feat/sandbox-isolation`) · `24297ff` (Harden sweep flags and make resume merge seamless) · `1ffd159` (Merge branch `30/fix/docs-deepseek-final`). Commit sebelumnya: `53008a3`, `267ab22` (Fix over-broad resume precedence), `ff84ccf` (git_diff hint hanya untuk role read-only), `8522244` (Record batch 3 partial run 7/30 sympy), `035cc7e` (Update MEMORY.md: batches 1-2 done), `8435126` (Drop agent scratch files from submitted patches, both paths), `505fc09` (`--route` bundle meta | opencode), `fa2fe4b` (Meta Responses provider + silent-failure class ditutup di kedua loop), `8446eb1` (Meta rate card)
 **Handoff sesi terakhir:** [`HANDOFF_20261015.md`](HANDOFF_20261015.md) · sebelumnya [`HANDOFF_20261006.md`](HANDOFF_20261006.md) · [`HANDOFF_20261002.md`](HANDOFF_20261002.md)
 **Detail audit:** [`AUDIT_OPS_PARTNER.md`](AUDIT_OPS_PARTNER.md) · [`AUDIT_SCALE_PARTNER.md`](AUDIT_SCALE_PARTNER.md) · [`AUDIT_PROMPTS_PARTNER.md`](AUDIT_PROMPTS_PARTNER.md) · [`AUDIT_RUN_TESTS_PARTNER.md`](AUDIT_RUN_TESTS_PARTNER.md) · [`RESEARCH_BUDGET_20260929.md`](RESEARCH_BUDGET_20260929.md)
 
@@ -71,6 +71,138 @@ tetap ada. Perubahan kode sudah diterapkan di branch `30/fix/docs-deepseek-final
 - **Saldo DeepSeek $1 belum dipakai.** Provider sudah disiapkan, belum ada panggilan berbayar.
 - **CommandCode belum siap** (tidak ada API key / belum subs) — hanya disiapkan, tidak diuji.
 - **Run final belum dijalankan.** Batch 3 (7/30 sympy) adalah uji pipeline, **tidak di-resume**.
+
+---
+
+## 🛡️ HARDENING FLAG SWEEP & RESUME SEAMLESS (2026-10-20)
+
+**Ringkasan:** lane `31/feat/sweep-flag-hardening` menutup §3–§9 pada
+`tools/run_final_sweep.py`, lalu audit "semua data di `results/<exp-id>` harus seamless
+tanpa rewrite" menemukan **3 jalur bocor** yang kemudian ditutup. Uji akhir: **3 batch ×
+1 issue × 3 strategi = 9 run**, ketiga resume **bersih**.
+
+### Bagian A — Flag sweep (§3–§9)
+
+| Perubahan | Sebelum | Sesudah |
+|---|---|---|
+| `--exp-id` tanpa `--resume` | jalan diam-diam | **exit 2** |
+| `--resume` tanpa `--only` | jalan | **exit 2** |
+| `--issues`/`--strategies` kosong atau nama asing | jalan | **exit 2** (termasuk `--dry-run`) |
+| `--smoke` + `--limit`/`--strategies`/`--only` | kombinasi ambigu | **exit 2** |
+| `--limit` > ukuran dataset | clamp senyap | **warning**, bukan clamp |
+| Predikat "sudah selesai" | duplikat di wrapper + runner (F22) | **`--resume` pemilik tunggal** |
+| Rate-limit stop | `rc=1` di MERGE_LOG tapi shell `rc=0` | **rc terpropagasi** |
+
+**`--only` = plafon RUN kumulatif** (dibulatkan ke kelipatan `len(strategies)`), bukan
+jumlah issue. Top-up batch N butuh `--only` **kumulatif**: 10 issue/batch → `--only 30`,
+`60`, `90`, dst. Prefix yang sudah `recorded` **ikut memakan plafon**. Ini **kontrak yang
+disetujui**, bukan bug; opsi "hitung hanya dari ekor dataset" **ditolak**.
+
+### Bagian B — Tiga kebocoran resume yang ditutup
+
+1. **Kunci resume ≠ path artifact.** Predikat skip memakai `instance_id|model|thinking`
+   (`runner.py:228`), sedangkan path artifact hanya `artifacts/<iid>/<strategi>/`. Resume
+   dengan model/thinking berbeda **tidak di-skip** → menimpa `*.md`, `patch.txt`,
+   `messages.jsonl`, `trajectory.jsonl`, `trajectory.md`, `tool_calls.jsonl`,
+   `summary.json` tanpa jejak. **Fix:** blok `run_identity` (provider/model/thinking) di
+   `experiment.yaml` + `_check_resume_identity` **sebelum run berbayar pertama**;
+   mismatch → `exit 2`. Opt-out eksplisit `--allow-config-change`, **diekspos juga oleh
+   wrapper** (`tools/run_final_sweep.py`), karena tanpa itu **95 eksperimen lama** yang
+   punya savepoint tapi belum punya blok identitas akan terkunci.
+2. **File hantu (stale).** `messages.jsonl`, `trajectory.jsonl`, `tool_calls.jsonl`,
+   `trajectory.md` dulu hanya ditulis `if messages:` / `if traj_lines:` / `if tool_lines:`
+   → retry tanpa tool call **meninggalkan isi run sebelumnya**. `<role>.md` juga hanya
+   ditulis untuk role yang hadir, jadi satu direktori bisa mencampur dua run.
+   **Fix:** keempat file **selalu ditulis** (kosong bila tidak ada isi); `<role>.md` dan
+   `<role>_reasoning.md` untuk role yang **absen dihapus**, dibatasi ke `known_roles`.
+   `trajectory.md`/`patch.txt`/`summary.json` **tidak disentuh**.
+3. **`.bak` YAML hanya saat set id berubah.** Resume dengan provider/pricing berbeda
+   menimpa catatan batch 1 **tanpa cadangan**. **Fix:** `.bak` dibuat bila **isi** akan
+   berbeda, bukan hanya bila set id berubah.
+
+### Bagian C — Audit verdict per kelas data
+
+| Kelas data | Verdict |
+|---|---|
+| `predictions/*.jsonl`, `MERGE_LOG.jsonl`, `logs/` | ✅ seamless (append) |
+| `generation_result.csv`, `manifest.json`, statistik, report | ✅ aman, byte berubah (`execution_timestamp`) |
+| `experiment.yaml`, `.bak` | ✅ aman (union id + repos, `.bak` saat isi berubah) |
+| `INCOMPLETE.json` | ✅ by design |
+| `artifacts/*`, `patches/*`, `summary.json` | ✅ **ditutup** oleh Bagian B |
+
+**Batasan yang DITERIMA (jangan "diperbaiki" tanpa keputusan baru):**
+`.bak` hanya menyimpan **satu** batch ke belakang (bukan `.bak.N`); `date_created` harian
+bisa memicu `.bak` meski isi lain identik.
+
+### Bagian D — Bukti uji 3 batch (`EXP-20261020-097`)
+
+Route `opencode` (`cbai/deepseek-v4.1-flash`), 3 issue scikit-learn, 1 issue per batch,
+resume setelah tiap issue.
+
+| Batch | Perintah | Hasil |
+|---|---|---|
+| 1 | `--issues scikit-learn__scikit-learn-10297` | 3 run, 3 VALID, `rc=0` |
+| 2 | `--resume --exp-id … --only 6` | 3 run, 3 VALID, `rc=0` (10297 di-skip) |
+| 3 | `--resume --exp-id … --only 9` | 3 run, 3 VALID, `rc=0` |
+
+Total **9/9 VALID (100%)**, 12,2 juta token, **$0,708**, ~2 jam. Verifikasi seamless:
+`predictions.jsonl` **9 baris** tanpa duplikat `(iid,strategy)`; tiap `predictions/*.jsonl`
+**3 baris**; `artifacts/` **9 direktori** utuh; `patches/` **9 file**;
+`generation_result.csv` **9 baris**; `manifest.json` **9 entri** semua `APPLYABLE`;
+`MERGE_LOG.jsonl` **3 entri semua `session_rc=0`**; `experiment.yaml`
+`instance_ids` 3 issue + `n_issues: 3` + `repos` dari union.
+
+### Bagian E — Dua celah environment yang ikut ditutup (`47aa819`)
+
+1. **`requirements.txt` kurang `scipy`.** `src/evaluation/significance.py:20` meng-import
+   `scipy` **di level modul**, jadi venv baru dari `requirements.txt` **tidak bisa
+   meng-import** modul itu dan pytest **gagal collect** `test_view_results.py`.
+   Ditambahkan `scipy==1.18.1`. `matplotlib` **sengaja tidak** ditambah — dipakai lazy di
+   `report_generator.py:319` dan sudah ada fallback `"skipping figures"`.
+   Modul lain (`docker`, `GitPython`, `requests`, `numpy`, `rich`, `tqdm`, `unidiff`,
+   `tenacity`, `pyarrow`) **transitif** dari `swebench`/`modal`/`pandas`, tidak perlu
+   dipin.
+2. **`tools/eval_modal.py` — shim `resource` hanya saat `__main__`.** `resource` itu
+   POSIX-only, tapi `swebench.harness.modal_eval` meng-import-nya **tanpa syarat**. Di
+   Windows, **setiap** `import eval_modal` (yang dilakukan 3 file test untuk mencapai
+   `build_run_id()`/`classify_summary()`) melempar `ModuleNotFoundError` → test **tidak
+   bisa di-collect**. Shim dipindah keluar dari guard `__main__`; fix encoding konsol
+   tetap di dalam guard agar import tetap bebas efek samping.
+   **Hasil:** collection **1304 → 1329 test, 0 error**; suite **1307 lulus, 22 skipped**.
+
+### Bagian F — Pelajaran baru (jangan diulang)
+
+32. **Preflight memeriksa SEMUA checkout, bukan hanya issue yang diminta.**
+    `preflight_repos.py:359` `sys.exit(1 if bad else 0)` — **satu** instance rusak
+    memblokir seluruh sweep, meski runner hanya menyentuh issue yang diminta. Satu
+    checkout terputus (`02dc9ed…`, 577 file, **tanpa `.git`**, HEAD invalid) membuat
+    preflight gagal untuk 3 issue yang sebenarnya **OK**. **Jangan** melewati preflight;
+    perbaiki/bereskan checkout-nya.
+33. **Resume antar-batch WAJIB didahului `clean_repos.py`.** Sandbox mengedit repo
+    **in-place** dan `reset_working_tree` hanya jalan di **awal** run, jadi batch yang
+    selesai meninggalkan checkout **kotor** → preflight resume **menolak start**
+    (terukur 2×: batch 2 dan batch 3). Ini perilaku **benar** (kalau dilewati, `git diff`
+    akan menangkap perubahan yang bukan buatan agen). Urutan yang benar:
+    `clean_repos.py` → `run_final_sweep.py --resume`.
+34. **`git -C <dir>` bisa menelusuri KE ATAS ke repo proyek.** `datasets/repos/<org>/<repo>/`
+    **tidak** punya `.git`; checkout sebenarnya ada di **subfolder `<base_commit>`**.
+    `git -C` di level yang salah akan resolve ke `.git` proyek dan melaporkan "HEAD
+    `e462a5f`, working tree dirty" — **persis gejala repo cache yang rusak**, padahal
+    cache-nya sehat. `clean_repos.py:31-49` sudah memperingatkan ini (dan bahayanya
+    `git reset` tanpa pathspec). **Verifikasi dengan `rev-parse --show-toplevel` dulu.**
+35. **Jangan menyimpulkan "data hilang" dari hitungan file yang salah.**
+    `Path.rglob` di audit pertama saya melewati junction/struktur dan melaporkan
+    `files=-1`; kesimpulannya "checkout kosong" — **salah**, ada 25.856 file. Hitung ulang
+    dengan `Get-ChildItem -Recurse -File` sebelum panik.
+36. **Cleanup lane bisa mengenai checkout utama lewat junction.** Saat menghapus worktree
+    lane, `rmdir .venv` di lane **mengosongkan `.venv` repo utama** (junction). Worktree
+    lane memang menautkan `.venv`/`datasets` ke checkout utama. **Lepas junction dengan
+    `rmdir` TANPA `/s` dan verifikasi target masih utuh**; jangan hapus direktori yang
+    berisi reparse point. Pemulihan: buat ulang venv + `pip install -r requirements.txt`
+    + `pip install -e . --no-deps` + `scipy`.
+37. **`--only` kumulatif, bukan per-batch.** `--only 3` di batch 2 **tidak** berarti
+    "3 run tambahan"; ia plafon **total** run sesi itu. Untuk 3 batch × 3 run:
+    tanpa `--only` → `--only 6` → `--only 9`. `--dry-run` mencetak jumlah persisnya.
 
 ---
 
@@ -1122,7 +1254,9 @@ Sweep **tidak** mengulang dari nol; savepoint per run dibaca dan yang sudah sele
 | **Budget tool-turn** | ✅ Done | `agents/budget.py` — total sama per strategi, sekarang **200** (skala referensi) |
 | **Pre-flight validator** | ✅ Done | `tools/preflight_modal.py` — replikasi kontrak Modal secara lokal |
 | **Rate-limit handling** | ✅ Done | Backoff 429 + circuit breaker |
-| **Test suite** | ✅ Done | **1245 lulus, 1 skipped** (dari 426). **Lulus di env bersih MAUPUN env kotor**, dan di **mode local MAUPUN `SANDBOX_MODE=docker`** |
+| **Test suite** | ✅ Done | **1307 lulus, 22 skipped** (dari 426). **Lulus di env bersih MAUPUN env kotor**, dan di **mode local MAUPUN `SANDBOX_MODE=docker`** |
+| **Guard flag sweep** | ✅ **FIXED** | `--exp-id`/`--resume`/`--only`/`--issues`/`--strategies`/`--smoke` yang tidak masuk akal → **exit 2**, termasuk di `--dry-run`. Predikat "selesai" **satu pemilik** (`--resume`) |
+| **Resume seamless** | ✅ **FIXED** | `run_identity` (provider/model/thinking) di `experiment.yaml`; artifact jsonl **selalu ditulis** (tidak ada file hantu); `.bak` saat isi berubah. Bukti: 3 batch → `MERGE_LOG` 3×`rc=0`, `predictions.jsonl` 9 baris tanpa duplikat |
 | **Thinking mode** | ✅ **ON** | `deepseek` thinking + effort `medium`; `*_reasoning.md` ditulis per role |
 | **MAX_TOKENS** | ✅ **65536** | Naik dari 32768; reasoning + jawaban berbagi anggaran ini |
 | **Rate card cbai** | ✅ **FIXED** | Diukur dari key yang BENAR (`…da2fe1`), bukan `…b04880` |
@@ -1174,6 +1308,22 @@ Sweep **tidak** mengulang dari nol; savepoint per run dibaca dan yang sudah sele
 ---
 
 ## 📊 Hasil Eksperimen Terakhir
+
+### 🧪 `EXP-20261020-097` — uji resume 3 batch (scikit-learn, **9/9 VALID**)
+
+**Bukan batch riset** — ini uji fungsional jalur resume seamless: 3 issue × 3 strategi,
+**1 issue per batch**, `--resume` setelah tiap issue, route `opencode`
+(`cbai/deepseek-v4.1-flash`).
+
+| Batch | Perintah | Runs | VALID | rc |
+|---|---|---|---|---|
+| 1 | `--issues scikit-learn__scikit-learn-10297` | 3 | 3 | 0 |
+| 2 | `--resume --exp-id EXP-20261020-097 --only 6` | 3 | 3 | 0 |
+| 3 | `--resume --exp-id EXP-20261020-097 --only 9` | 3 | 3 | 0 |
+
+Total 12.204.867 token, **$0,707948**, avg 1138 s/run. Issue: `10297`, `10508`, `10949`.
+Semua patch `APPLYABLE`. Detail + verifikasi per kelas data: §"HARDENING FLAG SWEEP &
+RESUME SEAMLESS" Bagian D.
 
 ### 🎉 `EXP-20261010-062` (batch 1, django) & `EXP-20261012-005` (batch 2, matplotlib) — **60/60 VALID**
 
@@ -2178,15 +2328,17 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 2. **Jangan jalankan run besar tanpa izin user** (gate di atas).
 3. **Sebelum run apa pun:** `python tools/run_final_sweep.py --dry-run` — cek 200/200/200 dan semua flag.
 4. **Selalu** lewat `tools/run_with_env.py` (sweep sudah melakukannya).
-5. **Kalau terputus:** `python tools/run_final_sweep.py --resume --exp-id <EXP-id>` — jangan jalankan ulang dari nol.
+5. **Kalau terputus:** `python tools/run_final_sweep.py --resume --exp-id <EXP-id> --only <N kumulatif>` — jangan jalankan ulang dari nol. **Wajib `tools/clean_repos.py` dulu** (lihat pelajaran #33).
 6. **Setelah run:** `tools/check_sweep_state.py --exp <EXP-id>` + `tools/read_actual_bill.py --compare`.
 7. **Cek cap warning** di `results/EXP-*/logs/experiment.log` — kalau ada, ada yang terpotong.
+8. **Sebelum percaya "data hilang":** verifikasi ulang hitungan file. `rglob` pernah melaporkan `files=-1` padahal ada 25.856 file (pelajaran #35).
 
 ---
 
 ## 📝 Catatan
 
 - **Commit sudah di-push:** `eae63b3` (fix sweep), `1597379` (memory), `d3d7ffe` (audit sendiri), `2349eb1`, `cfaf0ae`, `fb8f6ca` (branch `19/toolcall-commandcode`).
+- **Commit 2026-10-20 (sudah di-push):** `24297ff` (hardening flag sweep + resume seamless, 16 file, +2139/−419), `e462a5f` (merge lane 31), `47aa819` (`scipy` di requirements + shim `resource` Windows), dan commit MEMORY.md ini.
 - **Temuan untuk skripsi:** reviewer tanpa execution feedback tidak menambah kemampuan verifikasi; test tersembunyi adalah oracle yang tidak bisa digantikan penalaran.
 - **Temuan tambahan (2026-09-28):** retry yang membungkus loop — bukan request — membatalkan batas budget. Satu act bisa memakai 180 turn alih-alih 60. Ini kelas bug yang mudah terlewat karena tidak muncul sampai timeout benar-benar terjadi.
 - **Temuan tambahan (2026-09-29):** bug di jalur patch dapat **memanipulasi hasil penelitian secara diam-diam**. `_normalize_newlines` merusak 4 patch di EXP-003, dan pelabelannya salah **dua kali** — patch rusak disebut "VALID" *dan* "NOT_APPLYABLE", sehingga angkanya tampak masuk akal (patch tidak apply = model salah), padahal pipeline-nya yang merusak. **Pelajaran metodologis:** verdict yang dihasilkan pipeline yang sama yang memproduksi artefak tidak boleh dipercaya begitu saja; verifikasi silang dengan `git apply` pada checkout bersih.
@@ -2197,7 +2349,12 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 ---
 
-**Last working state (2026-10-15):** commit `8435126` — **1245 test lulus, 1 skipped** (angka **historis** 2026-10-15; angka terkini **1263 lulus, 3 skipped**, lihat header), gate **READY 13/13** saat itu. **20/50 issue SELESAI** dengan isolasi Docker: batch 1 django (`EXP-20261010-062`, 30/30 VALID) + batch 2 matplotlib (`EXP-20261012-005`, 30/30 VALID). Isolasi Docker (layer-2) **TERPASANG & TERVERIFIKASI** (21 probe escape 100% BLOCKED, lihat §"Implementasi Penuh: Docker Sandbox").
+**Last working state (2026-10-20):** commit `47aa819` di `22/feat/sandbox-isolation` —
+**1307 test lulus, 22 skipped**, collection **1329 test 0 error**, `--dry-run` **rc=0**
+(50 issue / 150 run). **20/50 issue SELESAI** dengan isolasi Docker: batch 1 django
+(`EXP-20261010-062`, 30/30 VALID) + batch 2 matplotlib (`EXP-20261012-005`, 30/30 VALID).
+Isolasi Docker (layer-2) **TERPASANG & TERVERIFIKASI** (21 probe escape 100% BLOCKED).
+Jalur resume kini **terbukti seamless** lintas 3 batch (`EXP-20261020-097`, 9/9 VALID).
 
 **Langkah berikutnya (prioritas):**
 
@@ -2231,19 +2388,19 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
    ketiga strategi**. Jadi **jangan** laporkan sebagai "tidak bisa diselesaikan" —
    menyelesaikannya adalah **temuan RQ1**. Tidak perlu run tambahan.
 
-5. **M3 — SELESAI** (commit berikutnya). Jalankan sweep **bertahap** dengan
-   **prefix `--limit` yang tumbuh**:
+5. **M3 — SELESAI, dan `--only` kini KUMULATIF.** Jalankan sweep bertahap; `--only` adalah
+   **plafon total run per sesi**, bukan jumlah tambahan:
    ```
-   # staging: lanjut ke issue baru — naikkan --limit tiap batch
-   python tools/run_final_sweep.py --limit 20 --resume --exp-id <EXP-id>
+   # batch 1 (tanpa --only): 1 issue baru
+   python tools/run_final_sweep.py --route opencode --issues <iid>
+   # batch 2: total 6 run
+   python tools/run_final_sweep.py --resume --exp-id <EXP-id> --only 6
+   # batch 3: total 9 run
+   python tools/run_final_sweep.py --resume --exp-id <EXP-id> --only 9
    ```
-   `--only M` **bukan** alat staging: ia hanya untuk **top-up** run yang belum
-   selesai di issue yang sudah terekam:
-   ```
-   python tools/run_final_sweep.py --resume --exp-id <EXP-id> --only 15
-   ```
-   Wajib didampingi `--resume`. Scope `--only` dibatasi ke issue yang sudah ada di EXP.
-   Lihat §"M3 — Sweep bertahap: `--limit <N naik> --resume`".
+   Wajib didampingi `--resume`, dan **didahului `tools/clean_repos.py`** (pelajaran #33).
+   `--limit <N naik>` masih berlaku untuk staging berbasis dataset. Lihat §"M3" +
+   §"HARDENING FLAG SWEEP" Bagian A.
 
 6. **⚠️ Kalau menguji flag baru: pakai `--dry-run` DULU.** Jangan jalankan pada
    direktori eksperimen nyata — lihat pelajaran #25.
