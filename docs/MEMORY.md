@@ -1,7 +1,7 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-10-23 (batch 1 django `EXP-20261021-001` **30/30 VALID**; batch 2 sympy `EXP-20261022-001` **dihentikan manual di 10/30** karena terlalu lambat — dan ditemukan **bug `--only` mengisi issue dari awal dataset**)
-**Status:** ✅ **30/50 issue SELESAI** — batch 1 django (`EXP-20261021-001`) **30/30 VALID**, batch 2 sympy (`EXP-20261022-001`) **10/30 VALID lalu DIHENTIKAN** (manual, karena ~50 menit/run). Sisa: 6 issue sympy belum jalan + `sympy-12171` baru `direct`. **Tidak ada data rusak** — resume akan melanjutkan dari 10 run tersimpan. Gate: preflight **50/50 pristine**, **1307 test lulus, 22 skipped**. Detail: §"BATCH 1 django & BATCH 2 sympy (2026-10-21/23)" di bawah. Handoff sesi: [`HANDOFF_20261015.md`](HANDOFF_20261015.md).
+**Last Updated:** 2026-10-23 (batch 1 django `EXP-20261021-001` **30/30 VALID**; batch 2 sympy `EXP-20261022-001` **dihentikan manual di 11/30** karena terlalu lambat — dan ditemukan **bug `--only` mengisi issue dari awal dataset**)
+**Status:** ✅ **30/50 issue SELESAI** — batch 1 django (`EXP-20261021-001`) **30/30 VALID**, batch 2 sympy (`EXP-20261022-001`) **11/30 VALID lalu DIHENTIKAN** (manual, karena ~50 menit/run). Sisa: 6 issue sympy belum jalan + `sympy-12171` baru 2/3. **Tidak ada data rusak** — resume akan melanjutkan dari 11 run tersimpan. Gate: preflight **50/50 pristine**, **1307 test lulus, 22 skipped**. Detail: §"BATCH 1 django & BATCH 2 sympy (2026-10-21/23)" di bawah. Handoff sesi: [`HANDOFF_20261015.md`](HANDOFF_20261015.md).
 **Active Branch:** `22/feat/sandbox-isolation` (merge target; lane `31/feat/sweep-flag-hardening` sudah di-merge lalu dihapus)
 **Commit terakhir:** ✅ **sudah di-commit & di-push.** `47aa819` (Fix two environment gaps a fresh venv could not survive: `scipy` di requirements + shim `resource` Windows) · `e462a5f` (Merge branch `31/feat/sweep-flag-hardening` ke `22/feat/sandbox-isolation`) · `24297ff` (Harden sweep flags and make resume merge seamless) · `1ffd159` (Merge branch `30/fix/docs-deepseek-final`). Commit sebelumnya: `53008a3`, `267ab22` (Fix over-broad resume precedence), `ff84ccf` (git_diff hint hanya untuk role read-only), `8522244` (Record batch 3 partial run 7/30 sympy), `035cc7e` (Update MEMORY.md: batches 1-2 done), `8435126` (Drop agent scratch files from submitted patches, both paths), `505fc09` (`--route` bundle meta | opencode), `fa2fe4b` (Meta Responses provider + silent-failure class ditutup di kedua loop), `8446eb1` (Meta rate card)
 **Handoff sesi terakhir:** [`HANDOFF_20261015.md`](HANDOFF_20261015.md) · sebelumnya [`HANDOFF_20261006.md`](HANDOFF_20261006.md) · [`HANDOFF_20261002.md`](HANDOFF_20261002.md)
@@ -130,20 +130,37 @@ Kondisi tersimpan: 11 run **semua VALID**, 3 issue selesai penuh (`11400`, `1187
 `MERGE_LOG.jsonl` **belum dibuat** — itu ditulis di akhir run, akan muncul saat batch
 diselesaikan.
 
-### ⚠️ DUA proses sweep tumpang tindih (2026-10-23)
+### ⚠️ KOREKSI: "dua proses sweep" itu SALAH BACA zona waktu (2026-10-23)
 
-Ditemukan **dua sweep berjalan bersamaan** pada EXP yang sama:
+Sempat saya laporkan bahwa ada **dua sweep paralel** pada EXP yang sama. **Itu keliru dan
+sudah dibatalkan.** Yang sebenarnya terjadi: saya membandingkan **UTC** dengan **WIB**:
 
-| PID | Mulai | Nasib |
+| Yang saya lihat | Nilai | Sebenarnya |
 |---|---|---|
-| `14140` | 22/10 16:57 | sweep yang saya pantau, dihentikan 23/10 ~08:20 |
-| `2988`→`11260`→`16584` | 22/10 **23:58** | sweep **kedua** (dijalankan manual), dihentikan 08:46 |
+| Task background (UTC) | `2026-10-22T16:57:56Z` | = **23:57 WIB** |
+| PID proses (lokal) | `23:58` | **proses yang sama** |
 
-Akibatnya: `agentbench.log` ditulis dua proses → **loguru rotation gagal**
-(`PermissionError [WinError 32]` saat `os.rename`). Ini **hanya kegagalan logging**,
-bukan kegagalan run: 11 run tetap **VALID**, tidak ada data korup. Tapi dua writer ke satu
-EXP adalah risiko nyata — **jangan pernah menjalankan dua sweep pada `--exp-id` yang sama**.
-Gejala awalnya: jumlah baris naik tanpa run yang saya mulai.
+Selisih 7 jam itu adalah offset WIB, bukan dua proses berbeda.
+
+**Bukti yang membatalkan klaim "dua sweep"** (semuanya menunjukkan satu sesi):
+
+| Bukti | Hasil |
+|---|---|
+| `Per-experiment log:` di `experiment.log` | **1 kemunculan** |
+| Progres `[N/30]` | **1→12 berurutan**, tanpa pengulangan |
+| `sweep_started.json` | satu file, `runs_planned: 30`, `resumed_from: None` |
+| Rentang `experiment.log` | 23:59:14 → 08:46:43, **menerus** |
+
+**Penyebab nyata loguru error** yang dilaporkan (bukan dua sweep): `PermissionError
+[WinError 32]` pada `os.rename` saat **rotasi log**, karena file `agentbench.log` sedang
+**dibaca** proses lain — monitoring saya sendiri (`Get-Content`/`Select-String` berulang di
+Windows menahan handle). **Hanya kegagalan logging**; 11 run tetap **VALID**, tidak ada data
+korup. **Mitigasi:** jangan baca `agentbench.log` terus-menerus saat sweep jalan — pakai
+`results/<exp>/logs/experiment.log` (per-eksperimen, tidak dirotasi).
+
+**Pelajaran metodologis:** sebelum menyimpulkan "ada dua proses", **samakan zona waktu**
+(`[datetime]'...Z'` → `.ToLocalTime()`) dan cari **penanda sesi** di log
+(`Per-experiment log:`), bukan nomor PID atau jam mulai mentah. Lihat jebakan #39.
 
 ### 🔴 BUG: `--only` mengisi issue dari AWAL DATASET (belum diperbaiki)
 
@@ -324,11 +341,21 @@ Total **9/9 VALID (100%)**, 12,2 juta token, **$0,708**, ~2 jam. Verifikasi seam
     memotong `ceil(only/3)` issue. **Selalu sertakan `--issues` eksplisit** kalau `--only`
     melebihi jumlah run yang sudah ada. Cek dengan `--dry-run` dan **baca baris
     `--instance-ids`**, bukan hanya angka `runs`.
-39. **Jangan pernah menjalankan dua sweep pada `--exp-id` yang sama.** Terukur
-    2026-10-23: dua proses (mulai 16:57 dan 23:58) menulis EXP yang sama → `agentbench.log`
-    ditulis bersamaan → loguru rotation gagal (`PermissionError [WinError 32]` pada
-    `os.rename`). Data run tetap VALID, tapi ini kelas kegagalan yang bisa merusak lebih
-    banyak. **Gejala awal:** jumlah baris `predictions.jsonl` naik tanpa run yang kamu mulai.
+39. **⚠️ JANGAN membandingkan timestamp UTC dengan waktu lokal.** Kesalahan yang **benar-
+    benar terjadi** 2026-10-23: saya melihat task background mulai `2026-10-22T16:57:56Z`
+    (UTC) dan sebuah proses mulai `23:58` (WIB = UTC+7), lalu menyimpulkan **"ada dua
+    sweep paralel"** dan melaporkannya sebagai bug. **Itu proses yang sama.** Bukti yang
+    membatalkan klaim itu: `experiment.log` punya **satu** baris `Per-experiment log:`,
+    progres `[N/30]` berurutan 1→12 tanpa pengulangan, dan `sweep_started.json` hanya satu
+    dengan `resumed_from: None`. **Aturan:** sebelum menyimpulkan "dua proses", samakan
+    zona waktu dulu (`[datetime]'...Z'` lalu `.ToLocalTime()`), dan cari penanda sesi di
+    log (`Per-experiment log:`) — bukan nomor PID atau jam mulai mentah.
+    **Penyebab nyata loguru error** yang sempat dilaporkan: `PermissionError [WinError 32]`
+    pada `os.rename` saat rotasi karena **file log sedang dibaca** proses lain (monitoring
+    `Get-Content`/`Select-String` berulang di Windows menahan handle). **Hanya kegagalan
+    logging**, bukan kegagalan run. Mitigasi: jangan membaca `agentbench.log` terus-menerus
+    saat sweep berjalan; baca `results/<exp>/logs/experiment.log` (per-eksperimen, tidak
+    dirotasi) atau tail sekali per beberapa menit.
 40. **Durasi run sangat ditentukan repo, bukan strategi.** Terukur: django ~11 menit/run,
     sympy ~50 menit/run (**4–5×**). Sympy punya test suite besar; satu run `planning`
     mencapai 107 menit. Sebelum menjadwalkan batch, **hitung ulang estimasi per repo** —
@@ -2485,8 +2512,9 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 (`EXP-20261021-001`) **30/30 VALID**; batch 2 sympy (`EXP-20261022-001`) **11/30 VALID,
 dihentikan manual** (~50 menit/run, proyeksi 25 jam). Isolasi Docker (layer-2)
 **TERPASANG & TERVERIFIKASI** (21 probe escape 100% BLOCKED). Jalur resume **terbukti
-seamless**. **Dua bug operasional ditemukan:** `--only` mengisi dari awal dataset (#38) dan
-dua sweep paralel merusak log rotation (#39).
+seamless**. **Dua temuan:** `--only` mengisi dari awal dataset (#38) dan **jangan
+bandingkan timestamp UTC dengan lokal** (#39 — pelajaran dari kesalahan saya sendiri
+melaporkan "dua sweep" yang ternyata satu proses).
 
 **Langkah berikutnya (prioritas):**
 
