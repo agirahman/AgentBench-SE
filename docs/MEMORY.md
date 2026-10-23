@@ -1,7 +1,7 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-10-23 (batch 1 django `EXP-20261021-001` **30/30 VALID**; batch 2 sympy `EXP-20261022-001` **dihentikan manual di 11/30** karena terlalu lambat — dan ditemukan **bug `--only` mengisi issue dari awal dataset**)
-**Status:** ✅ **30/50 issue SELESAI** — batch 1 django (`EXP-20261021-001`) **30/30 VALID**, batch 2 sympy (`EXP-20261022-001`) **11/30 VALID lalu DIHENTIKAN** (manual, karena ~50 menit/run). Sisa: 6 issue sympy belum jalan + `sympy-12171` baru 2/3. **Tidak ada data rusak** — resume akan melanjutkan dari 11 run tersimpan. Gate: preflight **50/50 pristine**, **1307 test lulus, 22 skipped**. Detail: §"BATCH 1 django & BATCH 2 sympy (2026-10-21/23)" di bawah. Handoff sesi: [`HANDOFF_20261015.md`](HANDOFF_20261015.md).
+**Last Updated:** 2026-10-23 (batch 1 django **30/30 VALID** + batch 2 sympy **11/30** dikonsolidasi ke satu folder `EXP-20261021-001` = **41 run VALID**; ditemukan bug `--only` mengisi issue dari awal dataset)
+**Status:** ✅ **41 run VALID dalam SATU folder** `results/EXP-20261021-001` — django 30/30 + sympy 11/30. Batch 2 **dihentikan manual** (~50 menit/run); sisa **19 run sympy**. Konsolidasi sudah diverifikasi **append-only** (338 file identik, 4 jsonl bertambah dengan prefix utuh, 0 rewrite). Gate: preflight **50/50 pristine**, **1307 test lulus, 22 skipped**. Detail: §"BATCH 1 django & BATCH 2 sympy" + §"Konsolidasi batch 2 ke batch 1".
 **Active Branch:** `22/feat/sandbox-isolation` (merge target; lane `31/feat/sweep-flag-hardening` sudah di-merge lalu dihapus)
 **Commit terakhir:** ✅ **sudah di-commit & di-push.** `47aa819` (Fix two environment gaps a fresh venv could not survive: `scipy` di requirements + shim `resource` Windows) · `e462a5f` (Merge branch `31/feat/sweep-flag-hardening` ke `22/feat/sandbox-isolation`) · `24297ff` (Harden sweep flags and make resume merge seamless) · `1ffd159` (Merge branch `30/fix/docs-deepseek-final`). Commit sebelumnya: `53008a3`, `267ab22` (Fix over-broad resume precedence), `ff84ccf` (git_diff hint hanya untuk role read-only), `8522244` (Record batch 3 partial run 7/30 sympy), `035cc7e` (Update MEMORY.md: batches 1-2 done), `8435126` (Drop agent scratch files from submitted patches, both paths), `505fc09` (`--route` bundle meta | opencode), `fa2fe4b` (Meta Responses provider + silent-failure class ditutup di kedua loop), `8446eb1` (Meta rate card)
 **Handoff sesi terakhir:** [`HANDOFF_20261015.md`](HANDOFF_20261015.md) · sebelumnya [`HANDOFF_20261006.md`](HANDOFF_20261006.md) · [`HANDOFF_20261002.md`](HANDOFF_20261002.md)
@@ -76,13 +76,19 @@ tetap ada. Perubahan kode sudah diterapkan di branch `30/fix/docs-deepseek-final
 
 ## 🔬 BATCH 1 django & BATCH 2 sympy (2026-10-21/23)
 
+**⚠️ SEMUA batch WAJIB masuk SATU folder `results/<exp-id>`.** Batch 2 sempat salah:
+dijalankan tanpa `--exp-id` sehingga runner membuat `EXP-20261022-001` baru, padahal
+seharusnya masuk `EXP-20261021-001`. Seluruh mekanisme merge (`_merge_csv_rows`, union id,
+`MERGE_LOG`, `.bak`) **tidak terpakai** karena itu. Sudah dikonsolidasi (lihat
+§"Konsolidasi batch 2 ke batch 1").
+
 **Rencana 50 issue mengikuti URUTAN DATASET (bukan pilihan bebas).** Ini urutan resmi
 yang dipakai `--limit`/`--only`:
 
 | # | Repo | Issue | Status |
 |---|---|---|---|
-| 1 | django/django | 10 | ✅ **30/30 VALID** (`EXP-20261021-001`) |
-| 2 | sympy/sympy | 10 | ⏸ **11/30**, dihentikan manual (`EXP-20261022-001`) |
+| 1 | django/django | 10 | ✅ **30/30 VALID** |
+| 2 | sympy/sympy | 10 | ⏸ **11/30**, dihentikan manual |
 | 3 | scikit-learn/scikit-learn | 10 | belum |
 | 4 | matplotlib/matplotlib | 10 | belum |
 | 5 | psf/requests | 6 | belum |
@@ -108,7 +114,7 @@ Biaya **$1,93**, 27,8 juta token, ~5,5 jam (~11 menit/run).
    dipakai menyelundupkan code object antar strategi (`marshal.load`).
    **Resep:** tunggu tidak ada proses Python → `clean_repos.py` → resume. Setelah itu VALID.
 
-### Batch 2 — sympy `EXP-20261022-001`: 11/30, DIHENTIKAN
+### Batch 2 — sympy: 11/30, DIHENTIKAN (sekarang di `EXP-20261021-001`)
 
 **Alasan: terlalu lambat.** Durasi terukur per run:
 
@@ -126,9 +132,45 @@ Rata-rata **~50 menit/run** vs django ~11 menit (**4–5× lebih lambat**). Proy
 agent aktif mengedit & menjalankan test sepanjang waktu.
 
 Kondisi tersimpan: 11 run **semua VALID**, 3 issue selesai penuh (`11400`, `11870`,
-`11897`), `12171` 2/3, 6 issue belum jalan. `generation_result.csv`/`manifest.json`/
-`MERGE_LOG.jsonl` **belum dibuat** — itu ditulis di akhir run, akan muncul saat batch
-diselesaikan.
+`11897`), `12171` 2/3, 6 issue belum jalan.
+
+### ✅ Konsolidasi batch 2 ke batch 1 (2026-10-23) — SEAMLESS, tanpa rewrite
+
+**Masalah:** batch 2 dijalankan tanpa `--exp-id` → folder baru `EXP-20261022-001`, jadi
+mekanisme merge tidak terpakai dan 6 file ringkasan tidak pernah dibuat (ditulis di akhir
+run, sementara sweep dihentikan). **Ditambah:** `Stop-Process -Force` = hard kill, sehingga
+handler `KeyboardInterrupt` (`runner.py:1700-1732`) yang seharusnya menyelamatkan file itu
+**tidak jalan**. Ctrl-C akan menyelamatkannya.
+
+**Prosedur yang dipakai (bisa diulang):**
+
+1. **Backup** `results/EXP-20261021-001` → `results/_backup_EXP-20261021-001_pre-merge`,
+   lalu verifikasi **342/342 file identik MD5**.
+2. **Cek tabrakan lebih dulu** — hasilnya **nol** di semua lapisan: predictions (semua
+   `(iid, strategy)` unik), patches (30 vs 11, 0 overlap), artifacts (10 vs 4 instance,
+   0 overlap). Ini yang membuat merge bisa murni *append*.
+3. **Append** `predictions/*.jsonl` (11 baris), **copy** 11 patch + 108 artifact file
+   (tanpa overwrite; skrip berhenti kalau ada file tujuan).
+4. **Verifikasi aditif:** 338 file identik byte-for-byte, **4 jsonl bertambah dengan isi
+   lama sebagai prefix persis**, **0 berubah**, **0 hilang**.
+5. **Regenerate ringkasan** dari savepoint, tanpa API: `_merge_csv_rows(csv, [], pred_dir,
+   strategies)` lalu `_write_csv_atomically` + `export_statistics_json` +
+   `generate_summary_md` (`evaluation.statistics`, **bukan** `report_generator`).
+6. **Isi `total_tokens`** dari `artifacts/<iid>/<strat>/summary.json` (11 baris).
+
+**Hasil:** satu folder `EXP-20261021-001` berisi **41 run, semua VALID** — django 30/30 +
+sympy 11/30. `artifacts/` 14 instance / 41 strategy dir, `patches/` 41 file,
+`predictions.jsonl` 44 baris (33+11).
+
+**Batasan yang jujur:** 11 baris sympy **tidak punya kolom cost** (`cost_usd_*` null).
+Savepoint hanya menyimpan kontrak prediksi (`instance_id`, `model_patch`, `patch_status`,
+`strategy`, `thinking`, `model_name_or_path`, `max_tokens`) — **tidak ada token/cost**.
+`total_tokens` bisa dipulihkan dari `summary.json`; **cost tidak bisa** karena rincian
+cached-vs-regular dan peak-vs-offpeak tidak tersimpan. Untuk biaya sympy, pakai
+**tagihan 9router**, bukan CSV. Akan terisi otomatis saat sisa 19 run dijalankan.
+
+**`manifest.json` sengaja TIDAK diregenerasi** — ia butuh objek `Issue` dan daftar agent
+dari sesi aslinya. Akan diperbarui saat batch di-resume.
 
 ### ⚠️ KOREKSI: "dua proses sweep" itu SALAH BACA zona waktu (2026-10-23)
 
@@ -185,21 +227,26 @@ Terukur dengan `--dry-run`:
 | `--only 30` | 4 sympy + **6 django** ❌ salah |
 | `--only 30 --issues <10 sympy>` | **10 sympy** ✅ benar |
 
-**Resep yang benar untuk melanjutkan batch 2:**
+**Resep yang benar untuk melanjutkan batch 2** (setelah konsolidasi, folder = `EXP-20261021-001`):
 
 ```
 clean_repos.py
-run_final_sweep.py --route opencode --resume --exp-id EXP-20261022-001 \
-    --only 30 \
-    --issues sympy__sympy-11400 sympy__sympy-11870 sympy__sympy-11897 \
+run_final_sweep.py --route opencode --resume --exp-id EXP-20261021-001 \
+    --only 60 \
+    --issues django__django-10914 django__django-10924 django__django-11001 \
+             django__django-11019 django__django-11039 django__django-11049 \
+             django__django-11099 django__django-11133 django__django-11179 \
+             django__django-11283 \
+             sympy__sympy-11400 sympy__sympy-11870 sympy__sympy-11897 \
              sympy__sympy-12171 sympy__sympy-12236 sympy__sympy-12419 \
              sympy__sympy-12454 sympy__sympy-12481 sympy__sympy-13031 \
              sympy__sympy-13043
 ```
 
 **Aturan umum:** kalau `--only` > jumlah run yang sudah tercatat, **selalu** sertakan
-`--issues` eksplisit. Tanpa itu, sisa kuota diisi issue dari awal dataset — dan pada batch
-2 itu berarti **mengulang django yang sudah selesai di batch 1**.
+`--issues` eksplisit — dan sebutkan **semua** id yang sudah ada di EXP plus yang baru.
+Tanpa itu, sisa kuota diisi issue dari awal dataset (pada kasus ini: **mengulang django
+yang sudah selesai**).
 
 ---
 
@@ -361,6 +408,19 @@ Total **9/9 VALID (100%)**, 12,2 juta token, **$0,708**, ~2 jam. Verifikasi seam
     mencapai 107 menit. Sebelum menjadwalkan batch, **hitung ulang estimasi per repo** —
     "30 run" bisa berarti 5 jam (django) atau 25 jam (sympy). Jangan simpulkan "macet" dari
     jumlah baris yang tidak naik: periksa `mtime` `experiment.log` dan toolcall terakhir.
+41. **Batch ke-2 dan seterusnya WAJIB pakai `--resume --exp-id <id>`.** Terukur
+    2026-10-23: batch 2 dijalankan tanpa `--exp-id`, jadi runner **membuat folder baru**
+    `EXP-20261022-001` alih-alih meneruskan `EXP-20261021-001`. Akibatnya seluruh mesin
+    merge (`_merge_csv_rows`, union id manifest/YAML, `MERGE_LOG` per invocation, `.bak`)
+    **tidak terpakai sama sekali** — padahal itu yang kita hardening khusus untuk skenario
+    ini. Satu eksperimen = satu folder. Kalau tidak sengaja terlanjur, konsolidasi bisa
+    dilakukan append-only (lihat §"Konsolidasi batch 2 ke batch 1"), tapi lebih baik jangan.
+42. **JANGAN hentikan sweep dengan `Stop-Process -Force`.** Itu hard kill (setara SIGKILL),
+    jadi handler `KeyboardInterrupt` di `runner.py:1700-1732` **tidak jalan** — dan handler
+    itulah yang menulis `generation_result.csv`, `manifest.json`, `generation_statistics.json`,
+    `generation_report.md`, plus baris `INTERRUPTED` dan `MERGE_LOG` ber-`rc=130`. Terukur
+    2026-10-23: setelah hard kill, 6 file ringkasan hilang dan harus diregenerasi manual.
+    **Pakai Ctrl-C** (atau kirim `CTRL_BREAK_EVENT`) supaya export penyelamat berjalan.
 
 ---
 
@@ -2508,28 +2568,35 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 ---
 
 **Last working state (2026-10-23):** branch `22/feat/sandbox-isolation`, **1307 test lulus,
-22 skipped**, preflight **50/50 pristine**. **30/50 issue SELESAI**: batch 1 django
-(`EXP-20261021-001`) **30/30 VALID**; batch 2 sympy (`EXP-20261022-001`) **11/30 VALID,
-dihentikan manual** (~50 menit/run, proyeksi 25 jam). Isolasi Docker (layer-2)
-**TERPASANG & TERVERIFIKASI** (21 probe escape 100% BLOCKED). Jalur resume **terbukti
-seamless**. **Dua temuan:** `--only` mengisi dari awal dataset (#38) dan **jangan
-bandingkan timestamp UTC dengan lokal** (#39 — pelajaran dari kesalahan saya sendiri
-melaporkan "dua sweep" yang ternyata satu proses).
+22 skipped**, preflight **50/50 pristine**. **Satu folder `EXP-20261021-001` berisi 41 run
+VALID** (django 30/30 + sympy 11/30); batch 2 dihentikan manual (~50 menit/run) dan
+dikonsolidasi append-only. Isolasi Docker (layer-2) **TERPASANG & TERVERIFIKASI** (21 probe
+escape 100% BLOCKED). Jalur resume **terbukti seamless**. **Tiga pelajaran operasional:**
+`--only` mengisi dari awal dataset (#38), jangan bandingkan UTC dengan lokal (#39),
+dan batch lanjutan **wajib** `--resume --exp-id` + Ctrl-C bukan hard kill (#41, #42).
 
 **Langkah berikutnya (prioritas):**
 
-0. **⏭️ LANJUTKAN batch 2 (sympy) — 19 run sisa.** Wajib `--issues` eksplisit:
+0. **⏭️ LANJUTKAN batch 2 (sympy) — 19 run sisa, ke folder yang SAMA.** Wajib
+   `--resume --exp-id EXP-20261021-001` + `--issues` eksplisit:
    ```
    tools/clean_repos.py
-   tools/run_final_sweep.py --route opencode --resume --exp-id EXP-20261022-001 \
-       --only 30 \
-       --issues sympy__sympy-11400 sympy__sympy-11870 sympy__sympy-11897 \
+   tools/run_final_sweep.py --route opencode --resume --exp-id EXP-20261021-001 \
+       --only 60 \
+       --issues django__django-10914 django__django-10924 django__django-11001 \
+                django__django-11019 django__django-11039 django__django-11049 \
+                django__django-11099 django__django-11133 django__django-11179 \
+                django__django-11283 \
+                sympy__sympy-11400 sympy__sympy-11870 sympy__sympy-11897 \
                 sympy__sympy-12171 sympy__sympy-12236 sympy__sympy-12419 \
                 sympy__sympy-12454 sympy__sympy-12481 sympy__sympy-13031 \
                 sympy__sympy-13043
    ```
-   **Verifikasi dulu dengan `--dry-run`** dan pastikan baris `--instance-ids` hanya berisi
-   10 sympy (tanpa django). Estimasi **~16 jam**. Pertimbangkan jalan semalam.
+   `--only 60` = 20 issue × 3 (10 django sudah selesai + 10 sympy), dan **seluruh 20 id
+   harus disebut** supaya tidak ada issue dari repo lain yang ikut (pelajaran #38).
+   **Verifikasi dengan `--dry-run`** dulu: baris `--instance-ids` harus berisi **tepat 20
+   id** (10 django + 10 sympy), tanpa scikit-learn. Estimasi **~16 jam**. Jalankan dengan
+   Ctrl-C-safe, bukan hard kill (#42).
 
 1. **Batch 3–6 setelah sympy:** scikit-learn (10), matplotlib (10), requests (6),
    seaborn (4). Pola perintah sama: `--issues <10 id repo itu>`. **Jangan** pakai `--limit`
