@@ -1,7 +1,7 @@
 # 🧠 AI Agent Memory — AgentBench-SE
 
-**Last Updated:** 2026-10-20 (hardening flag sweep §3–§9 + audit "seamless" `results/<exp-id>`; uji 3 batch × 1 issue × 3 strategi pada `EXP-20261020-097` = **9/9 VALID, 3/3 resume bersih**)
-**Status:** ✅ **20/50 issue SELESAI** — batch 1 (django, `EXP-20261010-062`) dan batch 2 (matplotlib, `EXP-20261012-005`) keduanya **30/30 VALID**. Batch 3 (sympy, `EXP-20261015-001`) **berjalan sebagian: 7/30 tercatat** (3 VALID + 4 PROVIDER_ERROR upstream 16:15-16:30; run ke-8 dihentikan setelah ~4 jam). Riset kini beralih ke **DeepSeek official `deepseek-flash`** (sweep `DEFAULT_ROUTE = "deepseek"`): gate **ready efektif 13/13** (12/13 PASS di lane; `disk budget` hijau di checkout utama — lihat §"Status readiness terukur"), preflight **50/50 pristine**, **1307 test lulus, 22 skipped** (mode local MAUPUN `SANDBOX_MODE=docker`; naik dari 1263/3 setelah 4 file test baru di §"Hardening flag sweep"). Detail: §"Peralihan ke DeepSeek official" + §"SWEEP BATCH 1 & 2 SELESAI" + §"BATCH 3 (sympy)" + §"HARDENING FLAG SWEEP & RESUME SEAMLESS" di bawah. Handoff sesi: [`HANDOFF_20261015.md`](HANDOFF_20261015.md).
+**Last Updated:** 2026-10-23 (batch 1 django `EXP-20261021-001` **30/30 VALID**; batch 2 sympy `EXP-20261022-001` **dihentikan manual di 10/30** karena terlalu lambat — dan ditemukan **bug `--only` mengisi issue dari awal dataset**)
+**Status:** ✅ **30/50 issue SELESAI** — batch 1 django (`EXP-20261021-001`) **30/30 VALID**, batch 2 sympy (`EXP-20261022-001`) **10/30 VALID lalu DIHENTIKAN** (manual, karena ~50 menit/run). Sisa: 6 issue sympy belum jalan + `sympy-12171` baru `direct`. **Tidak ada data rusak** — resume akan melanjutkan dari 10 run tersimpan. Gate: preflight **50/50 pristine**, **1307 test lulus, 22 skipped**. Detail: §"BATCH 1 django & BATCH 2 sympy (2026-10-21/23)" di bawah. Handoff sesi: [`HANDOFF_20261015.md`](HANDOFF_20261015.md).
 **Active Branch:** `22/feat/sandbox-isolation` (merge target; lane `31/feat/sweep-flag-hardening` sudah di-merge lalu dihapus)
 **Commit terakhir:** ✅ **sudah di-commit & di-push.** `47aa819` (Fix two environment gaps a fresh venv could not survive: `scipy` di requirements + shim `resource` Windows) · `e462a5f` (Merge branch `31/feat/sweep-flag-hardening` ke `22/feat/sandbox-isolation`) · `24297ff` (Harden sweep flags and make resume merge seamless) · `1ffd159` (Merge branch `30/fix/docs-deepseek-final`). Commit sebelumnya: `53008a3`, `267ab22` (Fix over-broad resume precedence), `ff84ccf` (git_diff hint hanya untuk role read-only), `8522244` (Record batch 3 partial run 7/30 sympy), `035cc7e` (Update MEMORY.md: batches 1-2 done), `8435126` (Drop agent scratch files from submitted patches, both paths), `505fc09` (`--route` bundle meta | opencode), `fa2fe4b` (Meta Responses provider + silent-failure class ditutup di kedua loop), `8446eb1` (Meta rate card)
 **Handoff sesi terakhir:** [`HANDOFF_20261015.md`](HANDOFF_20261015.md) · sebelumnya [`HANDOFF_20261006.md`](HANDOFF_20261006.md) · [`HANDOFF_20261002.md`](HANDOFF_20261002.md)
@@ -71,6 +71,118 @@ tetap ada. Perubahan kode sudah diterapkan di branch `30/fix/docs-deepseek-final
 - **Saldo DeepSeek $1 belum dipakai.** Provider sudah disiapkan, belum ada panggilan berbayar.
 - **CommandCode belum siap** (tidak ada API key / belum subs) — hanya disiapkan, tidak diuji.
 - **Run final belum dijalankan.** Batch 3 (7/30 sympy) adalah uji pipeline, **tidak di-resume**.
+
+---
+
+## 🔬 BATCH 1 django & BATCH 2 sympy (2026-10-21/23)
+
+**Rencana 50 issue mengikuti URUTAN DATASET (bukan pilihan bebas).** Ini urutan resmi
+yang dipakai `--limit`/`--only`:
+
+| # | Repo | Issue | Status |
+|---|---|---|---|
+| 1 | django/django | 10 | ✅ **30/30 VALID** (`EXP-20261021-001`) |
+| 2 | sympy/sympy | 10 | ⏸ **11/30**, dihentikan manual (`EXP-20261022-001`) |
+| 3 | scikit-learn/scikit-learn | 10 | belum |
+| 4 | matplotlib/matplotlib | 10 | belum |
+| 5 | psf/requests | 6 | belum |
+| 6 | mwaskom/seaborn | 4 | belum |
+| | **total** | **50** | |
+
+### Batch 1 — django `EXP-20261021-001`: 30/30 VALID ✅
+
+Route `opencode` (`cbai/deepseek-v4.1-flash`), 10 issue × 3 strategi.
+Biaya **$1,93**, 27,8 juta token, ~5,5 jam (~11 menit/run).
+
+**Dua masalah yang muncul dan cara menanganinya:**
+
+1. **Cache django KOSONG.** Preflight tidak menemukan satu pun issue django: cache hanya
+   berisi folder placeholder `0000000000000000000000000000000000000000` dengan `.git`
+   kosong (tanpa commit). Perbaikan: `tools/prepare_repos.py` (murni `git fetch`, **tanpa
+   token LLM**). Efek samping baik: seluruh **50/50** checkout jadi pristine, termasuk
+   `scikit-learn-12471` yang sebelumnya rusak.
+2. **`django-11019` review ERROR 2×** dengan pesan `checkout could not be reset to a
+   pristine state`. **Bukan bug kode** — penyebabnya `__pycache__/` yang tidak terhapus
+   `git clean -fdxq` karena file masih dipegang proses Python. Guard di
+   `agents/tools.py:1929-1943` **sengaja** memeriksa `--ignored` karena `__pycache__` bisa
+   dipakai menyelundupkan code object antar strategi (`marshal.load`).
+   **Resep:** tunggu tidak ada proses Python → `clean_repos.py` → resume. Setelah itu VALID.
+
+### Batch 2 — sympy `EXP-20261022-001`: 11/30, DIHENTIKAN
+
+**Alasan: terlalu lambat.** Durasi terukur per run:
+
+| Run | Menit | Run | Menit |
+|---|---|---|---|
+| `11400/direct` | 36 | `11897/direct` | 68 |
+| `11400/planning` | 12 | `11897/planning` | **107** |
+| `11400/review` | 20 | `11897/review` | 62 |
+| `11870/direct` | 74 | `12171/direct` | 6 |
+| `11870/planning` | 67 | `12171/planning` | 30 |
+| `11870/review` | 54 | | |
+
+Rata-rata **~50 menit/run** vs django ~11 menit (**4–5× lebih lambat**). Proyeksi 30 run
+≈ **25 jam**; 8,5 jam hanya menyelesaikan 11 run. **Bukan macet** — log selalu segar,
+agent aktif mengedit & menjalankan test sepanjang waktu.
+
+Kondisi tersimpan: 11 run **semua VALID**, 3 issue selesai penuh (`11400`, `11870`,
+`11897`), `12171` 2/3, 6 issue belum jalan. `generation_result.csv`/`manifest.json`/
+`MERGE_LOG.jsonl` **belum dibuat** — itu ditulis di akhir run, akan muncul saat batch
+diselesaikan.
+
+### ⚠️ DUA proses sweep tumpang tindih (2026-10-23)
+
+Ditemukan **dua sweep berjalan bersamaan** pada EXP yang sama:
+
+| PID | Mulai | Nasib |
+|---|---|---|
+| `14140` | 22/10 16:57 | sweep yang saya pantau, dihentikan 23/10 ~08:20 |
+| `2988`→`11260`→`16584` | 22/10 **23:58** | sweep **kedua** (dijalankan manual), dihentikan 08:46 |
+
+Akibatnya: `agentbench.log` ditulis dua proses → **loguru rotation gagal**
+(`PermissionError [WinError 32]` saat `os.rename`). Ini **hanya kegagalan logging**,
+bukan kegagalan run: 11 run tetap **VALID**, tidak ada data korup. Tapi dua writer ke satu
+EXP adalah risiko nyata — **jangan pernah menjalankan dua sweep pada `--exp-id` yang sama**.
+Gejala awalnya: jumlah baris naik tanpa run yang saya mulai.
+
+### 🔴 BUG: `--only` mengisi issue dari AWAL DATASET (belum diperbaiki)
+
+**Ini yang menjawab pertanyaan "kenapa `--only 30` malah menjalankan django".**
+
+`select_batch_for_only` (`tools/run_final_sweep.py:327-391`) menyusun daftar sebagai:
+
+```python
+ordered = recorded + [c for c in candidates if c not in set(recorded)]
+n_issues = ceil(only / len(strategies))     # 30/3 = 10
+return ordered[:n_issues]
+```
+
+`recorded` = issue yang tercatat di EXP (4 saat itu), `candidates` = **awal dataset**
+(`usable[:N]`, yaitu django). Jadi `ordered[:10]` = 4 sympy + **6 django**.
+
+Terukur dengan `--dry-run`:
+
+| Perintah | Issue yang disusun |
+|---|---|
+| `--only 12` | `sympy-11400, 11870, 11897, 12171` ✅ benar |
+| `--only 30` | 4 sympy + **6 django** ❌ salah |
+| `--only 30 --issues <10 sympy>` | **10 sympy** ✅ benar |
+
+**Resep yang benar untuk melanjutkan batch 2:**
+
+```
+clean_repos.py
+run_final_sweep.py --route opencode --resume --exp-id EXP-20261022-001 \
+    --only 30 \
+    --issues sympy__sympy-11400 sympy__sympy-11870 sympy__sympy-11897 \
+             sympy__sympy-12171 sympy__sympy-12236 sympy__sympy-12419 \
+             sympy__sympy-12454 sympy__sympy-12481 sympy__sympy-13031 \
+             sympy__sympy-13043
+```
+
+**Aturan umum:** kalau `--only` > jumlah run yang sudah tercatat, **selalu** sertakan
+`--issues` eksplisit. Tanpa itu, sisa kuota diisi issue dari awal dataset — dan pada batch
+2 itu berarti **mengulang django yang sudah selesai di batch 1**.
 
 ---
 
@@ -203,6 +315,25 @@ Total **9/9 VALID (100%)**, 12,2 juta token, **$0,708**, ~2 jam. Verifikasi seam
 37. **`--only` kumulatif, bukan per-batch.** `--only 3` di batch 2 **tidak** berarti
     "3 run tambahan"; ia plafon **total** run sesi itu. Untuk 3 batch × 3 run:
     tanpa `--only` → `--only 6` → `--only 9`. `--dry-run` mencetak jumlah persisnya.
+    ⚠️ **Lihat #38**: kalau plafon melebihi run yang sudah tercatat, sisa kuota diisi
+    issue dari **awal dataset**. Sertakan `--issues` eksplisit.
+38. **`--only` yang lebih besar dari run tercatat MENGISI dari awal dataset.** Terukur
+    2026-10-23: `--resume --exp-id EXP-20261022-001 --only 30` menyusun **4 sympy + 6
+    django**, bukan 10 sympy. Sebab: `select_batch_for_only` (`run_final_sweep.py:389-391`)
+    memakai `ordered = recorded + candidates` dengan `candidates` = **awal dataset**, lalu
+    memotong `ceil(only/3)` issue. **Selalu sertakan `--issues` eksplisit** kalau `--only`
+    melebihi jumlah run yang sudah ada. Cek dengan `--dry-run` dan **baca baris
+    `--instance-ids`**, bukan hanya angka `runs`.
+39. **Jangan pernah menjalankan dua sweep pada `--exp-id` yang sama.** Terukur
+    2026-10-23: dua proses (mulai 16:57 dan 23:58) menulis EXP yang sama → `agentbench.log`
+    ditulis bersamaan → loguru rotation gagal (`PermissionError [WinError 32]` pada
+    `os.rename`). Data run tetap VALID, tapi ini kelas kegagalan yang bisa merusak lebih
+    banyak. **Gejala awal:** jumlah baris `predictions.jsonl` naik tanpa run yang kamu mulai.
+40. **Durasi run sangat ditentukan repo, bukan strategi.** Terukur: django ~11 menit/run,
+    sympy ~50 menit/run (**4–5×**). Sympy punya test suite besar; satu run `planning`
+    mencapai 107 menit. Sebelum menjadwalkan batch, **hitung ulang estimasi per repo** —
+    "30 run" bisa berarti 5 jam (django) atau 25 jam (sympy). Jangan simpulkan "macet" dari
+    jumlah baris yang tidak naik: periksa `mtime` `experiment.log` dan toolcall terakhir.
 
 ---
 
@@ -2328,7 +2459,7 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 2. **Jangan jalankan run besar tanpa izin user** (gate di atas).
 3. **Sebelum run apa pun:** `python tools/run_final_sweep.py --dry-run` — cek 200/200/200 dan semua flag.
 4. **Selalu** lewat `tools/run_with_env.py` (sweep sudah melakukannya).
-5. **Kalau terputus:** `python tools/run_final_sweep.py --resume --exp-id <EXP-id> --only <N kumulatif>` — jangan jalankan ulang dari nol. **Wajib `tools/clean_repos.py` dulu** (lihat pelajaran #33).
+5. **Kalau terputus:** `python tools/run_final_sweep.py --resume --exp-id <EXP-id> --only <N kumulatif> --issues <semua id EXP itu>` — jangan jalankan ulang dari nol. **Wajib `tools/clean_repos.py` dulu** (pelajaran #33), dan **wajib `--issues` eksplisit** kalau `--only` melebihi run tercatat (pelajaran #38).
 6. **Setelah run:** `tools/check_sweep_state.py --exp <EXP-id>` + `tools/read_actual_bill.py --compare`.
 7. **Cek cap warning** di `results/EXP-*/logs/experiment.log` — kalau ada, ada yang terpotong.
 8. **Sebelum percaya "data hilang":** verifikasi ulang hitungan file. `rglob` pernah melaporkan `files=-1` padahal ada 25.856 file (pelajaran #35).
@@ -2349,28 +2480,34 @@ Audit pertamaku salah (regex `rate.?limit` cocok dengan baris **`Rate limit dela
 
 ---
 
-**Last working state (2026-10-20):** commit `47aa819` di `22/feat/sandbox-isolation` —
-**1307 test lulus, 22 skipped**, collection **1329 test 0 error**, `--dry-run` **rc=0**
-(50 issue / 150 run). **20/50 issue SELESAI** dengan isolasi Docker: batch 1 django
-(`EXP-20261010-062`, 30/30 VALID) + batch 2 matplotlib (`EXP-20261012-005`, 30/30 VALID).
-Isolasi Docker (layer-2) **TERPASANG & TERVERIFIKASI** (21 probe escape 100% BLOCKED).
-Jalur resume kini **terbukti seamless** lintas 3 batch (`EXP-20261020-097`, 9/9 VALID).
+**Last working state (2026-10-23):** branch `22/feat/sandbox-isolation`, **1307 test lulus,
+22 skipped**, preflight **50/50 pristine**. **30/50 issue SELESAI**: batch 1 django
+(`EXP-20261021-001`) **30/30 VALID**; batch 2 sympy (`EXP-20261022-001`) **11/30 VALID,
+dihentikan manual** (~50 menit/run, proyeksi 25 jam). Isolasi Docker (layer-2)
+**TERPASANG & TERVERIFIKASI** (21 probe escape 100% BLOCKED). Jalur resume **terbukti
+seamless**. **Dua bug operasional ditemukan:** `--only` mengisi dari awal dataset (#38) dan
+dua sweep paralel merusak log rotation (#39).
 
 **Langkah berikutnya (prioritas):**
 
-0. **⏭️ RUN FINAL — route `deepseek` (DeepSeek official `deepseek-flash`):**
-   - Sweep kini default ke route **`deepseek`** (`DEFAULT_ROUTE = "deepseek"`), model resmi
-     `deepseek-flash` via `https://api.deepseek.com/v1`, dengan tool-calling aktif.
-   - **Saldo DeepSeek $1 BELUM dipakai** — provider sudah disiapkan, **belum ada panggilan
-     berbayar**. Menunggu keputusan user sebelum run final dijalankan.
-   - **Run final belum dijalankan.** Batch 3 (7/30 sympy) adalah uji pipeline, **tidak
-     di-resume**.
-   - Resep bila dijalankan: `clean_repos.py` → `preflight_repos.py` (Docker WAJIB hidup) →
-     `tools/run_final_sweep.py` (route default `deepseek`). Estimasi biaya mengacu kartu
-     resmi `deepseek-flash` (0.22/0.007/0.66 off-peak; 0.44/0.014/1.32 peak per 1M token).
-   - **CommandCode belum siap** (tidak ada API key / belum subs) — hanya disiapkan, tidak diuji.
+0. **⏭️ LANJUTKAN batch 2 (sympy) — 19 run sisa.** Wajib `--issues` eksplisit:
+   ```
+   tools/clean_repos.py
+   tools/run_final_sweep.py --route opencode --resume --exp-id EXP-20261022-001 \
+       --only 30 \
+       --issues sympy__sympy-11400 sympy__sympy-11870 sympy__sympy-11897 \
+                sympy__sympy-12171 sympy__sympy-12236 sympy__sympy-12419 \
+                sympy__sympy-12454 sympy__sympy-12481 sympy__sympy-13031 \
+                sympy__sympy-13043
+   ```
+   **Verifikasi dulu dengan `--dry-run`** dan pastikan baris `--instance-ids` hanya berisi
+   10 sympy (tanpa django). Estimasi **~16 jam**. Pertimbangkan jalan semalam.
 
-1. **Setelah semua batch selesai: evaluasi Modal** — ini yang menentukan **resolved rate** (RQ1).
+1. **Batch 3–6 setelah sympy:** scikit-learn (10), matplotlib (10), requests (6),
+   seaborn (4). Pola perintah sama: `--issues <10 id repo itu>`. **Jangan** pakai `--limit`
+   tanpa memeriksa hasil `--dry-run`.
+
+2. **Setelah semua batch selesai: evaluasi Modal** — ini yang menentukan **resolved rate** (RQ1).
    - `python tools/check_sweep_state.py --exp <EXP-id>` — setiap run hadir?
    - Evaluasi Modal → `python tools/eval_modal.py ...`
    - `python tools/read_actual_bill.py --since ... --until ... --model cbai/deepseek-v4.1-flash --compare results/<EXP-id>` — RQ3, cross-check biaya.
@@ -2378,29 +2515,26 @@ Jalur resume kini **terbukti seamless** lintas 3 batch (`EXP-20261020-097`, 9/9 
      Keduanya beda ~5× dan mengukur hal berbeda — lihat §"Koreksi penting: token".
      Jendela bill ada di `logs/sweep_started.json` → `attempts` (satu per attempt).
 
-2. **Masalah validitas review (78% → 12,5%)** — **sudah dikoreksi**, tidak perlu keputusan lagi. Angka sebenarnya: **1 dari 8 (12,5%)** penolakan yang bergantung pada file test. Lihat §"Koreksi" baris 276-304.
+3. **Masalah validitas review (78% → 12,5%)** — **sudah dikoreksi**, tidak perlu keputusan lagi. Angka sebenarnya: **1 dari 8 (12,5%)** penolakan yang bergantung pada file test. Lihat §"Koreksi" baris 276-304.
 
-3. **Ablation reviewer (opsional, untuk tesis):** `review` tanpa ronde review = `planning`. Kalau ketiga strategi seri di 50 issue, ablation ini memisahkan "review berguna" dari "review tidak berpengaruh".
+4. **Ablation reviewer (opsional, untuk tesis):** `review` tanpa ronde review = `planning`. Kalau ketiga strategi seri di 50 issue, ablation ini memisahkan "review berguna" dari "review tidak berpengaruh".
 
-4. **`11019`** sudah dijawab — **tapi jawabannya bergantung regime.** Tanpa thinking:
+5. **`11019`** sudah dijawab — **tapi jawabannya bergantung regime.** Tanpa thinking:
    **batas kapabilitas** (0 truncation, act berhenti di ~20% anggaran, patch VALID tapi
    salah semantik). Dengan thinking **ON** (yang dipakai sweep final): **resolved di
    ketiga strategi**. Jadi **jangan** laporkan sebagai "tidak bisa diselesaikan" —
    menyelesaikannya adalah **temuan RQ1**. Tidak perlu run tambahan.
 
-5. **M3 — SELESAI, dan `--only` kini KUMULATIF.** Jalankan sweep bertahap; `--only` adalah
+6. **M3 — SELESAI, dan `--only` kini KUMULATIF.** Jalankan sweep bertahap; `--only` adalah
    **plafon total run per sesi**, bukan jumlah tambahan:
    ```
-   # batch 1 (tanpa --only): 1 issue baru
-   python tools/run_final_sweep.py --route opencode --issues <iid>
-   # batch 2: total 6 run
-   python tools/run_final_sweep.py --resume --exp-id <EXP-id> --only 6
-   # batch 3: total 9 run
-   python tools/run_final_sweep.py --resume --exp-id <EXP-id> --only 9
+   # batch 1 (tanpa --only): issue baru
+   python tools/run_final_sweep.py --route opencode --issues <iid> ...
+   # batch 2: total 6 run — WAJIB --issues kalau plafon > run tercatat
+   python tools/run_final_sweep.py --resume --exp-id <EXP-id> --only 6 --issues <ids>
    ```
-   Wajib didampingi `--resume`, dan **didahului `tools/clean_repos.py`** (pelajaran #33).
-   `--limit <N naik>` masih berlaku untuk staging berbasis dataset. Lihat §"M3" +
-   §"HARDENING FLAG SWEEP" Bagian A.
+   Wajib didampingi `--resume`, **didahului `tools/clean_repos.py`** (pelajaran #33), dan
+   **`--issues` eksplisit** (pelajaran #38). Lihat §"M3" + §"HARDENING FLAG SWEEP" Bagian A.
 
-6. **⚠️ Kalau menguji flag baru: pakai `--dry-run` DULU.** Jangan jalankan pada
+7. **⚠️ Kalau menguji flag baru: pakai `--dry-run` DULU.** Jangan jalankan pada
    direktori eksperimen nyata — lihat pelajaran #25.
